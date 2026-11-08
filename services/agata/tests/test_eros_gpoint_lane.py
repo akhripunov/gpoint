@@ -13,9 +13,9 @@ import gpoint_mac_worker as worker
 
 
 ENV = {
-    "GPOINT_AGATA_WORKER_URL": "https://gpoint.example/api/agata-worker",
-    "GPOINT_AGATA_WORKER_TOKEN": "gpoint-private",
-    "GPOINT_AGATA_TENANT_ID": "81a4ba28-6de5-4b03-8332-0661ba4d46f4",
+    "GPOINT_EROS_WORKER_URL": "https://gpoint.example/api/gpoint-worker",
+    "GPOINT_EROS_WORKER_TOKEN": "gpoint-private",
+    "GPOINT_EROS_TENANT_ID": "81a4ba28-6de5-4b03-8332-0661ba4d46f4",
     "GSALES_AGATA_WORKER_URL": "https://sales.example/worker",
     "GSALES_AGATA_WORKER_TOKEN": "gsales-private",
     "GSALES_AGATA_TENANT_ID": "c4d67889-877e-4d1b-a8d8-597c479d638f",
@@ -23,16 +23,17 @@ ENV = {
 
 
 class ErosGpointLaneTests(unittest.TestCase):
-    def test_eros_chat_claim_uses_gpoint_contract_without_an_eros_lane(self):
+    def test_eros_chat_claim_uses_the_only_gpoint_worker_route(self):
         with patch.dict(os.environ, ENV, clear=True):
-            self.assertEqual(worker.TARGET_NAMES, ("GPOINT", "GSALES"))
-            self.assertNotIn("EROS", worker.LANE_SLOTS)
+            self.assertEqual(worker.TARGET_NAMES, ("GPOINT",))
             claim = {
                 "id": "eros-job-1", "leaseToken": "lease-eros", "target": "GPOINT",
-                "tenant_id": ENV["GPOINT_AGATA_TENANT_ID"], "purpose": "eros_chat_completion",
+                "tenant_id": ENV["GPOINT_EROS_TENANT_ID"], "purpose": "eros_chat_completion",
                 "request": {"messages": [{"role": "user", "content": "Привет"}], "max_tokens": 300},
             }
             worker.validate_target_claim("GPOINT", claim)
+            with self.assertRaisesRegex(worker.GatewayResponseError, "worker_target_invalid"):
+                worker.process_one("GSALES")
 
     def test_eros_chat_claim_uses_restricted_codex_command_in_gpoint_lane(self):
         command = worker.build_codex_exec_command(
@@ -89,7 +90,7 @@ class ErosGpointLaneTests(unittest.TestCase):
             self.assertIn("Character context", observed["prompt"])
             self.assertIn("Hi", observed["prompt"])
             self.assertIn("--ignore-user-config", observed["args"])
-            self.assertNotIn("GPOINT_AGATA_WORKER_TOKEN", observed["env"])
+            self.assertNotIn("GPOINT_EROS_WORKER_TOKEN", observed["env"])
             self.assertEqual(observed["stderr"], subprocess.DEVNULL)
 
     def test_eros_max_tokens_is_forwarded_as_tokens_not_character_limit(self):

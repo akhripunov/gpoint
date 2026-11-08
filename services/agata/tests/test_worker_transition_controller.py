@@ -26,12 +26,21 @@ class WorkerTransitionTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch.object(transition.subprocess, "run", side_effect=run):
+        with patch.object(transition, "eros_loaded", return_value=False), \
+             patch.object(transition.subprocess, "run", side_effect=run):
             transition._bootstrap()
 
         self.assertEqual(calls, [[
             "launchctl", "bootstrap", f"gui/{os.getuid()}", str(transition.PLIST),
         ]])
+
+    def test_legacy_bootstrap_refuses_to_start_beside_eros_worker(self):
+        with patch.object(transition, "eros_loaded", return_value=True), patch.object(
+            transition.subprocess, "run"
+        ) as run:
+            with self.assertRaisesRegex(RuntimeError, "eros_worker_already_loaded"):
+                transition._bootstrap()
+        run.assert_not_called()
 
     def test_recovery_watchdog_process_registers_ready_without_launchagent_work(self):
         with tempfile.TemporaryDirectory() as temp:

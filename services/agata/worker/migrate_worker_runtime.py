@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Controlled migration of the local AGATA Worker LaunchAgent runtime.
+"""Controlled migration of the local Eros Worker LaunchAgent runtime.
 
 The plan is read-only. Apply is fail-closed on non-main/dirty source, active
 inference, a concurrent transition, invalid credentials/configuration, or any
-failed health/restart check. VPS, database, and MAXIBOT are never contacted.
+failed health/restart check. No remote host or unrelated GPoint service is contacted.
 """
 from __future__ import annotations
 
 import argparse
-import base64
 import errno
 import fcntl
 import hashlib
@@ -26,22 +25,21 @@ import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import NamedTuple
-from uuid import UUID
 
-LABEL = "one.gpoint.agata-codex-worker"
+OLD_LABEL = "one.gpoint.agata-codex-worker"
+LABEL = "one.gpoint.eros-worker"
 HOME = Path.home()
-ROOT = HOME / "Library/Application Support/GPoint/agata-codex-worker"
-LEGACY = ROOT
+OLD_ROOT = HOME / "Library/Application Support/GPoint/agata-codex-worker"
+ROOT = HOME / "Library/Application Support/GPoint/gpoint-eros-worker"
+LEGACY = OLD_ROOT
 CONFIG = HOME / ".config/gpoint/agata-worker.env"
 PLIST = HOME / "Library/LaunchAgents" / f"{LABEL}.plist"
+OLD_PLIST = HOME / "Library/LaunchAgents" / f"{OLD_LABEL}.plist"
 TRANSITION_LOCK = HOME / ".config/gpoint/agata-worker-pool-transition.lock"
 RELEASE_LOCK = HOME / ".config/gpoint/release-production.lock"
 CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex")
 WORKER_DIR = Path(__file__).resolve().parent
-ASSETS = ("gpoint_mac_worker.py", "agata_worker_pool.py", "lab_queue.py",
-          "lab_fixture_manifest.json", "lab_promptfoo_compat_manifest.json", "lab_v2_dev_manifest.json",
-          "run_codex_worker.sh", "requirements.txt")
+ASSETS = ("gpoint_mac_worker.py", "run_codex_worker.sh", "requirements.txt")
 QUEUE_SNAPSHOT_MAX_AGE_SECONDS = 30
 QUEUE_SNAPSHOT_FUTURE_SKEW_SECONDS = 5
 QUEUE_SNAPSHOT_MAX_RETRIES = 2
@@ -49,22 +47,12 @@ QUEUE_SNAPSHOT_REQUEST_TIMEOUT_SECONDS = 25
 QUEUE_SNAPSHOT_PREFLIGHT_DEADLINE_SECONDS = 90
 QUEUE_SNAPSHOT_RETRY_DELAYS_SECONDS = (0.25, 0.5)
 LAUNCHAGENT_UNLOAD_TIMEOUT_SECONDS = 20
-QUEUE_SNAPSHOT_SCRIPT = WORKER_DIR.parents[2] / "scripts/agata-worker-queue-snapshot.py"
-VPS_RUNNER = HOME / ".local/bin/gpoint-vps-runner"
-LIVE_QUEUE_SOURCE = "agata-live-queue-snapshot-v1"
-QUEUE_IMAGE_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-QUEUE_SOURCE_RE = re.compile(
-    r"^agata-live-queue-snapshot-v1:(gpoint|gsales):release=([0-9a-f]{40})"
-    r":api=(sha256:[0-9a-f]{64}):core=(sha256:[0-9a-f]{64})"
-    r":tenant=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
-)
 SAFE_DIAGNOSTIC_ERROR_CODES = frozenset({
     "worker_claim_invalid", "worker_claim_target_mismatch", "worker_config_permissions_invalid",
     "worker_gateway_auth_rejected", "worker_gateway_http_404", "worker_gateway_network_error",
     "worker_gateway_or_auth_unconfigured", "worker_gateway_response_invalid", "worker_gateway_transport_error",
-    "worker_gateway_url_invalid", "worker_pool_config_key_invalid", "worker_target_invalid",
-    "worker_target_unconfigured", "worker_tenant_binding_invalid", "worker_tenants_must_be_distinct",
-    "worker_targets_must_be_distinct",
+    "worker_gateway_url_invalid", "worker_target_invalid",
+    "worker_target_unconfigured", "worker_tenant_binding_invalid",
 })
 
 
@@ -80,7 +68,7 @@ class PreflightFailure(RuntimeError):
         super().__init__(legacy_error or reason_code)
         self.reason_code = reason_code
         self.stage = stage
-        self.lane = lane if lane in {"GPOINT", "GSALES", "LAB"} else None
+        self.lane = lane if lane == "GPOINT" else None
         self.safe_fields = {
             key: value for key, value in (safe_fields or {}).items()
             if key in self.SAFE_FIELDS and isinstance(value, int) and not isinstance(value, bool)
@@ -115,7 +103,7 @@ def _safe_queue_attempts(attempts: list[dict]) -> list[dict]:
     """Keep only fixed, non-sensitive fields from snapshot attempt receipts."""
     result = []
     for item in attempts:
-        if not isinstance(item, dict) or item.get("lane") not in {"GPOINT", "GSALES"}:
+        if not isinstance(item, dict) or item.get("lane") != "GPOINT":
             continue
         entry = {
             "lane": item["lane"],
@@ -242,13 +230,32 @@ def git(*args: str) -> str:
                           capture_output=True, text=True, timeout=15).stdout.strip()
 
 
-def launchctl_loaded() -> bool:
-    result = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"],
+def launchctl_loaded(label: str = LABEL) -> bool:
+    result = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
                             capture_output=True, text=True, timeout=8, check=False)
     if result.returncode != 0:
         return False
     state = re.search(r"^\s*state = ([^\s]+)\s*$", result.stdout or "", re.MULTILINE)
     return bool(state and state.group(1).lower() in {"running", "waiting"})
+
+
+def _active_worker_identity(*, require_loaded: bool = True) -> tuple[str, Path, Path]:
+    """Return the one loaded service identity; refuse ambiguous dual agents."""
+    old_loaded = launchctl_loaded(OLD_LABEL)
+    eros_loaded = launchctl_loaded(LABEL)
+    if old_loaded and eros_loaded:
+        raise RuntimeError("multiple_worker_launchagents_loaded")
+    if old_loaded:
+        return OLD_LABEL, OLD_ROOT, OLD_PLIST
+    if eros_loaded:
+        return LABEL, ROOT, PLIST
+    if require_loaded:
+        raise RuntimeError("worker_launchagent_not_loaded")
+    old_present = OLD_PLIST.is_file() and not OLD_PLIST.is_symlink()
+    eros_present = PLIST.is_file() and not PLIST.is_symlink()
+    if old_present == eros_present:
+        raise RuntimeError("worker_launchagent_identity_ambiguous")
+    return (OLD_LABEL, OLD_ROOT, OLD_PLIST) if old_present else (LABEL, ROOT, PLIST)
 
 
 def _release_lock_busy() -> bool:
@@ -275,9 +282,9 @@ def safe_worker_status(path: Path) -> dict:
     result = {key: value.get(key) for key in fields if key in value}
     targets = value.get("targets")
     if isinstance(targets, dict):
-        result["targets"] = {name: {key: lane.get(key) for key in fields if key in lane}
-                              for name, lane in targets.items()
-                              if name in {"GPOINT", "GSALES", "LAB"} and isinstance(lane, dict)}
+        point = targets.get("GPOINT")
+        result["targets"] = ({"GPOINT": {key: point.get(key) for key in fields if key in point}}
+                              if isinstance(point, dict) else {})
     return result
 
 
@@ -322,12 +329,13 @@ def _running_inference_pids() -> list[int]:
     found = []
     for line in result.stdout.splitlines():
         lower = line.lower()
-        if "gpoint_mac_worker.py execute-slot" in lower:
+        if "gpoint_mac_worker.py" in lower and any(token in lower for token in (" execute", " infer")):
             try:
                 found.append(int(line.strip().split(None, 1)[0]))
             except (ValueError, IndexError):
                 continue
-    for record_path in (LEGACY / "inference-process.json", ROOT / "state/inference-process.json"):
+    for record_path in (OLD_ROOT / "inference-process.json", OLD_ROOT / "state/inference-process.json",
+                        ROOT / "state/inference-process.json"):
         try:
             record = json.loads(record_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -346,8 +354,10 @@ def _running_inference_pids() -> list[int]:
     return found
 
 
-def _launchagent_pid() -> tuple[int, str]:
-    result = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"], check=True,
+def _launchagent_pid(label: str | None = None) -> tuple[int, str]:
+    if label is None:
+        label, _root, _plist = _active_worker_identity()
+    result = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"], check=True,
                             capture_output=True, text=True, timeout=8)
     match = re.search(r"^\s*pid = ([0-9]+)\s*$", result.stdout, re.MULTILINE)
     if not match:
@@ -355,28 +365,31 @@ def _launchagent_pid() -> tuple[int, str]:
     pid = int(match.group(1))
     command = subprocess.run(["ps", "-p", str(pid), "-o", "command="], check=True,
                              capture_output=True, text=True, timeout=8).stdout.strip()
+    expected_roots = (OLD_ROOT, ROOT / "runtime") if label == OLD_LABEL else (ROOT / "runtime",)
     if "gpoint_mac_worker.py watch" not in command or not any(
-            str(root) in command for root in (LEGACY, ROOT / "runtime")):
+            str(root) in command for root in expected_roots):
         raise RuntimeError("launchagent_process_identity_invalid")
     return pid, command
 
 
-def _wait_launchagent_unloaded(previous_pid: int | None, *,
+def _wait_launchagent_unloaded(previous_pid: int | None, *, label: str | None = None,
                                deadline: float = LAUNCHAGENT_UNLOAD_TIMEOUT_SECONDS) -> bool:
     """Wait for launchd to remove the label and for observed worker PIDs to exit."""
-    service_id = f"gui/{os.getuid()}/{LABEL}"
+    if label is None:
+        label, _root, _plist = _active_worker_identity(require_loaded=False)
+    service_id = f"gui/{os.getuid()}/{label}"
     observed_pids = {previous_pid} if isinstance(previous_pid, int) and previous_pid > 1 else set()
     until = time.monotonic() + deadline
     while True:
         result, command_error = _run_readonly_command(["launchctl", "print", service_id], 5)
         output = result.stdout or ""
         error = result.stderr or ""
-        if result.returncode == 0 and f"{LABEL} = {{" in output:
+        if result.returncode == 0 and f"{label} = {{" in output:
             pid_match = re.search(r"^\s*pid = ([0-9]+)\s*$", output, re.MULTILINE)
             if pid_match:
                 observed_pids.add(int(pid_match.group(1)))
             service_absent = False
-        elif result.returncode != 0 and f'Could not find service "{LABEL}"' in error:
+        elif result.returncode != 0 and f'Could not find service "{label}"' in error:
             service_absent = True
         else:
             raise RuntimeError("worker_launchagent_unload_state_ambiguous") from None
@@ -404,10 +417,74 @@ def _wait_launchagent_unloaded(previous_pid: int | None, *,
         time.sleep(min(0.25, remaining))
 
 
-def _pause_idle_launchagent() -> int | None:
-    if not launchctl_loaded():
+def _bootout_and_wait(label: str) -> None:
+    """Remove one LaunchAgent and prove its label and worker process are gone."""
+    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
+                   capture_output=True, text=True, timeout=20, check=False)
+    _wait_launchagent_unloaded(None, label=label)
+
+
+def _restore_single_launchagent(source_label: str, source_plist: Path,
+                                original_plist: bytes) -> dict:
+    """Fail closed: unload Eros before restoring and starting exactly one source agent."""
+    try:
+        _bootout_and_wait(LABEL)
+    except Exception:
+        # If Eros cannot be unloaded while the source is also loaded, stop the
+        # source as the final safety action. A failed recovery may leave zero
+        # workers or one worker, but must not knowingly leave both running.
+        if source_label != LABEL and launchctl_loaded(source_label):
+            try:
+                _bootout_and_wait(source_label)
+            except Exception:
+                pass
+        raise
+    if launchctl_loaded(LABEL):
+        raise RuntimeError("rollback_candidate_launchagent_still_loaded")
+    if source_label != LABEL and launchctl_loaded(source_label):
+        _bootout_and_wait(source_label)
+    if launchctl_loaded(LABEL) or (source_label != LABEL and launchctl_loaded(source_label)):
+        raise RuntimeError("rollback_multiple_launchagents_loaded")
+    source_plist.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = source_plist.with_name(f".{source_plist.name}.{os.getpid()}.restore")
+    temporary.write_bytes(original_plist)
+    temporary.chmod(0o600)
+    os.replace(temporary, source_plist)
+    try:
+        subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(source_plist)],
+                       check=True, timeout=20, capture_output=True, text=True)
+        if not launchctl_loaded(source_label):
+            raise RuntimeError("rollback_launchagent_not_loaded")
+        if source_label != LABEL and launchctl_loaded(LABEL):
+            raise RuntimeError("rollback_multiple_launchagents_loaded")
+        return {"restored_label": source_label, "launchagent_loaded": True,
+                "candidate_launchagent_loaded": launchctl_loaded(LABEL)}
+    except Exception:
+        # A failed bootstrap may have partially registered the source. Stop it
+        # before returning so recovery never leaves both labels active.
+        try:
+            _bootout_and_wait(source_label)
+        except Exception:
+            pass
+        raise
+
+
+def _bootstrap_candidate_only(source_label: str, candidate_plist: Path) -> None:
+    """Register Eros only after the source label is confirmed absent."""
+    if launchctl_loaded(source_label) or launchctl_loaded(LABEL):
+        raise RuntimeError("multiple_worker_launchagents_loaded")
+    subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(candidate_plist)],
+                   check=True, timeout=20)
+    if not launchctl_loaded(LABEL) or (source_label != LABEL and launchctl_loaded(source_label)):
+        raise RuntimeError("worker_launchagent_identity_ambiguous")
+
+
+def _pause_idle_launchagent(label: str | None = None) -> int | None:
+    if label is None:
+        label, _root, _plist = _active_worker_identity(require_loaded=False)
+    if not launchctl_loaded(label):
         return None
-    pid, _command = _launchagent_pid()
+    pid, _command = _launchagent_pid(label)
     os.kill(pid, signal.SIGSTOP)
     time.sleep(0.2)
     try:
@@ -422,22 +499,46 @@ def _pause_idle_launchagent() -> int | None:
     return pid
 
 
+def _pause_worker_or_clear_marker(source_label: str, marker: Path) -> int | None:
+    """Do not leave a stale maintenance stop if pausing fails before bootout."""
+    try:
+        return _pause_idle_launchagent(source_label)
+    except Exception:
+        marker.unlink(missing_ok=True)
+        raise
+
+
 def inventory() -> dict:
-    if LEGACY.is_symlink() or (ROOT.exists() and ROOT.is_symlink()):
+    if OLD_ROOT.is_symlink() or (ROOT.exists() and ROOT.is_symlink()):
         raise RuntimeError("worker_runtime_root_symlink_invalid")
     if not CONFIG.is_file() or CONFIG.is_symlink() or CONFIG.stat().st_uid != os.getuid() or CONFIG.stat().st_mode & 0o077:
         raise RuntimeError("worker_config_missing_or_permissions_invalid")
     if not CODEX.is_file():
         raise RuntimeError("codex_cli_missing")
-    legacy_status = safe_worker_status(LEGACY / "worker-status.json")
+    active_label, active_root, active_plist = _active_worker_identity(require_loaded=False)
+    legacy_status = safe_worker_status(OLD_ROOT / "status/worker-status.json")
     new_status = safe_worker_status(ROOT / "status/worker-status.json")
     pids = _running_inference_pids()
-    lab_running = sum(len(list((queue / "running").glob("*.json")))
-                      for queue in (LEGACY / "lab-queue", ROOT / "queues/lab")
-                      if (queue / "running").is_dir())
-    if PLIST.is_symlink() or (PLIST.exists() and PLIST.stat().st_uid != os.getuid()):
+    legacy_pool_path = OLD_ROOT / "status/pool-status.json"
+    legacy_pool_active = False
+    if active_label == OLD_LABEL and legacy_pool_path.exists():
+        if legacy_pool_path.is_symlink() or not legacy_pool_path.is_file():
+            raise RuntimeError("legacy_worker_status_invalid")
+        try:
+            legacy_pool = json.loads(legacy_pool_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("legacy_worker_status_invalid") from exc
+        slots = legacy_pool.get("slots") if isinstance(legacy_pool, dict) else None
+        if not isinstance(slots, dict) or not slots:
+            raise RuntimeError("legacy_worker_status_invalid")
+        legacy_pool_active = any(
+            not isinstance(slot, dict) or slot.get("state") != "IDLE" or slot.get("job_id") is not None
+            for slot in slots.values()
+        )
+    if any(path.is_symlink() or (path.exists() and path.stat().st_uid != os.getuid())
+           for path in (OLD_PLIST, PLIST)):
         raise RuntimeError("launchagent_plist_owner_invalid")
-    old_plist = PLIST.read_bytes() if PLIST.is_file() else b""
+    old_plist = active_plist.read_bytes() if active_plist.is_file() else b""
     old_args = []
     if old_plist:
         try:
@@ -450,17 +551,21 @@ def inventory() -> dict:
         targets = status.get("targets", {})
         return any(isinstance(value, dict) and (value.get("current_job_present") or value.get("state") == "running")
                    for value in targets.values()) if isinstance(targets, dict) else False
-    active = bool(pids or lab_running or active_status(legacy_status) or active_status(new_status))
+    active = bool(pids or legacy_pool_active or active_status(legacy_status) or active_status(new_status))
     return {
-        "label": LABEL,
-        "launchagent_loaded": launchctl_loaded(),
+        "label": active_label,
+        "active_runtime_root": str(active_root),
+        "active_plist": str(active_plist),
+        "launchagent_loaded": launchctl_loaded(active_label),
+        "old_launchagent_loaded": launchctl_loaded(OLD_LABEL),
+        "eros_launchagent_loaded": launchctl_loaded(LABEL),
         "production_release_lock_busy": _release_lock_busy(),
         "launchagent_program_arguments": old_args,
-        "legacy_runtime_present": LEGACY.exists(),
+        "legacy_runtime_present": OLD_ROOT.exists(),
         "legacy_worker_status": legacy_status,
         "new_worker_status": new_status,
+        "legacy_pool_active": legacy_pool_active,
         "active_inference_pids": pids,
-        "lab_running_jobs": lab_running,
         "active_inference": active,
         "external_config_present_mode_0600": True,
         "codex_cli_present": True,
@@ -500,61 +605,26 @@ def read_only_plan() -> dict:
             "runtime_root": str(ROOT), "legacy_root": str(LEGACY), "mutation_performed": False}
 
 
-def validate_fresh_production_queue_snapshots(status: dict, *, now: datetime | None = None) -> dict:
-    """Validate fresh, content-free queue snapshots without requiring idleness."""
+def validate_fresh_production_queue_snapshots(
+    status: dict, *, lanes: tuple[str, ...] = ("GPOINT",), now: datetime | None = None,
+) -> dict:
+    """Validate fresh GPOINT queue and local single-worker idle evidence."""
     current = now or datetime.now(UTC)
     if current.tzinfo is None or not isinstance(status, dict):
         raise PreflightFailure("queue_snapshot_invalid", stage="queue_validation",
                                legacy_error="production_queue_snapshot_invalid")
-    pool = status.get("pool")
-    busy = pool.get("busy") if isinstance(pool, dict) else None
-    pool_authority = status.get("pool_snapshot_authority", "worker_pool_status_v1")
-    if pool_authority == "worker_pool_status_v1":
-        pool_state_valid = isinstance(pool, dict) and pool.get("state") == "HEALTHY"
-    elif pool_authority == "mac_worker_live_idle_inventory_v1":
-        inventory = status.get("pool_snapshot_inventory")
-        slots = status.get("slots")
-        slot_count = len(slots) if isinstance(slots, dict) else None
-        pool_state_valid = (
-            isinstance(pool, dict) and pool.get("state") == "IDLE_CONFIRMED"
-            and isinstance(inventory, dict)
-            and inventory == {
-                "configured_concurrency": 1,
-                "slot_count": slot_count,
-                "all_slots_idle": True,
-                "current_job_present": False,
-                "launch_agent_loaded": True,
-                "active_inference": False,
-            }
-            and isinstance(total := pool.get("total"), int) and not isinstance(total, bool)
-            and total == slot_count and slot_count in {1, 3, 4}
-            and isinstance(status.get("configured_concurrency"), int)
-            and not isinstance(status.get("configured_concurrency"), bool)
-            and status.get("configured_concurrency") == 1
-            and status.get("current_job_present") is False
-            and status.get("launch_agent_loaded") is True
-            and isinstance(slots, dict)
-            and set(slots) in (
-                {"slot-01"},
-                {"slot-01", "slot-02", "slot-03"},
-                {"slot-01", "slot-02", "slot-03", "slot-04"},
-            )
-            and all(isinstance(slot, dict) and slot.get("state") == "IDLE"
-                    and slot.get("job_id") is None for slot in slots.values())
-        )
-    else:
-        raise PreflightFailure("pool_evidence_invalid", stage="local_pool_validation",
+    if not isinstance(lanes, tuple) or any(lane != "GPOINT" for lane in lanes):
+        raise PreflightFailure("queue_lane_scope_invalid", stage="queue_validation",
                                legacy_error="production_queue_snapshot_invalid")
-    total = pool.get("total") if isinstance(pool, dict) else None
-    if (not pool_state_valid or status.get("launch_agent_loaded") is not True
-            or isinstance(busy, bool) or not isinstance(busy, int) or busy < 0):
-        raise PreflightFailure("local_pool_not_idle", stage="local_pool_validation",
+    if (status.get("current_job_present") is not False or status.get("active_inference") is not False
+            or status.get("launch_agent_loaded") is not True):
+        raise PreflightFailure("launchagent_not_loaded", stage="local_worker_validation",
                                legacy_error="production_queue_snapshot_invalid")
-    if total is not None and (isinstance(total, bool) or not isinstance(total, int) or total < busy):
-        raise PreflightFailure("local_pool_status_invalid", stage="local_pool_validation",
-                               legacy_error="production_queue_snapshot_invalid")
+    busy_workers = 0
+    worker_authority = "gpoint_eros_single_worker_status_v1"
     try:
-        pool_captured = datetime.fromisoformat(status.get("pool_snapshot_at", "").replace("Z", "+00:00"))
+        captured_value = status.get("last_poll_at")
+        pool_captured = datetime.fromisoformat(captured_value.replace("Z", "+00:00"))
     except (AttributeError, TypeError, ValueError) as exc:
         raise PreflightFailure("pool_snapshot_invalid", stage="queue_validation",
                                legacy_error="production_queue_snapshot_invalid") from exc
@@ -566,43 +636,37 @@ def validate_fresh_production_queue_snapshots(status: dict, *, now: datetime | N
         raise PreflightFailure("queue_snapshot_stale", stage="queue_validation",
                                safe_fields={"snapshot_age_seconds": int(pool_age)},
                                legacy_error="production_queue_snapshot_stale")
-    evidence = _validate_production_queue_lanes(status.get("lanes"), current=current)
-    return {"checked_at": current.isoformat(), "pool_snapshot_at": pool_captured.isoformat(),
-            "pool_authority": pool_authority, "busy_slots": busy, "lanes": evidence}
+    evidence = _validate_production_queue_lanes(status.get("lanes"), current=current, selected_lanes=lanes)
+    return {"checked_at": current.isoformat(), "worker_snapshot_at": pool_captured.isoformat(),
+            "worker_authority": worker_authority, "active_workers": busy_workers, "lanes": evidence}
 
 
-def _validate_production_queue_lanes(lanes: dict, *, current: datetime) -> dict:
-    """Validate real lane evidence at one instant, independently of local pool state."""
-    if not isinstance(lanes, dict):
+def _validate_production_queue_lanes(
+    lanes: dict, *, current: datetime, selected_lanes: tuple[str, ...] = ("GPOINT",),
+) -> dict:
+    """Validate authoritative GPOINT queue evidence, independently of local worker state."""
+    if not isinstance(lanes, dict) or set(lanes) != {"GPOINT"}:
         raise PreflightFailure("worker_status_schema_invalid", stage="queue_validation",
                                legacy_error="production_queue_snapshot_invalid")
+    if (not selected_lanes or len(set(selected_lanes)) != len(selected_lanes)
+            or any(lane != "GPOINT" for lane in selected_lanes)):
+        raise PreflightFailure("queue_lane_scope_invalid", stage="queue_validation",
+                               legacy_error="production_queue_snapshot_invalid")
     evidence = {}
-    for lane in ("GPOINT", "GSALES"):
+    for lane in selected_lanes:
         value = lanes.get(lane)
         if not isinstance(value, dict):
             raise PreflightFailure("worker_status_schema_invalid", stage="queue_validation", lane=lane,
                                    legacy_error="production_queue_snapshot_invalid")
-        stopped_gsales = (
-            lane == "GSALES"
-            and value.get("health") == "INTENTIONALLY_STOPPED"
-            and value.get("queue_snapshot_authority") == "stopped_runtime_ephemeral_readonly_v1"
-        )
-        if value.get("health") != "HEALTHY" and not stopped_gsales:
+        if value.get("health") != "HEALTHY":
             raise PreflightFailure("lane_health_invalid", stage="lane_health_validation", lane=lane,
                                    legacy_error="production_queue_snapshot_invalid")
         if value.get("queue_snapshot_state") != "VERIFIED":
             raise PreflightFailure("authoritative_queue_snapshot_unavailable", stage="queue_validation",
                                    lane=lane, legacy_error="production_queue_snapshot_invalid")
-        api_source = f"agata-worker-queue-status-v1:{lane.lower()}"
-        live_source = f"{LIVE_QUEUE_SOURCE}:{lane.lower()}"
+        eros_source = "gpoint-eros-worker-queue-status-v1:gpoint"
         source = value.get("queue_snapshot_source_id")
-        if source == live_source:
-            try:
-                _validate_live_queue_snapshot_provenance(value, lane)
-            except RuntimeError as exc:
-                raise PreflightFailure("queue_snapshot_provenance_invalid", stage="queue_validation",
-                                       lane=lane, legacy_error="production_queue_snapshot_invalid") from exc
-        elif source != api_source or value.get("queue_snapshot_provenance") is not None:
+        if source != eros_source or value.get("queue_snapshot_provenance") is not None:
             raise PreflightFailure("queue_snapshot_provenance_invalid", stage="queue_validation",
                                    lane=lane, legacy_error="production_queue_snapshot_invalid")
         counts = (value.get("pending_inference_jobs"), value.get("running_inference_jobs"))
@@ -631,232 +695,19 @@ def _validate_production_queue_lanes(lanes: dict, *, current: datetime) -> dict:
     return evidence
 
 
-def require_fresh_empty_production_queues(status: dict, *, now: datetime | None = None) -> dict:
-    """Require both current production queues and all worker slots to be idle."""
-    evidence = validate_fresh_production_queue_snapshots(status, now=now)
-    if evidence["busy_slots"] != 0:
-        raise PreflightFailure("local_pool_not_idle", stage="queue_validation",
-                               legacy_error="worker_slots_busy")
+def require_fresh_empty_production_queues(
+    status: dict, *, lanes: tuple[str, ...] = ("GPOINT",), now: datetime | None = None,
+) -> dict:
+    """Require a fresh empty GPOINT queue and no active local worker operation."""
+    evidence = validate_fresh_production_queue_snapshots(status, lanes=lanes, now=now)
+    if evidence["active_workers"] != 0:
+        raise PreflightFailure("local_worker_not_idle", stage="queue_validation",
+                               legacy_error="worker_operation_active")
     for lane, item in evidence["lanes"].items():
         if item["pending_jobs"] or item["running_jobs"]:
             raise PreflightFailure("production_queue_not_empty", stage="queue_validation", lane=lane,
                                    legacy_error="production_queue_not_empty")
     return evidence
-
-
-def _stopped_gsales_proof(status: dict) -> dict:
-    """Project the verified stopped-runtime collector result into a safe proof."""
-    lanes = status.get("lanes") if isinstance(status, dict) else None
-    lane = lanes.get("GSALES") if isinstance(lanes, dict) else None
-    if not isinstance(lane, dict):
-        raise RuntimeError("stopped_gsales_proof_invalid")
-    try:
-        provenance = _validate_live_queue_snapshot_provenance(lane, "GSALES")
-    except RuntimeError as exc:
-        raise RuntimeError("stopped_gsales_proof_invalid") from exc
-    counts = (lane.get("pending_inference_jobs"), lane.get("running_inference_jobs"))
-    try:
-        captured = datetime.fromisoformat(lane.get("queue_snapshot_at", "").replace("Z", "+00:00"))
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise RuntimeError("stopped_gsales_proof_invalid") from exc
-    age = (datetime.now(UTC) - captured).total_seconds() if captured.tzinfo else None
-    if (lane.get("health") != "INTENTIONALLY_STOPPED"
-            or lane.get("queue_snapshot_authority") != "stopped_runtime_ephemeral_readonly_v1"
-            or lane.get("queue_snapshot_state") != "VERIFIED"
-            or age is None or age > QUEUE_SNAPSHOT_MAX_AGE_SECONDS
-            or age < -QUEUE_SNAPSHOT_FUTURE_SKEW_SECONDS
-            or any(isinstance(count, bool) or not isinstance(count, int) for count in counts)
-            or counts != (0, 0)):
-        raise RuntimeError("stopped_gsales_proof_invalid")
-    return {
-        "state": "INTENTIONALLY_STOPPED",
-        "source_id": provenance["source_id"],
-        "stopped_runtime_fingerprint": provenance["stopped_runtime_fingerprint"],
-        "release_sha": provenance["release_sha"],
-        "api_image_id": provenance["api_image_id"],
-        "core_image_id": provenance["core_image_id"],
-        "tenant_id": provenance["tenant_id"],
-        "pending_jobs": counts[0],
-        "running_jobs": counts[1],
-    }
-
-
-def _read_stopped_gsales_proof(expected: dict) -> dict:
-    """Obtain a new, source-authenticated proof for the deliberately stopped lane."""
-    tenant_id = expected.get("tenant_id") if isinstance(expected, dict) else None
-    if not isinstance(tenant_id, str):
-        raise RuntimeError("stopped_gsales_proof_invalid")
-    snapshot = _read_live_runtime_queue_snapshot("GSALES", tenant_id)
-    return _stopped_gsales_proof({"lanes": {"GSALES": snapshot}})
-
-
-def _assert_stopped_gsales_proof_matches(expected: dict) -> dict:
-    actual = _read_stopped_gsales_proof(expected)
-    if actual != expected:
-        raise RuntimeError("stopped_gsales_fingerprint_changed")
-    return actual
-
-
-def _validate_live_queue_snapshot_provenance(value: dict, lane: str) -> dict:
-    provenance = value.get("queue_snapshot_provenance")
-    if not isinstance(provenance, dict):
-        raise PreflightFailure("queue_snapshot_provenance_invalid", stage="queue_provenance", lane=lane,
-                               legacy_error="production_queue_snapshot_invalid")
-    match = QUEUE_SOURCE_RE.fullmatch(provenance.get("source_id", ""))
-    tenant_id = provenance.get("tenant_id")
-    visible_tenant_rows = provenance.get("visible_tenant_rows")
-    try:
-        tenant = UUID(tenant_id)
-    except (ValueError, TypeError, AttributeError) as exc:
-        raise PreflightFailure("queue_snapshot_provenance_invalid", stage="queue_provenance", lane=lane,
-                               legacy_error="production_queue_snapshot_invalid") from exc
-    if (match is None or match.group(1) != lane.lower()
-            or provenance.get("snapshot_version") != "agata_live_queue_snapshot_v1"
-            or provenance.get("lane") != lane
-            or provenance.get("source_system") != lane.lower()
-            or not re.fullmatch(r"[0-9a-f]{40}", provenance.get("release_sha", ""))
-            or provenance.get("release_sha") != match.group(2)
-            or provenance.get("api_build_sha") != match.group(2)
-            or provenance.get("core_build_sha") != match.group(2)
-            or not QUEUE_IMAGE_RE.fullmatch(provenance.get("api_image_id", ""))
-            or provenance.get("api_image_id") != match.group(3)
-            or not QUEUE_IMAGE_RE.fullmatch(provenance.get("core_image_id", ""))
-            or provenance.get("core_image_id") != match.group(4)
-            or tenant.int == 0 or str(tenant) != tenant_id or tenant_id != match.group(5)
-            or provenance.get("tenant_identity_verified") is not True
-            or provenance.get("transaction_read_only") is not True
-            or provenance.get("same_login") is not True
-            or provenance.get("role_superuser") is not False
-            or provenance.get("role_bypassrls") is not False
-            or isinstance(visible_tenant_rows, bool) or visible_tenant_rows != 1
-            or not isinstance(provenance.get("database_name"), str)
-            or not provenance.get("database_name")
-            or value.get("queue_snapshot_runtime_release_sha") != match.group(2)
-            or value.get("queue_snapshot_tenant_id") != tenant_id):
-        raise PreflightFailure("queue_snapshot_provenance_invalid", stage="queue_provenance", lane=lane,
-                               legacy_error="production_queue_snapshot_invalid")
-    if value.get("queue_snapshot_authority") == "stopped_runtime_ephemeral_readonly_v1":
-        if (lane != "GSALES" or value.get("health") != "INTENTIONALLY_STOPPED"
-                or provenance.get("collector_mode") != "stopped_runtime_ephemeral_v1"
-                or provenance.get("stopped_runtime_state") != "INTENTIONALLY_STOPPED"
-                or not re.fullmatch(r"[0-9a-f]{64}", provenance.get("stopped_runtime_fingerprint", ""))):
-            raise PreflightFailure("queue_snapshot_provenance_invalid", stage="queue_provenance", lane=lane,
-                                   legacy_error="production_queue_snapshot_invalid")
-    elif value.get("queue_snapshot_authority") != "live_runtime_readonly_snapshot_v1":
-        raise PreflightFailure("queue_snapshot_provenance_invalid", stage="queue_provenance", lane=lane,
-                               legacy_error="production_queue_snapshot_invalid")
-    return provenance
-
-
-def _validate_binding_migration_snapshot(tenant_id: str, snapshot: dict, *,
-                                         now: datetime | None = None) -> str:
-    """Require a fresh, empty, source-authenticated GPOINT snapshot for this tenant."""
-    current = now or datetime.now(UTC)
-    try:
-        provenance = _validate_live_queue_snapshot_provenance(snapshot, "GPOINT")
-        captured = datetime.fromisoformat(snapshot["queue_snapshot_at"].replace("Z", "+00:00"))
-    except (KeyError, AttributeError, TypeError, ValueError, PreflightFailure) as exc:
-        raise RuntimeError("worker_tenant_binding_invalid") from exc
-    if captured.tzinfo is None:
-        raise RuntimeError("worker_tenant_binding_invalid")
-    age = (current - captured).total_seconds()
-    counts = (snapshot.get("pending_inference_jobs"), snapshot.get("running_inference_jobs"))
-    if age > QUEUE_SNAPSHOT_MAX_AGE_SECONDS or age < -QUEUE_SNAPSHOT_FUTURE_SKEW_SECONDS:
-        raise RuntimeError("queue_snapshot_stale")
-    if (snapshot.get("health") != "HEALTHY"
-            or snapshot.get("queue_snapshot_state") != "VERIFIED"
-            or snapshot.get("queue_snapshot_authority") != "live_runtime_readonly_snapshot_v1"
-            or provenance["tenant_id"] != tenant_id
-            or snapshot.get("queue_snapshot_tenant_id") != tenant_id
-            or snapshot.get("queue_snapshot_source_id") != f"{LIVE_QUEUE_SOURCE}:gpoint"
-            or any(isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in counts)
-            or counts != (0, 0)):
-        raise RuntimeError("worker_tenant_binding_invalid")
-    return (f"gpoint-vps:{provenance['release_sha']}:api={provenance['api_image_id']}"
-            f":agata={provenance['core_image_id']}")
-
-
-def normalize_live_runtime_queue_snapshot(snapshot: dict, lane: str, expected_tenant_id: str) -> dict:
-    """Bind a source-authenticated DB snapshot to one configured worker lane."""
-    if lane not in {"GPOINT", "GSALES"} or not isinstance(snapshot, dict):
-        raise RuntimeError("production_queue_snapshot_invalid")
-    try:
-        captured = datetime.fromisoformat(snapshot.get("snapshot_at", "").replace("Z", "+00:00"))
-        tenant = UUID(snapshot.get("tenant_id", ""))
-    except (ValueError, TypeError, AttributeError) as exc:
-        raise RuntimeError("production_queue_snapshot_invalid") from exc
-    if captured.tzinfo is None or tenant.int == 0 or str(tenant) != snapshot.get("tenant_id"):
-        raise RuntimeError("production_queue_snapshot_invalid")
-    if snapshot.get("tenant_id") != expected_tenant_id:
-        raise RuntimeError("production_queue_snapshot_invalid")
-    counts = (snapshot.get("pending_inference_jobs"), snapshot.get("running_inference_jobs"))
-    if any(isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in counts):
-        raise RuntimeError("production_queue_snapshot_invalid")
-    provenance = {
-        key: snapshot.get(key) for key in (
-            "snapshot_version", "source_id", "lane", "source_system", "release_sha",
-            "api_build_sha", "core_build_sha", "api_image_id", "core_image_id",
-            "tenant_id", "tenant_identity_verified", "transaction_read_only", "same_login",
-            "role_superuser", "role_bypassrls", "visible_tenant_rows", "database_name",
-        )
-    }
-    result = {
-        "health": "HEALTHY",
-        "queue_snapshot_state": "VERIFIED",
-        "queue_snapshot_source_id": f"{LIVE_QUEUE_SOURCE}:{lane.lower()}",
-        "queue_snapshot_at": captured.isoformat(),
-        "pending_inference_jobs": counts[0],
-        "running_inference_jobs": counts[1],
-        "queue_snapshot_authority": "live_runtime_readonly_snapshot_v1",
-        "queue_snapshot_runtime_release_sha": snapshot.get("release_sha"),
-        "queue_snapshot_tenant_id": snapshot.get("tenant_id"),
-        "queue_snapshot_provenance": provenance,
-    }
-    collector_mode = snapshot.get("collector_mode")
-    if collector_mode is not None:
-        fingerprint = snapshot.get("stopped_runtime_fingerprint")
-        if (lane != "GSALES" or collector_mode != "stopped_runtime_ephemeral_v1"
-                or snapshot.get("stopped_runtime_state") != "INTENTIONALLY_STOPPED"
-                or not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint)):
-            raise RuntimeError("production_queue_snapshot_invalid")
-        result.update({
-            "health": "INTENTIONALLY_STOPPED",
-            "queue_snapshot_authority": "stopped_runtime_ephemeral_readonly_v1",
-            "queue_snapshot_provenance": provenance | {
-                "collector_mode": collector_mode,
-                "stopped_runtime_state": "INTENTIONALLY_STOPPED",
-                "stopped_runtime_fingerprint": fingerprint,
-            },
-        })
-    else:
-        result["queue_snapshot_authority"] = "live_runtime_readonly_snapshot_v1"
-    _validate_live_queue_snapshot_provenance(result, lane)
-    return result
-
-
-def _configured_tenant_id(lane: str, manifest: dict) -> str:
-    key = f"{lane}_AGATA_TENANT_ID"
-    if not CONFIG.is_file() or CONFIG.is_symlink() or CONFIG.stat().st_uid != os.getuid() or CONFIG.stat().st_mode & 0o077:
-        raise RuntimeError("worker_config_missing_or_permissions_invalid")
-    values = {}
-    for line in CONFIG.read_text(encoding="utf-8").splitlines():
-        item = line.strip()
-        if item and not item.startswith("#") and "=" in item:
-            name, value = item.split("=", 1)
-            values[name.strip()] = value.strip().strip('"').strip("'")
-    tenant_id = values.get(key, "")
-    if lane == "GPOINT" and not tenant_id:
-        binding = _validated_current_tenant_binding()
-        if binding is None:
-            binding = _validated_legacy_tenant_binding(manifest)
-        tenant_id = binding.get("tenant_id", "") if binding else ""
-    try:
-        tenant = UUID(tenant_id)
-    except (ValueError, TypeError, AttributeError) as exc:
-        raise RuntimeError("worker_tenant_binding_invalid") from exc
-    if tenant.int == 0 or str(tenant) != tenant_id:
-        raise RuntimeError("worker_tenant_binding_invalid")
-    return tenant_id
 
 
 def _read_owned_regular_file(path: Path, *, expected_mode: int | None = None,
@@ -895,551 +746,6 @@ def _read_owned_regular_file(path: Path, *, expected_mode: int | None = None,
         os.close(fd)
 
 
-def _validated_current_tenant_binding() -> dict | None:
-    """Validate the durable GPOINT pin against the installed bundle evidence."""
-    path = ROOT / "config/tenant-bindings.json"
-    if not path.exists() and not path.is_symlink():
-        return None
-    try:
-        if path.is_symlink() or not path.is_file():
-            raise ValueError
-        binding_bytes, file_stat = _read_owned_regular_file(path, forbidden_mode_bits=0o077)
-        value = json.loads(binding_bytes)
-        runtime_link = ROOT / "runtime/current"
-        if not runtime_link.is_symlink():
-            raise ValueError
-        runtime_root_path = ROOT / "runtime"
-        runtime_root_stat = runtime_root_path.lstat()
-        if (stat.S_ISLNK(runtime_root_stat.st_mode) or not stat.S_ISDIR(runtime_root_stat.st_mode)
-                or runtime_root_stat.st_uid != os.getuid()
-                or stat.S_IMODE(runtime_root_stat.st_mode) & 0o022):
-            raise ValueError
-        runtime_root = runtime_root_path.resolve(strict=True)
-        link_stat = runtime_link.lstat()
-        pointer = os.readlink(runtime_link)
-        runtime = runtime_link.resolve(strict=True)
-        worker = runtime / "gpoint_mac_worker.py"
-        manifest = _read_installed_runtime_manifest(runtime)
-        source_id = value.get("source_id", "")
-        tenant_id = value.get("tenant_id", "")
-        captured = datetime.fromisoformat(str(value.get("snapshot_at", "")).replace("Z", "+00:00"))
-        tenant = UUID(tenant_id)
-        if (file_stat.st_uid != os.getuid() or file_stat.st_mode & 0o077
-                or set(value) != {"version", "candidate_sha", "worker_sha256", "tenant_id", "source_id", "snapshot_at"}
-                or value.get("version") != 1
-                or not re.fullmatch(r"[0-9a-f]{40}", value.get("candidate_sha", ""))
-                or value.get("candidate_sha") != manifest["source_sha"]
-                or not re.fullmatch(r"[0-9a-f]{64}", value.get("worker_sha256", ""))
-                or not worker.is_file() or worker.is_symlink()
-                or value.get("worker_sha256") != manifest["assets"]["gpoint_mac_worker.py"]
-                or value.get("worker_sha256") != sha256(worker)
-                or runtime.parent != runtime_root or pointer != runtime.name
-                or not re.fullmatch(r"gpoint-vps:[0-9a-f]{40}:api=sha256:[0-9a-f]{64}:agata=sha256:[0-9a-f]{64}", source_id)
-                or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", tenant_id)
-                or tenant.int == 0 or str(tenant) != tenant_id or captured.tzinfo is None):
-            raise ValueError
-        link_after = runtime_link.lstat()
-        root_after = runtime_root_path.lstat()
-        if ((link_stat.st_dev, link_stat.st_ino) != (link_after.st_dev, link_after.st_ino)
-                or not stat.S_ISLNK(link_after.st_mode) or os.readlink(runtime_link) != pointer
-                or runtime_link.resolve(strict=True) != runtime
-                or (runtime_root_stat.st_dev, runtime_root_stat.st_ino) != (root_after.st_dev, root_after.st_ino)):
-            raise ValueError
-    except (OSError, ValueError, TypeError, AttributeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("worker_tenant_binding_invalid") from exc
-    return value
-
-
-def _read_installed_runtime_manifest(runtime: Path) -> dict:
-    """Read the protected manifest and verify every installed source asset."""
-    path = runtime / "bundle-manifest.json"
-    try:
-        manifest_bytes, _ = _read_owned_regular_file(path, expected_mode=0o600)
-        manifest = json.loads(manifest_bytes)
-        if not isinstance(manifest, dict):
-            raise ValueError
-
-        # Normal releases use the source SHA as their runtime directory name.
-        # Product-worker migration releases have a separate immutable runtime ID
-        # because they also bind Python environments; source_sha still identifies
-        # the exact worker asset source and must not be compared to that directory.
-        base_keys = {"source_sha", "bundle_sha256", "assets"}
-        migration_keys = base_keys | {
-            "asset_source_root", "candidate_kind", "python_runtime",
-            "rollback_python_runtime", "runtime_release_id",
-        }
-        source_sha = manifest.get("source_sha")
-        assets = manifest.get("assets")
-        bundle_sha = manifest.get("bundle_sha256")
-        if (not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", source_sha)
-                or not isinstance(bundle_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", bundle_sha)
-                or not isinstance(assets, dict) or set(assets) != set(ASSETS)
-                or any(not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
-                       for digest in assets.values())):
-            raise ValueError
-
-        if set(manifest) == base_keys:
-            if source_sha != runtime.name:
-                raise ValueError
-            _verify_runtime_assets(runtime, manifest)
-            actual_bundle = hashlib.sha256(json.dumps(
-                assets, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-            if actual_bundle != bundle_sha:
-                raise ValueError
-            return manifest
-
-        if (set(manifest) != migration_keys
-                or manifest.get("candidate_kind") != "INSTALLED_PRODUCT_WORKER_MIGRATION"
-                or not isinstance(manifest.get("python_runtime"), dict)
-                or not isinstance(manifest.get("rollback_python_runtime"), dict)):
-            raise ValueError
-
-        runtime_root_path = runtime.parent
-        runtime_root_stat = runtime_root_path.lstat()
-        if (stat.S_ISLNK(runtime_root_stat.st_mode) or not stat.S_ISDIR(runtime_root_stat.st_mode)
-                or runtime_root_stat.st_uid != os.getuid()
-                or stat.S_IMODE(runtime_root_stat.st_mode) & 0o022):
-            raise ValueError
-        runtime_root = runtime_root_path.resolve(strict=True)
-        runtime_stat = runtime.lstat()
-        runtime_id = manifest.get("runtime_release_id")
-        source_root = runtime_root / source_sha
-        if (not isinstance(runtime_id, str) or not re.fullmatch(r"[0-9a-f]{40}", runtime_id)
-                or runtime_id != runtime.name or runtime != runtime_root / runtime_id
-                or stat.S_ISLNK(runtime_stat.st_mode) or not stat.S_ISDIR(runtime_stat.st_mode)
-                or runtime_stat.st_uid != os.getuid() or stat.S_IMODE(runtime_stat.st_mode) & 0o022
-                or manifest.get("asset_source_root") != str(source_root)
-                or source_root == runtime or source_root.is_symlink() or not source_root.is_dir()
-                or source_root.stat().st_uid != os.getuid()
-                or stat.S_IMODE(source_root.stat().st_mode) & 0o022):
-            raise ValueError
-
-        _verify_runtime_assets(runtime, manifest)
-        _verify_runtime_assets(source_root, manifest)
-        source_manifest_path = source_root / "bundle-manifest.json"
-        source_manifest_bytes, _ = _read_owned_regular_file(source_manifest_path, expected_mode=0o600)
-        source_manifest = json.loads(source_manifest_bytes)
-        if (not isinstance(source_manifest, dict)
-                or set(source_manifest) != base_keys
-                or source_manifest.get("source_sha") != source_sha
-                or source_manifest.get("assets") != assets
-                or source_manifest.get("bundle_sha256") != bundle_sha):
-            raise ValueError
-
-        actual_bundle = hashlib.sha256(json.dumps(
-            assets, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        runtime_identity = hashlib.sha256(json.dumps({
-            "source_sha": source_sha,
-            "bundle_sha256": actual_bundle,
-            "python_runtime": manifest["python_runtime"],
-            "rollback_python_runtime": manifest["rollback_python_runtime"],
-        }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:40]
-        if actual_bundle != bundle_sha or runtime_identity != runtime_id:
-            raise ValueError
-        return manifest
-    except (OSError, ValueError, TypeError, AttributeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("worker_tenant_binding_invalid") from exc
-
-
-def _remote_stopped_gsales_queue_snapshot_command(script: str) -> str:
-    """Use the live database with an explicitly stopped-runtime observer; never claim GSales health."""
-    encoded_script = base64.b64encode(script.encode()).decode("ascii")
-    return """set -eu
-SNAPSHOT_EXPECTED_RELEASE_SHA="$release_sha" SNAPSHOT_EXPECTED_TENANT_ID="$tenant" python3 - <<'PY'
-import base64, hashlib, json, os, pathlib, re, signal, subprocess, tempfile, uuid
-
-names = ("compose-gsales-api-1", "compose-gsales-agata-api-1", "compose-gsales-agata-memory-worker-1")
-services = ("gsales-api", "gsales-agata-api", "gsales-agata-memory-worker")
-release = os.environ["SNAPSHOT_EXPECTED_RELEASE_SHA"]
-tenant = os.environ["SNAPSHOT_EXPECTED_TENANT_ID"]
-script = base64.b64decode("__SNAPSHOT_SCRIPT_BASE64__")
-required = ("AGATA_DATABASE_URL", "AGATA_TENANT_ID", "AGATA_INTERNAL_API_TOKEN",
-    "AGATA_MESSAGE_AEAD_KEY",
-    "AGATA_REQUEST_FINGERPRINT_HMAC_KEY", "AGATA_RETRIEVAL_QUERY_HMAC_KEY",
-    "AGATA_SHADOW_CANDIDATE_HMAC_KEY", "AGATA_RESPONSE_FINGERPRINT_HMAC_KEY",
-    "AGATA_SOURCE_SYSTEM", "AGATA_SALES_DRAFTS_ENABLED")
-def run(args, *, input=None, timeout=30):
-    result = subprocess.run(args, input=input, capture_output=True, timeout=timeout, check=False)
-    if result.returncode:
-        raise RuntimeError("authoritative_queue_snapshot_unavailable")
-    return result.stdout
-def inspect(name):
-    rows = json.loads(run(["docker", "inspect", name]))
-    if len(rows) != 1:
-        raise RuntimeError("stopped_gsales_identity_invalid")
-    return rows[0]
-def inspect_image(image):
-    rows = json.loads(run(["docker", "image", "inspect", image]))
-    if len(rows) != 1 or rows[0].get("Id") != image:
-        raise RuntimeError("stopped_gsales_image_invalid")
-    return rows[0].get("Config", {}).get("Labels", {}).get("org.opencontainers.image.revision", "")
-def capture():
-    rows, details = [], []
-    for name, service in zip(names, services):
-        row = inspect(name)
-        labels = row.get("Config", {}).get("Labels", {})
-        image = row.get("Image", "")
-        container_id = row.get("Id", "")
-        config_image = row.get("Config", {}).get("Image", "")
-        restart_policy = row.get("HostConfig", {}).get("RestartPolicy")
-        revision = inspect_image(image)
-        state = row.get("State", {})
-        if (row.get("Name", "").lstrip("/") != name
-                or labels.get("com.docker.compose.project") != "compose"
-                or labels.get("com.docker.compose.service") != service):
-            raise RuntimeError("stopped_gsales_identity_invalid")
-        if (not re.fullmatch(r"[0-9a-f]{64}", container_id)
-                or not re.fullmatch(r"sha256:[0-9a-f]{64}", image)
-                or not isinstance(config_image, str) or not config_image
-                or not isinstance(restart_policy, dict)
-                or restart_policy.get("Name") != "unless-stopped"
-                or restart_policy.get("MaximumRetryCount") != 0
-                or isinstance(row.get("RestartCount"), bool)
-                or not isinstance(row.get("RestartCount"), int)
-                or row.get("RestartCount") < 0
-                or revision != release):
-            raise RuntimeError("stopped_gsales_release_identity_invalid")
-        rows.append({"name": name, "id": row.get("Id"), "image": image,
-            "config_image": config_image, "revision": revision,
-            "status": state.get("Status"), "running": state.get("Running"),
-            "health": state.get("Health", {}).get("Status"),
-            "restart_policy": row.get("HostConfig", {}).get("RestartPolicy"),
-            "restart_count": row.get("RestartCount"), "started_at": state.get("StartedAt"),
-            "finished_at": state.get("FinishedAt")})
-        details.append(row)
-    fingerprint = hashlib.sha256(json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return rows, details, fingerprint
-if len(release) != 40 or any(c not in "0123456789abcdef" for c in release):
-    raise SystemExit("stopped_gsales_release_identity_invalid")
-def production_identity():
-    values = {}
-    for line in pathlib.Path("/opt/gpoint/env/production.env").read_text().splitlines():
-        if not line or line.lstrip().startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        if key in {"RELEASE_SHA", "GSALES_AGATA_TENANT_ID"}:
-            values[key] = value
-    return values.get("RELEASE_SHA"), values.get("GSALES_AGATA_TENANT_ID")
-if production_identity() != (release, tenant):
-    raise SystemExit("stopped_gsales_release_identity_invalid")
-rows, details, before = capture()
-running = [r["running"] is True and r["status"] == "running" for r in rows]
-stopped = [r["running"] is False and r["status"] in ("exited", "created") for r in rows]
-healthy = [details[i].get("State", {}).get("Health", {}).get("Status") == "healthy"
-    for i in range(len(details))]
-if all(stopped):
-    values = {}
-    for item in details[1].get("Config", {}).get("Env", []):
-        if isinstance(item, str) and "=" in item:
-            key, value = item.split("=", 1)
-            if key in required:
-                if key in values:
-                    raise SystemExit("stopped_gsales_runtime_config_invalid")
-                values[key] = value
-    if (set(required) - set(values) or values.get("AGATA_TENANT_ID") != tenant
-            or values.get("AGATA_SOURCE_SYSTEM") != "gsales"
-            or values.get("AGATA_SALES_DRAFTS_ENABLED", "").lower() != "true"):
-        raise SystemExit("stopped_gsales_runtime_config_invalid")
-    values.update({"SNAPSHOT_LANE": "GSALES", "SNAPSHOT_EXPECTED_TENANT_ID": tenant,
-        "SNAPSHOT_RELEASE_SHA": release, "SNAPSHOT_API_BUILD_SHA": release,
-        "SNAPSHOT_CORE_BUILD_SHA": release, "SNAPSHOT_API_IMAGE_ID": rows[0]["image"],
-        "SNAPSHOT_CORE_IMAGE_ID": rows[1]["image"], "AGATA_LLM_PROVIDER": "disabled",
-        "AGATA_LLM_API_KEY": "", "AGATA_EMBEDDING_API_KEY": "",
-        "AGATA_SALES_PRODUCTION_MODE": "false", "AGATA_CODEX_LOCAL_ENABLED": "false"})
-    if any(chr(10) in value or chr(13) in value for value in values.values()):
-        raise SystemExit("stopped_gsales_runtime_config_invalid")
-    directory = pathlib.Path(tempfile.mkdtemp(prefix="gpoint-gsales-snapshot-", dir="/run"))
-    os.chmod(directory, 0o700)
-    env_file = directory / "runtime.env"
-    try:
-        fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as stream:
-            for key in sorted(values):
-                stream.write(key + "=" + values[key] + chr(10))
-        client_name = "gpoint-gsales-queue-snapshot-" + uuid.uuid4().hex[:12]
-        def interrupted(_signum, _frame):
-            raise SystemExit("authoritative_queue_snapshot_interrupted")
-        signal.signal(signal.SIGTERM, interrupted)
-        signal.signal(signal.SIGINT, interrupted)
-        output = run(["docker", "run", "-i", "--rm", "--name", client_name, "--pull=never", "--network", "shared_internal",
-            "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m", "--cap-drop", "ALL",
-            "--security-opt", "no-new-privileges", "--pids-limit", "64", "--memory", "256m",
-            "--cpus", "0.5", "--env-file", str(env_file), "--entrypoint", "python",
-            rows[1]["image"], "-"], input=script, timeout=20)
-    finally:
-        try:
-            if "client_name" in locals():
-                try:
-                    subprocess.run(["docker", "rm", "-f", client_name], capture_output=True,
-                        timeout=4, check=False)
-                except (OSError, subprocess.SubprocessError):
-                    pass
-                remaining = subprocess.run(["docker", "ps", "-a", "--filter",
-                    "name=^/" + client_name + "$", "--format", "{{.Names}}"],
-                    capture_output=True, timeout=4, check=False)
-                if remaining.returncode != 0 or remaining.stdout.strip():
-                    raise RuntimeError("stopped_gsales_client_cleanup_failed")
-        finally:
-            env_file.unlink(missing_ok=True)
-            directory.rmdir()
-    _, _, after = capture()
-    if before != after or production_identity() != (release, tenant):
-        raise SystemExit("STOPPED_GSALES_FINGERPRINT_MISMATCH")
-    result = json.loads(output)
-    if not isinstance(result, dict) or "preflight_error" in result:
-        raise SystemExit("queue_snapshot_trust_boundary_invalid")
-    result.update({"collector_mode": "stopped_runtime_ephemeral_v1",
-        "stopped_runtime_state": "INTENTIONALLY_STOPPED", "stopped_runtime_fingerprint": before})
-    print(json.dumps(result, separators=(",", ":")))
-elif all(running) and all(healthy):
-    output = run(["docker", "exec", "-i", "-w", "/srv/agata",
-        "-e", "SNAPSHOT_LANE=GSALES", "-e", "SNAPSHOT_EXPECTED_TENANT_ID=" + tenant,
-        "-e", "SNAPSHOT_RELEASE_SHA=" + release, "-e", "SNAPSHOT_API_BUILD_SHA=" + release,
-        "-e", "SNAPSHOT_CORE_BUILD_SHA=" + release, "-e", "SNAPSHOT_API_IMAGE_ID=" + rows[0]["image"],
-        "-e", "SNAPSHOT_CORE_IMAGE_ID=" + rows[1]["image"], names[1], "python", "-"], input=script)
-    print(output.decode())
-else:
-    raise SystemExit("stopped_gsales_mixed_state")
-PY
-""".replace("__SNAPSHOT_SCRIPT_BASE64__", encoded_script)
-
-def _remote_queue_snapshot_command(lane: str) -> str:
-    targets = {
-        "GPOINT": ("compose-api-1", "compose-agata-api-1", "AGATA_TENANT_ID"),
-        "GSALES": ("compose-gsales-api-1", "compose-gsales-agata-api-1", "GSALES_AGATA_TENANT_ID"),
-    }
-    if lane not in targets or not QUEUE_SNAPSHOT_SCRIPT.is_file():
-        raise RuntimeError("authoritative_queue_snapshot_unavailable")
-    api, core, tenant_key = targets[lane]
-    script = base64.b64encode(QUEUE_SNAPSHOT_SCRIPT.read_bytes()).decode("ascii")
-    if lane == "GSALES":
-        header = f'''set -eu
-env_file=/opt/gpoint/env/production.env
-release_sha=$(sed -n 's/^RELEASE_SHA=//p' "$env_file" | head -1)
-tenant=$(sed -n 's/^{tenant_key}=//p' "$env_file" | head -1)
-'''
-        return header + _remote_stopped_gsales_queue_snapshot_command(
-            base64.b64decode(script).decode("utf-8"),
-        )
-    return f"""set -eu
-env_file=/opt/gpoint/env/production.env
-release_sha=$(sed -n 's/^RELEASE_SHA=//p' "$env_file" | head -1)
-case "$release_sha" in *[!0-9a-f]*|'') exit 41 ;; esac
-test "${{#release_sha}}" -eq 40
-tenant=$(sed -n 's/^{tenant_key}=//p' "$env_file" | head -1)
-api={api}
-core={core}
-for container in "$api" "$core"; do
-  running=$(docker inspect "$container" --format '{{{{.State.Running}}}}')
-  health=$(docker inspect "$container" --format '{{{{if .State.Health}}}}{{{{.State.Health.Status}}}}{{{{else}}}}none{{{{end}}}}')
-  image=$(docker inspect "$container" --format '{{{{.Image}}}}')
-  revision=$(docker image inspect "$image" --format '{{{{index .Config.Labels "org.opencontainers.image.revision"}}}}')
-  test "$running" = true && test "$health" = healthy && test "$revision" = "$release_sha"
-done
-api_image=$(docker inspect "$api" --format '{{{{.Image}}}}')
-core_image=$(docker inspect "$core" --format '{{{{.Image}}}}')
-api_sha=$(docker image inspect "$api_image" --format '{{{{index .Config.Labels "org.opencontainers.image.revision"}}}}')
-core_sha=$(docker image inspect "$core_image" --format '{{{{index .Config.Labels "org.opencontainers.image.revision"}}}}')
-printf '%s' '{script}' | base64 -d | docker exec -i -w /srv/agata \\
-  -e SNAPSHOT_LANE={lane} \\
-  -e SNAPSHOT_EXPECTED_TENANT_ID="$tenant" \\
-  -e SNAPSHOT_RELEASE_SHA="$release_sha" \\
-  -e SNAPSHOT_API_BUILD_SHA="$api_sha" \\
-  -e SNAPSHOT_CORE_BUILD_SHA="$core_sha" \\
-  -e SNAPSHOT_API_IMAGE_ID="$api_image" \\
-  -e SNAPSHOT_CORE_IMAGE_ID="$core_image" \\
-  "$core" python -"""
-
-
-def _read_live_runtime_queue_snapshot_once(lane: str, expected_tenant_id: str, *, timeout_seconds: int) -> dict:
-    if not VPS_RUNNER.is_file() or not os.access(VPS_RUNNER, os.X_OK):
-        raise PreflightFailure("authoritative_vps_runner_unavailable", stage="authoritative_vps_snapshot",
-                               lane=lane, legacy_error="authoritative_queue_snapshot_runner_unavailable",
-                               error_category="runner", exit_class="local_preflight")
-    env = dict(os.environ)
-    env["REMOTE_CMD"] = _remote_queue_snapshot_command(lane)
-    env["GPOINT_REMOTE_COMMAND_TIMEOUT_SECONDS"] = str(max(1, min(25, timeout_seconds)))
-    try:
-        attempt_directory = tempfile.TemporaryDirectory(prefix="agata-queue-preflight-")
-    except OSError as exc:
-        raise PreflightFailure("authoritative_vps_diagnostic_channel_unavailable",
-                               stage="authoritative_vps_snapshot", lane=lane,
-                               error_category="runner", exit_class="local_preflight") from exc
-    with attempt_directory as attempt_dir:
-        attempt_status = Path(attempt_dir) / "transport-status"
-        env["GPOINT_REMOTE_ATTEMPT_STATUS_FILE"] = str(attempt_status)
-        try:
-            result = subprocess.run([str(VPS_RUNNER)], capture_output=True, text=True,
-                                    timeout=timeout_seconds, check=False, env=env)
-        except subprocess.TimeoutExpired as exc:
-            marker = _runner_attempt_status(attempt_status)
-            transient_reason = _proven_pre_exec_transient_reason(marker, exc.stderr)
-            if transient_reason:
-                raise PreflightFailure(transient_reason, stage="authoritative_vps_snapshot",
-                                       lane=lane, safe_fields={"timeout_seconds": timeout_seconds},
-                                       legacy_error="authoritative_queue_snapshot_unavailable",
-                                       error_category="transport", exit_class="transient_transport") from exc
-            raise PreflightFailure("authoritative_vps_runner_deadline_exceeded",
-                                   stage="authoritative_vps_snapshot", lane=lane,
-                                   safe_fields={"timeout_seconds": timeout_seconds},
-                                   legacy_error="authoritative_queue_snapshot_unavailable",
-                                   error_category="runner", exit_class="unknown") from exc
-        except OSError as exc:
-            raise PreflightFailure("authoritative_vps_runner_launch_failed", stage="authoritative_vps_snapshot",
-                                   lane=lane, legacy_error="authoritative_queue_snapshot_unavailable",
-                                   error_category="runner", exit_class="local_preflight") from exc
-        except subprocess.SubprocessError as exc:
-            raise PreflightFailure("authoritative_vps_runner_execution_failed", stage="authoritative_vps_snapshot",
-                                   lane=lane, legacy_error="authoritative_queue_snapshot_unavailable",
-                                   error_category="runner", exit_class="local_preflight") from exc
-        marker = _runner_attempt_status(attempt_status)
-    transient_reason = _proven_pre_exec_transient_reason(marker, result.stderr)
-    if transient_reason:
-        raise PreflightFailure(transient_reason, stage="authoritative_vps_snapshot",
-                               lane=lane, safe_fields={"runner_exit_code": result.returncode},
-                               legacy_error="authoritative_queue_snapshot_failed",
-                               error_category="transport", exit_class="transient_transport")
-    lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
-    snapshot = None
-    if lines:
-        try:
-            snapshot = json.loads(lines[-1])
-        except (TypeError, ValueError):
-            snapshot = None
-    if isinstance(snapshot, dict) and snapshot.get("preflight_error"):
-        code = snapshot.get("preflight_error")
-        remote_reasons = {
-            "runtime_lane_identity_mismatch": "remote_tenant_or_lane_identity_mismatch",
-            "runtime_release_identity_invalid": "remote_release_or_image_identity_mismatch",
-            "queue_snapshot_trust_boundary_invalid": "remote_read_only_db_snapshot_contract_failed",
-            "readonly_snapshot_blocked": "remote_read_only_snapshot_failed",
-        }
-        reason = remote_reasons.get(code, "remote_read_only_snapshot_failed")
-        raise PreflightFailure(reason, stage="remote_snapshot", lane=lane,
-                               safe_fields={"runner_exit_code": result.returncode},
-                               error_category="identity" if "identity" in reason else "provenance",
-                               exit_class="identity_provenance")
-    if result.returncode != 0:
-        error_text = f"{result.stderr or ''}\n{result.stdout or ''}".lower()
-        if result.returncode == 124:
-            reason = "authoritative_vps_runner_deadline_exceeded"
-            category, exit_class = "runner", "unknown"
-        elif result.returncode == 78:
-            reason = "vps_runner_local_configuration_invalid"
-            category, exit_class = "runner", "local_preflight"
-        elif "permission denied" in error_text or "authentication failed" in error_text:
-            reason = "ssh_authentication_failed"
-            category, exit_class = "transport", "permanent_transport"
-        elif "host key verification failed" in error_text or "remote host identification has changed" in error_text:
-            reason = "ssh_host_identity_failed"
-            category, exit_class = "identity", "identity_provenance"
-        elif any(marker in error_text for marker in ("connect timed out", "connection timed out", "operation timed out")):
-            reason = "ssh_transport_timeout_unconfirmed"
-            category, exit_class = "transport", "unknown"
-        elif any(marker in error_text for marker in (
-                "connection reset", "connection closed", "connection lost", "broken pipe")):
-            reason = "ssh_transport_interrupted_unconfirmed"
-            category, exit_class = "transport", "unknown"
-        elif any(marker in error_text for marker in (
-                "could not resolve hostname", "network is unreachable", "no route to host", "connection refused")):
-            reason = "ssh_transport_unavailable"
-            category, exit_class = "transport", "permanent_transport"
-        elif any(marker in error_text for marker in (
-                "banner exchange", "kex_exchange_identification", "ssh_exchange_identification")):
-            reason = "ssh_handshake_failed"
-            category, exit_class = "transport", "permanent_transport"
-        else:
-            reason = "authoritative_vps_runner_nonzero_exit"
-            category, exit_class = "runner", "unknown"
-        raise PreflightFailure(reason, stage="authoritative_vps_snapshot", lane=lane,
-                               safe_fields={"runner_exit_code": result.returncode},
-                               legacy_error="authoritative_queue_snapshot_failed",
-                               error_category=category, exit_class=exit_class)
-    if not lines or not isinstance(snapshot, dict):
-        raise PreflightFailure("authoritative_vps_snapshot_invalid_json", stage="remote_snapshot", lane=lane,
-                               legacy_error="authoritative_queue_snapshot_invalid",
-                               error_category="provenance", exit_class="identity_provenance")
-    if not isinstance(snapshot, dict):
-        raise PreflightFailure("authoritative_vps_snapshot_invalid_schema", stage="remote_snapshot", lane=lane,
-                               legacy_error="authoritative_queue_snapshot_invalid")
-    try:
-        return normalize_live_runtime_queue_snapshot(snapshot, lane, expected_tenant_id)
-    except PreflightFailure:
-        raise
-    except RuntimeError as exc:
-        reason = "queue_snapshot_identity_mismatch" if str(exc) == "production_queue_snapshot_invalid" else "queue_snapshot_invalid"
-        raise PreflightFailure(reason, stage="queue_provenance", lane=lane,
-                               legacy_error="authoritative_queue_snapshot_invalid",
-                               error_category="provenance", exit_class="identity_provenance") from exc
-
-
-def _read_live_runtime_queue_snapshot(lane: str, expected_tenant_id: str, *,
-                                      retry_budget: QueueSnapshotRetryBudget | None = None) -> dict:
-    budget = retry_budget or QueueSnapshotRetryBudget()
-    while True:
-        attempt_started_at = datetime.now(UTC).isoformat()
-        try:
-            timeout_seconds = budget.request_timeout_seconds()
-        except PreflightFailure as exc:
-            exc.attempts = list(budget.attempts)
-            raise
-        try:
-            snapshot = _read_live_runtime_queue_snapshot_once(
-                lane, expected_tenant_id, timeout_seconds=timeout_seconds,
-            )
-        except PreflightFailure as exc:
-            exc.attempt_started_at = attempt_started_at
-            retryable = exc.exit_class == "transient_transport"
-            if not retryable:
-                budget.record(lane, "BLOCKED_FAILURE", exc, started_at=attempt_started_at)
-                exc.attempts = list(budget.attempts)
-                raise
-            if budget.retries_remaining <= 0:
-                budget.record(lane, "BLOCKED_FAILURE", exc, started_at=attempt_started_at)
-                exc.attempts = list(budget.attempts)
-                raise
-            budget.retries_remaining -= 1
-            budget.record(lane, "RETRYABLE_FAILURE", exc, started_at=attempt_started_at)
-            delay_index = QUEUE_SNAPSHOT_MAX_RETRIES - budget.retries_remaining - 1
-            delay = QUEUE_SNAPSHOT_RETRY_DELAYS_SECONDS[min(delay_index, len(QUEUE_SNAPSHOT_RETRY_DELAYS_SECONDS) - 1)]
-            remaining = budget.deadline_monotonic - time.monotonic()
-            if remaining <= 0:
-                deadline_failure = PreflightFailure(
-                    "authoritative_snapshot_deadline_exceeded", stage="queue_snapshot", lane=lane,
-                    error_category="transport", exit_class="transient_transport",
-                    attempts=list(budget.attempts),
-                )
-                raise deadline_failure from exc
-            time.sleep(min(delay, remaining))
-            continue
-        budget.record(lane, "RESPONSE", started_at=attempt_started_at)
-        return snapshot
-
-
-def _live_snapshot_fallback_allowed(lane_status: dict) -> bool:
-    """Allow independent VPS queue evidence only for verified legacy transport cases."""
-    if not isinstance(lane_status, dict):
-        return False
-    health = lane_status.get("health")
-    health_error = lane_status.get("health_error_code")
-    queue_error = lane_status.get("queue_snapshot_error_code")
-    if lane_status.get("queue_snapshot_state") == "VERIFIED":
-        return health == "HEALTHY" and health_error is None and queue_error is None
-    # This code is emitted by the installed Worker only for HTTP/DNS/connect/read
-    # transport exceptions. Authentication and response/data failures have distinct
-    # codes and must never be converted into permission to use the fallback.
-    if not isinstance(queue_error, str) or queue_error not in {
-            "worker_gateway_http_404", "worker_gateway_network_error"}:
-        return False
-    if health == "HEALTHY":
-        return health_error is None
-    if health != "DEGRADED":
-        return False
-    if queue_error == "worker_gateway_http_404":
-        return health_error == "worker_gateway_network_error"
-    return health_error == "worker_gateway_network_error"
-
-
 def _safe_lane_error_fields(lane_status: dict) -> dict[str, str]:
     """Expose only fixed Worker error codes in local preflight receipts."""
     if not isinstance(lane_status, dict):
@@ -1452,120 +758,21 @@ def _safe_lane_error_fields(lane_status: dict) -> dict[str, str]:
     return safe
 
 
-def _refresh_local_pool_evidence(status: dict, *, revalidate_stopped_gsales: bool = False) -> None:
-    """Record local idle inventory separately from health and production queue state."""
-    pool = status.get("pool")
-    slots = status.get("slots")
-    lanes = status.get("lanes")
-    concurrency = status.get("configured_concurrency")
-    total = pool.get("total") if isinstance(pool, dict) else None
-    slot_ids = set(slots) if isinstance(slots, dict) else set()
-    canonical_slot_sets = (
-        {"slot-01"},
-        {"slot-01", "slot-02", "slot-03"},
-        {"slot-01", "slot-02", "slot-03", "slot-04"},
-    )
-    if not isinstance(pool, dict) or isinstance(pool.get("busy"), bool) or not isinstance(pool.get("busy"), int):
-        raise PreflightFailure("local_pool_status_invalid", stage="local_pool_validation",
-                               legacy_error="production_queue_status_unavailable")
-    if pool.get("busy") != 0 or status.get("current_job_present") is not False:
-        raise PreflightFailure("local_pool_not_idle", stage="local_pool_validation",
-                               legacy_error="production_queue_status_unavailable")
-    if isinstance(concurrency, bool) or concurrency != 1 or isinstance(total, bool) or total not in {1, 3, 4}:
-        raise PreflightFailure("local_pool_configuration_invalid", stage="local_pool_validation",
-                               legacy_error="production_queue_status_unavailable")
-    if not isinstance(slots, dict) or slot_ids not in canonical_slot_sets or total != len(slots):
-        raise PreflightFailure("local_slot_inventory_invalid", stage="local_pool_validation",
-                               legacy_error="production_queue_status_unavailable")
-    for slot in slots.values():
-        if not isinstance(slot, dict):
-            raise PreflightFailure("local_slot_inventory_invalid", stage="local_pool_validation",
-                                   lane=None, legacy_error="production_queue_status_unavailable")
-        if slot.get("state") != "IDLE" or slot.get("job_id") is not None:
-            slot_lane = slot.get("lane")
-            lane = slot_lane if slot_lane in {"GPOINT", "GSALES", "LAB", "EROS"} else None
-            raise PreflightFailure("local_slot_not_idle", stage="local_pool_validation", lane=lane,
-                                   legacy_error="production_queue_status_unavailable")
-    if not isinstance(lanes, dict):
-        raise PreflightFailure("worker_status_schema_invalid", stage="local_pool_validation",
-                               legacy_error="production_queue_status_unavailable")
-    if status.get("launch_agent_loaded") is not True:
-        raise PreflightFailure("launchagent_not_loaded", stage="local_pool_validation",
-                               legacy_error="production_queue_status_unavailable")
-    for lane in ("GPOINT", "GSALES"):
-        value = lanes.get(lane)
-        if not isinstance(value, dict):
-            raise PreflightFailure("worker_status_schema_invalid", stage="local_pool_validation", lane=lane,
-                                   legacy_error="production_queue_status_unavailable")
-        if not value.get("configured", True):
-            continue
-        if lane == "GSALES" and revalidate_stopped_gsales:
-            # Do not convert stopped service state into HEALTHY. The caller
-            # must replace this provisional status with a fresh collector
-            # result that proves all three containers are stopped or healthy.
-            continue
-        if value.get("health") not in {"HEALTHY", "DEGRADED"}:
-            raise PreflightFailure("lane_health_invalid", stage="lane_health_validation", lane=lane,
-                                   legacy_error="production_queue_status_unavailable")
-        if not _live_snapshot_fallback_allowed(value):
-            queue_error = value.get("queue_snapshot_error_code")
-            if value.get("health") != "HEALTHY" and queue_error is not None:
-                raise PreflightFailure("lane_health_queue_error_combination_disallowed",
-                                       stage="lane_health_validation", lane=lane,
-                                       safe_fields=_safe_lane_error_fields(value),
-                                       legacy_error="production_queue_status_unavailable")
-            if value.get("health") != "HEALTHY":
-                raise PreflightFailure("lane_health_invalid", stage="lane_health_validation", lane=lane,
-                                       safe_fields=_safe_lane_error_fields(value),
-                                       legacy_error="production_queue_status_unavailable")
-            raise PreflightFailure("queue_snapshot_error_not_allowlisted",
-                                   stage="queue_snapshot", lane=lane,
-                                   safe_fields=_safe_lane_error_fields(value),
-                                   legacy_error="production_queue_status_unavailable",
-                                   error_category="queue", exit_class="unknown")
-    try:
-        local = inventory()
-    except Exception as exc:
-        raise PreflightFailure("worker_local_inventory_unavailable", stage="local_inventory",
-                               legacy_error="production_queue_status_unavailable") from exc
-    if local.get("launchagent_loaded") is not True:
-        raise PreflightFailure("launchagent_not_loaded", stage="local_inventory",
-                               legacy_error="production_queue_status_unavailable")
-    if local.get("production_release_lock_busy"):
-        raise PreflightFailure("production_release_lock_busy", stage="lock_validation",
-                               legacy_error="production_queue_status_unavailable")
-    if local.get("active_inference") is not False:
-        raise PreflightFailure("active_inference_present", stage="local_inventory",
-                               legacy_error="production_queue_status_unavailable")
-    try:
-        _launchagent_pid()
-    except Exception as exc:
-        raise PreflightFailure("launchagent_process_identity_invalid", stage="local_inventory",
-                               legacy_error="production_queue_status_unavailable") from exc
-    pool["state"] = "IDLE_CONFIRMED"
-    status["pool_snapshot_at"] = datetime.now(UTC).isoformat()
-    status["pool_snapshot_authority"] = "mac_worker_live_idle_inventory_v1"
-    status["pool_snapshot_inventory"] = {
-        "configured_concurrency": 1,
-        "slot_count": len(slots),
-        "all_slots_idle": True,
-        "current_job_present": False,
-        "launch_agent_loaded": True,
-        "active_inference": False,
-    }
-
-
 def _read_production_queue_status(manifest: dict | None = None, *,
-                                  retry_budget: QueueSnapshotRetryBudget | None = None) -> dict:
-    """Read status and bootstrap queue evidence only for explicit endpoint 404 version skew."""
-    runtime_link = ROOT / "runtime/current"
+                                  retry_budget: QueueSnapshotRetryBudget | None = None,
+                                  lane_scope: tuple[str, ...] | None = None) -> dict:
+    """Read the selected GPOINT runtime and its authoritative queue status only."""
+    runtime_link = (ROOT / "runtime/current" if (ROOT / "runtime/current").is_symlink()
+                    else OLD_ROOT / "runtime/current")
     try:
         if not runtime_link.is_symlink():
             raise RuntimeError("installed_worker_runtime_unavailable")
         runtime = runtime_link.resolve(strict=True)
-        runtime_root = (ROOT / "runtime").resolve(strict=True)
+        runtime_root = runtime_link.parent.resolve(strict=True)
         if not runtime.is_relative_to(runtime_root):
             raise RuntimeError("installed_worker_runtime_invalid")
+        # Run the lane-scoped read-only status from this candidate source so
+        # the legacy installed process never polls a non-GPOINT target.
         worker = WORKER_DIR / "gpoint_mac_worker.py"
         python = runtime / ".venv/bin/python3.12"
         if (not worker.is_file() or worker.is_symlink()
@@ -1574,9 +781,18 @@ def _read_production_queue_status(manifest: dict | None = None, *,
     except OSError as exc:
         raise PreflightFailure("installed_worker_runtime_unavailable", stage="worker_status") from exc
     try:
+        command = [str(python), str(worker), "status"]
+        if lane_scope is not None:
+            if (not lane_scope or len(set(lane_scope)) != len(lane_scope)
+                    or any(lane != "GPOINT" for lane in lane_scope)):
+                raise RuntimeError("worker_queue_lane_scope_invalid")
+            if len(lane_scope) == 1:
+                command.extend(("--lane", lane_scope[0]))
+        status_env = _launchagent_environment()
+        status_env["GPOINT_EROS_WORKER_SUPPORT"] = str(runtime_link.parent.parent)
         result = subprocess.run(
-            [str(python), str(worker), "status"], capture_output=True,
-            text=True, timeout=35, check=False,
+            command, capture_output=True,
+            text=True, timeout=35, check=False, env=status_env,
         )
     except subprocess.TimeoutExpired as exc:
         raise PreflightFailure("worker_status_timeout", stage="worker_status",
@@ -1598,74 +814,22 @@ def _read_production_queue_status(manifest: dict | None = None, *,
         raise PreflightFailure("worker_status_invalid_json", stage="worker_status",
                                legacy_error="production_queue_status_unavailable") from exc
     lanes = status.get("lanes") if isinstance(status, dict) else None
-    if not isinstance(lanes, dict):
+    if not isinstance(lanes, dict) or set(lanes) != {"GPOINT"}:
         raise PreflightFailure("worker_status_schema_invalid", stage="worker_status",
                                legacy_error="production_queue_status_unavailable")
-    configured_lanes = [lane for lane in ("GPOINT", "GSALES")
-                        if isinstance(lanes.get(lane), dict) and lanes[lane].get("configured", True)]
-    if not configured_lanes:
-        raise PreflightFailure("no_configured_production_lanes", stage="worker_status")
-    if (all(lanes[lane].get("queue_snapshot_state") == "VERIFIED" for lane in configured_lanes)
-            and "GSALES" not in configured_lanes):
+    old_loaded = launchctl_loaded(OLD_LABEL)
+    eros_loaded = launchctl_loaded(LABEL)
+    if old_loaded == eros_loaded:
+        raise PreflightFailure("worker_launchagent_identity_ambiguous", stage="local_inventory",
+                               legacy_error="production_queue_status_unavailable")
+    status["launch_agent_loaded"] = old_loaded or eros_loaded
+    status["active_inference"] = bool(_running_inference_pids())
+    if not isinstance(lanes.get("GPOINT"), dict) or lanes["GPOINT"].get("configured", True) is False:
+        raise PreflightFailure("worker_status_lane_scope_mismatch", stage="worker_status")
+    if lanes["GPOINT"].get("queue_snapshot_state") == "VERIFIED":
         return status
-    unresolved_lanes = [lane for lane in configured_lanes
-                        if lanes[lane].get("queue_snapshot_state") != "VERIFIED"]
-    snapshot_lanes = list(unresolved_lanes)
-    # GSALES is always refreshed independently: a recent worker poll is not
-    # authoritative after its consumer/API stack has been intentionally stopped.
-    if "GSALES" in configured_lanes and "GSALES" not in snapshot_lanes:
-        snapshot_lanes.append("GSALES")
-    if not snapshot_lanes:
-        raise PreflightFailure("authoritative_queue_snapshot_unavailable", stage="queue_snapshot")
-    for lane in unresolved_lanes:
-        lane_status = lanes[lane]
-        if lane == "GSALES":
-            # The collector itself proves either the complete healthy runtime
-            # or the exact all-stopped state. Mixed states fail remotely.
-            continue
-        health = lane_status.get("health")
-        queue_error = lane_status.get("queue_snapshot_error_code")
-        if health not in {"HEALTHY", "DEGRADED"}:
-            raise PreflightFailure("lane_health_invalid", stage="lane_health_validation", lane=lane)
-        if not _live_snapshot_fallback_allowed(lane_status):
-            if health != "HEALTHY" and queue_error == "worker_gateway_http_404":
-                raise PreflightFailure("lane_health_queue_error_combination_disallowed",
-                                       stage="lane_health_validation", lane=lane,
-                                       safe_fields=_safe_lane_error_fields(lane_status),
-                                       legacy_error="production_queue_status_unavailable")
-            if health != "HEALTHY":
-                reason = ("lane_health_queue_error_combination_disallowed" if queue_error is not None
-                          else "lane_health_invalid")
-                raise PreflightFailure(reason, stage="lane_health_validation", lane=lane,
-                                       safe_fields=_safe_lane_error_fields(lane_status),
-                                       legacy_error="production_queue_status_unavailable")
-            raise PreflightFailure("queue_snapshot_error_not_allowlisted",
-                                   stage="queue_snapshot", lane=lane,
-                                   safe_fields=_safe_lane_error_fields(lane_status),
-                                   legacy_error="production_queue_status_unavailable",
-                                   error_category="queue", exit_class="unknown")
-    _refresh_local_pool_evidence(status, revalidate_stopped_gsales="GSALES" in configured_lanes)
-    try:
-        candidate_manifest = manifest or candidate()
-    except Exception as exc:
-        raise PreflightFailure("candidate_verification_failed", stage="origin_verification") from exc
-    budget = retry_budget or QueueSnapshotRetryBudget()
-    for lane in snapshot_lanes:
-        try:
-            expected_tenant = _configured_tenant_id(lane, candidate_manifest)
-        except Exception as exc:
-            raise PreflightFailure("tenant_binding_invalid", stage="tenant_validation", lane=lane) from exc
-        snapshot = _read_live_runtime_queue_snapshot(lane, expected_tenant, retry_budget=budget)
-        if (lane == "GSALES" and lanes[lane].get("health") != "HEALTHY"
-                and snapshot.get("health") != "INTENTIONALLY_STOPPED"):
-            lane_status = lanes[lane]
-            if not _live_snapshot_fallback_allowed(lane_status):
-                raise PreflightFailure("lane_health_queue_error_combination_disallowed",
-                                       stage="lane_health_validation", lane=lane,
-                                       safe_fields=_safe_lane_error_fields(lane_status),
-                                       legacy_error="production_queue_status_unavailable")
-        lanes[lane].update(snapshot)
-    return status
+    raise PreflightFailure("authoritative_queue_snapshot_unavailable", stage="queue_snapshot",
+                           lane="GPOINT", legacy_error="production_queue_status_unavailable")
 
 
 def _runner_attempt_status(path: Path) -> str:
@@ -1690,23 +854,28 @@ def _proven_pre_exec_transient_reason(marker: str, stderr: str | bytes | None) -
 
 
 def _save_original_launchagent(rollback_tree: Path) -> bytes:
-    if not PLIST.is_file() or PLIST.is_symlink():
+    label, source_root, source_plist = _active_worker_identity()
+    if not source_plist.is_file() or source_plist.is_symlink():
         raise RuntimeError("launchagent_plist_missing_or_invalid")
-    original = PLIST.read_bytes()
+    original = source_plist.read_bytes()
     try:
         value = plistlib.loads(original)
     except Exception as exc:
         raise RuntimeError("launchagent_plist_invalid") from exc
     expected_arguments = (
-        [str(LEGACY / "run_codex_worker.sh"), "watch"],
-        [str(ROOT / "runtime/current/run_codex_worker.sh"), "watch"],
+        [str(source_root / "run_codex_worker.sh"), "watch"],
+        [str(source_root / "runtime/current/run_codex_worker.sh"), "watch"],
     )
-    if value.get("Label") != LABEL or value.get("ProgramArguments") not in expected_arguments:
+    if value.get("Label") != label or value.get("ProgramArguments") not in expected_arguments:
         raise RuntimeError("launchagent_identity_invalid")
     temporary = rollback_tree / f".original-launchagent-{os.getpid()}.tmp"
     temporary.write_bytes(original)
     temporary.chmod(0o600)
     os.replace(temporary, rollback_tree / "original-launchagent.plist")
+    _atomic_json(rollback_tree / "source-identity.json", {
+        "version": 1, "label": label, "runtime_root": str(source_root),
+        "plist_path": str(source_plist),
+    })
     return original
 
 
@@ -1718,11 +887,13 @@ def prepare() -> dict:
         raise RuntimeError("production_release_lock_busy")
     if before["active_inference"]:
         raise RuntimeError("active_inference_blocks_transition")
-    expected_program = str(LEGACY / "run_codex_worker.sh")
-    current_program = str(ROOT / "runtime/current/run_codex_worker.sh")
+    active_root = Path(before["active_runtime_root"])
+    expected_program = str(active_root / "run_codex_worker.sh")
+    current_program = str(active_root / "runtime/current/run_codex_worker.sh")
     if before["launchagent_program_arguments"] not in (
             [expected_program, "watch"], [current_program, "watch"]):
         raise RuntimeError("launchagent_identity_invalid")
+    _ensure_runtime_directories()
     staged_runtime = _stage_runtime(manifest)
     startup_check = _validate_candidate_startup(staged_runtime, manifest)
     rollback_tree = _ensure_rollback_tree(manifest["source_sha"])
@@ -1731,7 +902,7 @@ def prepare() -> dict:
     last_error = None
     for _attempt in range(3):
         try:
-            _prepare_legacy_snapshot(backup)
+            _prepare_legacy_snapshot(backup, source_root=active_root)
             break
         except (RuntimeError, OSError) as exc:
             # The live worker atomically replaces small status files while the
@@ -1776,11 +947,11 @@ def _atomic_json(path: Path, value: dict, mode: int = 0o600) -> None:
 
 
 def _rollback_snapshot_base() -> Path:
-    return ROOT.parent / ".agata-codex-worker-rollback"
+    return ROOT.parent / ".gpoint-eros-worker-rollback"
 
 
 def _runtime_staging_base() -> Path:
-    return ROOT.parent / ".agata-codex-worker-staging"
+    return ROOT.parent / ".gpoint-eros-worker-staging"
 
 
 def _ensure_rollback_tree(source_sha: str) -> Path:
@@ -1831,7 +1002,7 @@ def _redact_command_output(value: str | bytes | None) -> str:
 
 
 def _diagnostic_base() -> Path:
-    return ROOT.parent / ".agata-codex-worker-diagnostics"
+    return ROOT.parent / ".gpoint-eros-worker-diagnostics"
 
 
 def _create_diagnostic_attempt(source_sha: str, attempt_id: str | None = None) -> Path:
@@ -1898,12 +1069,9 @@ def _safe_error_code(exc: BaseException | None) -> str | None:
     message = str(exc)
     safe_codes = {
         "worker_config_permissions_invalid", "worker_gateway_or_auth_unconfigured",
-        "worker_gateway_url_invalid", "worker_pool_config_key_invalid",
-        "worker_pool_must_start_at_n1_unverified", "worker_poll_interval_invalid",
+        "worker_gateway_url_invalid", "worker_poll_interval_invalid",
         "worker_root_must_be_absolute", "worker_target_unconfigured",
-        "worker_targets_must_be_distinct", "worker_tenant_binding_invalid",
-        "worker_tenants_must_be_distinct", "worker_concurrency_invalid",
-        "parallel_provider_capability_invalid", "parallel_provider_capability_not_verified",
+        "worker_tenant_binding_invalid",
         "worker_path_owner_or_symlink_invalid", "worker_path_permissions_invalid",
         "worker_path_parent_not_writable", "worker_runtime_asset_missing",
         "worker_startup_check_contract_invalid",
@@ -1981,9 +1149,8 @@ def _launchagent_environment() -> dict[str, str]:
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
         "PYTHONUNBUFFERED": "1",
         "GPOINT_CODEX_CLI": str(CODEX),
-        "GPOINT_AGATA_WORKER_CONFIG": str(CONFIG),
-        "GPOINT_AGATA_WORKER_SUPPORT": str(ROOT),
-        "AGATA_WORKER_POOL_CONFIG": str(ROOT / "config/pool.env"),
+        "GPOINT_EROS_WORKER_CONFIG": str(CONFIG),
+        "GPOINT_EROS_WORKER_SUPPORT": str(ROOT),
     }
 
 
@@ -2006,47 +1173,12 @@ def _config_declares_key(key: str) -> bool:
         raise RuntimeError("worker_config_permissions_invalid") from exc
 
 
-def _validated_legacy_tenant_binding(manifest: dict) -> dict | None:
-    """Return only a source-verified legacy binding eligible for migration."""
-    source = LEGACY / "tenant-bindings.json"
-    destination = ROOT / "config/tenant-bindings.json"
-    if destination.exists() or not source.exists():
-        return None
-    try:
-        if source.is_symlink() or not source.is_file():
-            raise ValueError
-        stat = source.stat()
-        value = json.loads(source.read_text(encoding="utf-8"))
-        captured = datetime.fromisoformat(str(value.get("snapshot_at", "")).replace("Z", "+00:00"))
-        tenant = UUID(value.get("tenant_id", ""))
-        source_id = value.get("source_id", "")
-        if (stat.st_uid != os.getuid() or stat.st_mode & 0o077
-                or set(value) != {"version", "candidate_sha", "worker_sha256", "tenant_id", "source_id", "snapshot_at"}
-                or value.get("version") != 1
-                or value.get("worker_sha256") != sha256(LEGACY / "gpoint_mac_worker.py")
-                or not isinstance(value.get("candidate_sha"), str) or len(value["candidate_sha"]) != 40
-                or tenant.int == 0 or str(tenant) != value.get("tenant_id")
-                or captured.tzinfo is None
-                or not re.fullmatch(r"gpoint-vps:[0-9a-f]{40}:api=sha256:[0-9a-f]{64}:agata=sha256:[0-9a-f]{64}", source_id)):
-            raise ValueError
-    except (OSError, ValueError, TypeError, AttributeError) as exc:
-        raise RuntimeError("legacy_tenant_binding_invalid") from exc
-    value["candidate_sha"] = manifest["source_sha"]
-    value["worker_sha256"] = manifest["assets"]["gpoint_mac_worker.py"]
-    return value
-
-
 def _candidate_startup_environment(manifest: dict) -> dict[str, str]:
-    """Validate an eligible legacy pin in memory without writing live config."""
-    environment = _launchagent_environment()
-    if _config_declares_key("GPOINT_AGATA_TENANT_ID"):
-        return environment
-    binding = _validated_current_tenant_binding()
-    if binding is None:
-        binding = _validated_legacy_tenant_binding(manifest)
-    if binding:
-        environment["GPOINT_AGATA_TENANT_ID"] = binding["tenant_id"]
-    return environment
+    """Use the existing private GPOINT config; never import legacy lane bindings."""
+    del manifest
+    if not _config_declares_key("GPOINT_EROS_TENANT_ID"):
+        raise RuntimeError("worker_tenant_binding_invalid")
+    return _launchagent_environment()
 
 
 def _validate_candidate_startup(staged_runtime: Path, manifest: dict) -> dict:
@@ -2070,11 +1202,10 @@ def _validate_candidate_startup(staged_runtime: Path, manifest: dict) -> dict:
     lanes = status.get("lanes") if isinstance(status, dict) else None
     contract_valid = (
         status.get("state") == "PASS"
-        and status.get("configured_concurrency") == 1
-        and status.get("provider_parallel_capability") == "NOT_VERIFIED"
         and isinstance(lanes, dict)
-        and all(isinstance(lanes.get(lane), dict) and lanes[lane].get("configured") is True
-                for lane in ("GPOINT", "GSALES", "LAB"))
+        and isinstance(lanes.get("GPOINT"), dict)
+        and lanes["GPOINT"].get("configured") is True
+        and set(lanes) == {"GPOINT"}
         and status.get("claim_requests") == 0
         and status.get("inference_requests") == 0
         and status.get("runtime_current_changed") is False
@@ -2136,13 +1267,10 @@ def _runtime_candidate_identity(expected_source_sha: str) -> dict:
                 "bundle_sha256": None, "manifest_source_sha": None, "asset_parity": False}
 
 
-def _restart_state_snapshot(expected_source_sha: str, command_timeout: float = 8.0,
-                            stopped_gsales_baseline: dict | None = None) -> dict:
-    """Capture one read-only snapshot of service, process, and lane readiness."""
+def _restart_state_snapshot(expected_source_sha: str, command_timeout: float = 8.0) -> dict:
+    """Verify exact candidate, the sole Eros agent, its process and GPOINT health."""
     service_id = f"gui/{os.getuid()}/{LABEL}"
-    command_errors = {}
-    service_command = ["launchctl", "print", service_id]
-    service_result, command_errors["launchctl_print"] = _run_readonly_command(service_command, command_timeout)
+    service_result, service_error = _run_readonly_command(["launchctl", "print", service_id], command_timeout)
     service_output = service_result.stdout or ""
     pid_match = re.search(r"^\s*pid = ([0-9]+)\s*$", service_output, re.MULTILINE)
     pid = int(pid_match.group(1)) if pid_match else None
@@ -2155,53 +1283,32 @@ def _restart_state_snapshot(expected_source_sha: str, command_timeout: float = 8
             pass
         except PermissionError:
             pid_exists = True
-    process_output = ""
-    if pid is not None and pid_exists:
-        process_result, command_errors["process"] = _run_readonly_command(
-            ["ps", "-p", str(pid), "-o", "command="], command_timeout)
-        process_output = process_result.stdout.strip()
+    process_result, process_error = _run_readonly_command(
+        ["ps", "-p", str(pid), "-o", "command="], command_timeout,
+    ) if pid_exists else (subprocess.CompletedProcess([], 1, "", ""), None)
+    process_output = (process_result.stdout or "").strip()
     runtime_identity = _runtime_candidate_identity(expected_source_sha)
-    runtime = ROOT / "runtime/current"
     expected_runtime = ROOT / "runtime" / expected_source_sha
     process_identity = bool(
         pid_exists and runtime_identity.get("passed") is True
         and str(expected_runtime) in process_output
         and "gpoint_mac_worker.py watch" in process_output
     )
-    status_result, command_errors["worker_status"] = _run_readonly_command(
-        [str(runtime / ".venv/bin/python3.12"), str(runtime / "gpoint_mac_worker.py"), "status"],
-        command_timeout)
+    status_result, status_error = _run_readonly_command(
+        [str(expected_runtime / ".venv/bin/python3.12"),
+         str(expected_runtime / "gpoint_mac_worker.py"), "status"], command_timeout,
+    )
     try:
         status = json.loads(status_result.stdout)
     except (ValueError, TypeError):
         status = {}
     lanes = status.get("lanes", {}) if isinstance(status.get("lanes"), dict) else {}
-    lane_status = {lane: value for lane, value in lanes.items() if isinstance(value, dict)}
-    stopped_gsales_proof = None
-    stopped_gsales_proof_error = None
-    if stopped_gsales_baseline is not None:
-        try:
-            stopped_gsales_proof = _assert_stopped_gsales_proof_matches(stopped_gsales_baseline)
-        except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
-            stopped_gsales_proof_error = type(exc).__name__
-    lab_approval = ROOT / "config/lab-execution-approval.json"
-    lab_state = lane_status.get("LAB", {})
-    lab_gate = lab_state.get("inference_gate")
-    permanent_lane_closed = (
-        lab_state.get("state") == "AVAILABLE"
-        and lab_state.get("presence") == "PERMANENT"
-        and lab_gate in {"CLOSED_NO_APPROVAL", "CLOSED_EXPIRED", "CLOSED_CONSUMED"}
+    point = lanes.get("GPOINT", {}) if isinstance(lanes.get("GPOINT"), dict) else {}
+    old_loaded = launchctl_loaded(OLD_LABEL)
+    eros_loaded = launchctl_loaded(LABEL)
+    process_inventory, inventory_error = _run_readonly_command(
+        ["ps", "-axo", "pid=,command="], command_timeout,
     )
-    legacy_lane_closed = (
-        (lab_state.get("state") == "AVAILABLE" and lab_gate == "APPROVAL_REQUIRED")
-        or (lab_state.get("state") == "DISABLED" and lab_gate == "CLOSED_DISABLED")
-    )
-    lab_gate_closed = not lab_approval.exists() and not lab_approval.is_symlink() and (
-        permanent_lane_closed or legacy_lane_closed
-    )
-
-    process_inventory, command_errors["process_inventory"] = _run_readonly_command(
-        ["ps", "-axo", "pid=,command="], command_timeout)
     worker_processes = []
     for line in (process_inventory.stdout or "").splitlines():
         try:
@@ -2212,67 +1319,59 @@ def _restart_state_snapshot(expected_source_sha: str, command_timeout: float = 8
             worker_processes.append({"pid": worker_pid,
                                      "command": _redact_command_output(line.strip())})
     active_pids = _running_inference_pids()
-    no_current_job = not status.get("current_job_present", False) and not any(
-        isinstance(value, dict) and value.get("current_job_present")
-        for value in lanes.values()
-    )
+    queue_evidence = None
+    try:
+        queue_evidence = validate_fresh_production_queue_snapshots(
+            {**status, "launch_agent_loaded": True, "active_inference": not not active_pids},
+            lanes=("GPOINT",),
+        )
+    except (PreflightFailure, RuntimeError):
+        pass
     checks = {
-        "service": (service_result.returncode == 0 and f"{LABEL} = {{" in service_output
-                    and "state = running" in service_output),
+        "service": service_result.returncode == 0 and f"{LABEL} = {{" in service_output
+                   and "state = running" in service_output,
+        "exactly_one_launchagent": eros_loaded and not old_loaded,
         "pid": pid_exists,
         "process_identity": process_identity,
         "runtime_parity": runtime_identity.get("passed") is True,
         "status": status_result.returncode == 0 and isinstance(status, dict),
-        "concurrency": status.get("configured_concurrency") == 1,
-        "gpoint": lane_status.get("GPOINT", {}).get("health") == "HEALTHY",
-        "lab_lane": "LAB" in lanes,
-        "lab_approval_fail_closed": lab_gate_closed,
-        "no_active_inference": not active_pids and no_current_job,
-        "no_duplicate_worker": len(worker_processes) == 1 and worker_processes[0]["pid"] == pid,
+        "gpoint_health": point.get("health") == "HEALTHY",
+        "gpoint_queue_verified": point.get("queue_snapshot_state") == "VERIFIED"
+                                   and queue_evidence is not None,
+        "no_active_generation": not active_pids and status.get("current_job_present") is False
+                                and status.get("active_inference") is False,
+        "one_worker_process": len(worker_processes) == 1 and worker_processes[0]["pid"] == pid,
     }
-    if stopped_gsales_baseline is not None:
-        checks["gsales_intentionally_stopped"] = (
-            lane_status.get("GSALES", {}).get("health") != "HEALTHY"
-            and stopped_gsales_proof == stopped_gsales_baseline
-        )
-    else:
-        checks["gsales"] = lane_status.get("GSALES", {}).get("health") == "HEALTHY"
     safe_status = {
-        "configured_concurrency": status.get("configured_concurrency"),
-        "pool": status.get("pool"),
-        "lanes": {lane: {key: value for key, value in state.items()
-                          if key in {"health", "state", "current_job_present", "approval_required",
-                                     "approval_state", "presence", "operational_state",
-                                     "inference_gate", "last_error_code"}}
-        for lane, state in lane_status.items() if lane in {"GPOINT", "GSALES", "LAB"}},
+        "worker_version": status.get("worker_version"),
+        "last_poll_at": status.get("last_poll_at"),
+        "current_job_present": status.get("current_job_present"),
+        "active_inference": status.get("active_inference"),
+        "lanes": {"GPOINT": {key: point.get(key) for key in (
+            "configured", "health", "queue_snapshot_state", "queue_snapshot_at",
+            "pending_inference_jobs", "running_inference_jobs", "last_error_code",
+        )}},
     }
     return {
         "passed": all(checks.values()), "checks": checks, "pid": pid,
         "active_inference_pids": active_pids, "worker_processes": worker_processes,
-        "command_errors": command_errors,
+        "command_errors": {"launchctl_print": service_error, "process": process_error,
+                           "worker_status": status_error, "process_inventory": inventory_error},
         "launchctl_print": _redact_command_output(service_output),
         "launchctl_stderr": _redact_command_output(service_result.stderr),
         "process_command": _redact_command_output(process_output),
-        "worker_status": safe_status,
-        "runtime_identity": runtime_identity,
+        "worker_status": safe_status, "runtime_identity": runtime_identity,
         "runtime_source_sha": runtime_identity.get("runtime_source_sha"),
-        "stopped_gsales_proof": stopped_gsales_proof,
-        "stopped_gsales_proof_error": stopped_gsales_proof_error,
     }
 
-
-def _adjudicate_restart_state(expected_source_sha: str, deadline: float = 30.0,
-                              stopped_gsales_baseline: dict | None = None) -> dict:
+def _adjudicate_restart_state(expected_source_sha: str, deadline: float = 30.0) -> dict:
     """Boundedly recheck factual runtime state after an ambiguous restart command."""
     until = time.monotonic() + deadline
     attempts = []
     while time.monotonic() < until:
         remaining = max(1.0, until - time.monotonic())
         try:
-            snapshot = _restart_state_snapshot(
-                expected_source_sha, command_timeout=min(8.0, remaining),
-                stopped_gsales_baseline=stopped_gsales_baseline,
-            )
+            snapshot = _restart_state_snapshot(expected_source_sha, command_timeout=min(8.0, remaining))
         except (OSError, subprocess.SubprocessError, ValueError, RuntimeError) as exc:
             snapshot = {"passed": False, "error": type(exc).__name__}
         attempts.append(snapshot)
@@ -2283,8 +1382,7 @@ def _adjudicate_restart_state(expected_source_sha: str, deadline: float = 30.0,
             "attempts": attempts}
 
 
-def _kickstart_and_verify(expected_source_sha: str,
-                          stopped_gsales_baseline: dict | None = None) -> dict:
+def _kickstart_and_verify(expected_source_sha: str) -> dict:
     """Run restart and decide from bounded factual evidence, not CLI timing."""
     command = ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LABEL}"]
     try:
@@ -2303,41 +1401,9 @@ def _kickstart_and_verify(expected_source_sha: str,
     except OSError as exc:
         command_evidence = {"outcome": "COMMAND_LAUNCH_ERROR", "timeout_seconds": 20,
                             "error": type(exc).__name__}
-    if stopped_gsales_baseline is None:
-        adjudication = _adjudicate_restart_state(expected_source_sha)
-    else:
-        adjudication = _adjudicate_restart_state(
-            expected_source_sha, stopped_gsales_baseline=stopped_gsales_baseline,
-        )
+    adjudication = _adjudicate_restart_state(expected_source_sha)
     return {"verification": "PASS" if adjudication.get("passed") else "ROLLBACK",
             "command": command_evidence, "adjudication": adjudication}
-
-
-def _remove_legacy_after_verification(*, health_passed: bool, restart_evidence: dict,
-                                      stopped_gsales_evidence: dict | None = None) -> None:
-    stopped_gsales_verified = False
-    if isinstance(stopped_gsales_evidence, dict):
-        baseline = stopped_gsales_evidence.get("baseline")
-        proofs = [stopped_gsales_evidence.get(key) for key in ("restart", "poll", "completion")]
-        stopped_gsales_verified = (
-            isinstance(baseline, dict)
-            and all(proof == baseline for proof in proofs)
-            and all(baseline.get(key) is not None for key in (
-                "source_id", "stopped_runtime_fingerprint", "release_sha",
-                "api_image_id", "core_image_id", "tenant_id",
-            ))
-            and baseline.get("state") == "INTENTIONALLY_STOPPED"
-            and baseline.get("pending_jobs") == 0
-            and baseline.get("running_jobs") == 0
-        )
-    health_contract_passed = (health_passed and stopped_gsales_verified
-                              if stopped_gsales_evidence is not None else health_passed)
-    if (not health_contract_passed or restart_evidence.get("verification") != "PASS"):
-        raise RuntimeError("legacy_cleanup_requires_full_verification")
-    # The old flat worker files share the canonical Application Support root
-    # with pool state. Keep them in place; LaunchAgent now uses runtime/current.
-    if LEGACY != ROOT:
-        _safe_remove_tree(LEGACY)
 
 
 def _stage_runtime(manifest: dict) -> Path:
@@ -2401,179 +1467,6 @@ def _runtime_directory_present(path: Path, symlink_error: str) -> bool:
     if not stat.S_ISDIR(entry.st_mode):
         raise RuntimeError("worker_runtime_path_invalid")
     return True
-
-
-def _replace_lane_runtime_pointer(root: Path, lane: str, source_sha: str) -> str | None:
-    """Atomically point one lane at an immutable installed runtime release."""
-    if lane not in {"GPOINT", "GSALES", "LAB"} or not re.fullmatch(r"[0-9a-f]{40}", source_sha):
-        raise RuntimeError("worker_lane_runtime_identity_invalid")
-    root = Path(root)
-    runtime_root = root / "runtime"
-    slots_root = runtime_root / "slots"
-    lane_dir = slots_root / lane
-    release = runtime_root / source_sha
-    for directory in (runtime_root, slots_root, lane_dir):
-        if not directory.exists() and not directory.is_symlink():
-            directory.mkdir(mode=0o700)
-        if (directory.is_symlink() or not directory.is_dir()
-                or directory.stat().st_uid != os.getuid() or directory.stat().st_mode & 0o077):
-            raise RuntimeError("worker_lane_runtime_path_invalid")
-    if (release.is_symlink() or not release.is_dir() or release.parent != runtime_root
-            or release.stat().st_uid != os.getuid() or release.stat().st_mode & 0o077):
-        raise RuntimeError("worker_lane_runtime_release_invalid")
-    current = lane_dir / "current"
-    previous = os.readlink(current) if current.is_symlink() else None
-    if current.exists() and not current.is_symlink():
-        raise RuntimeError("worker_lane_runtime_pointer_invalid")
-    if previous is not None:
-        try:
-            resolved_previous = current.resolve(strict=True)
-        except OSError as exc:
-            raise RuntimeError("worker_lane_runtime_pointer_invalid") from exc
-        if resolved_previous.parent != runtime_root.resolve(strict=True):
-            raise RuntimeError("worker_lane_runtime_pointer_invalid")
-    temporary = lane_dir / ".current-next"
-    if temporary.exists() or temporary.is_symlink():
-        if temporary.is_dir() and not temporary.is_symlink():
-            raise RuntimeError("worker_lane_runtime_pointer_invalid")
-        temporary.unlink()
-    temporary.symlink_to(os.path.relpath(release, lane_dir))
-    os.replace(temporary, current)
-    if current.resolve(strict=True) != release.resolve(strict=True):
-        if previous is None:
-            current.unlink(missing_ok=True)
-        else:
-            rollback = lane_dir / ".current-rollback"
-            rollback.unlink(missing_ok=True)
-            rollback.symlink_to(previous)
-            os.replace(rollback, current)
-        raise RuntimeError("worker_lane_runtime_switch_verification_failed")
-    return previous
-
-
-def _switch_all_lane_runtime_pointers(root: Path, source_sha: str) -> dict[str, str | None]:
-    """Switch all slots as part of the already-paused full-pool transition."""
-    changed: dict[str, str | None] = {}
-    try:
-        for lane in ("GPOINT", "GSALES", "LAB"):
-            changed[lane] = _replace_lane_runtime_pointer(root, lane, source_sha)
-    except Exception:
-        for lane, previous in reversed(list(changed.items())):
-            current = Path(root) / "runtime/slots" / lane / "current"
-            if previous is None:
-                current.unlink(missing_ok=True)
-            else:
-                rollback = current.parent / ".current-rollback"
-                rollback.unlink(missing_ok=True)
-                rollback.symlink_to(previous)
-                os.replace(rollback, current)
-        raise
-    return changed
-
-
-def _restore_lane_runtime_pointer(root: Path, lane: str, previous: str | None) -> None:
-    """Restore and verify one lane pointer after an incomplete switch."""
-    lane_dir = Path(root) / "runtime/slots" / lane
-    current = lane_dir / "current"
-    if previous is None:
-        current.unlink(missing_ok=True)
-        if current.exists() or current.is_symlink():
-            raise RuntimeError("worker_lane_runtime_rollback_failed")
-        return
-    rollback = lane_dir / ".current-rollback"
-    rollback.unlink(missing_ok=True)
-    rollback.symlink_to(previous)
-    os.replace(rollback, current)
-    try:
-        if current.resolve(strict=True) != (lane_dir / previous).resolve(strict=True):
-            raise RuntimeError("worker_lane_runtime_rollback_failed")
-    except OSError as exc:
-        raise RuntimeError("worker_lane_runtime_rollback_failed") from exc
-
-
-def install_lane_slot(lane: str) -> dict:
-    """Update one lane child runtime without stopping the shared supervisor."""
-    if lane not in {"GPOINT", "GSALES", "LAB"}:
-        raise RuntimeError("worker_lane_runtime_identity_invalid")
-    TRANSITION_LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    transition_fd = os.open(TRANSITION_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        fcntl.flock(transition_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as exc:
-        os.close(transition_fd)
-        raise RuntimeError("worker_transition_already_running") from exc
-    try:
-        if _release_lock_busy():
-            raise RuntimeError("production_release_lock_busy")
-        if (ROOT / "state/maintenance-stop").exists():
-            raise RuntimeError("worker_runtime_maintenance_active")
-        current_supervisor = ROOT / "runtime/current/agata_worker_pool.py"
-        try:
-            supports_lane_pointers = "def slot_runtime_current(" in current_supervisor.read_text(encoding="utf-8")
-        except OSError:
-            supports_lane_pointers = False
-        if not supports_lane_pointers:
-            # A lane-only update must never silently turn into a pool-wide
-            # supervisor/LaunchAgent transition. The one-time legacy bootstrap
-            # is the explicit full-pool `apply` action, with its own idle,
-            # authoritative queue, lock, health, and rollback gates.
-            raise RuntimeError("worker_pool_bootstrap_required_use_full_transition_apply")
-        manifest = candidate()
-        queue_preflight = None
-        if lane in {"GPOINT", "GSALES"}:
-            status = _read_production_queue_status(manifest)
-            queue_preflight = require_fresh_empty_production_queues(status)
-        staged = _stage_runtime(manifest)
-        release = _install_staged_runtime(staged, manifest)
-        _verify_staged_runtime(release, manifest)
-        slot_id = {"GPOINT": "slot-01", "GSALES": "slot-02", "LAB": "slot-03"}[lane]
-        slots_root = ROOT / "slots"
-        if not slots_root.exists():
-            slots_root.mkdir(mode=0o700)
-        if (slots_root.is_symlink() or not slots_root.is_dir()
-                or slots_root.stat().st_uid != os.getuid() or slots_root.stat().st_mode & 0o077):
-            raise RuntimeError("worker_lane_slot_lock_path_invalid")
-        slot_directory = slots_root / slot_id
-        slot_directory.mkdir(exist_ok=True, mode=0o700)
-        slot_lock_path = slot_directory / "ownership.lock"
-        if (slot_directory.is_symlink() or not slot_directory.is_dir()
-                or slot_directory.stat().st_uid != os.getuid()
-                or slot_directory.stat().st_mode & 0o077 or slot_lock_path.is_symlink()):
-            raise RuntimeError("worker_lane_slot_lock_path_invalid")
-        slot_fd = os.open(slot_lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        try:
-            os.fchmod(slot_fd, 0o600)
-            try:
-                fcntl.flock(slot_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise RuntimeError("worker_lane_slot_busy") from exc
-            previous = _replace_lane_runtime_pointer(ROOT, lane, manifest["source_sha"])
-            attempt_id = uuid.uuid4().hex
-            receipt = {
-                "state": "COMPLETE", "scope": f"{lane}_SLOT_ONLY", "lane": lane,
-                "attempt_id": attempt_id,
-                "source_sha": manifest["source_sha"], "bundle_sha256": manifest["bundle_sha256"],
-                "previous_pointer": previous, "current_pointer": manifest["source_sha"],
-                "other_lane_slots_changed": False, "launchagent_changed": False,
-                "recorded_at": datetime.now(UTC).isoformat(),
-            }
-            if queue_preflight is not None:
-                receipt["queue_preflight"] = queue_preflight
-            try:
-                _atomic_json(ROOT / "receipts" / f"lane-slot-runtime-switch-{lane.lower()}-{attempt_id}.json", receipt)
-            except Exception:
-                _restore_lane_runtime_pointer(ROOT, lane, previous)
-                raise
-            return receipt
-        finally:
-            os.close(slot_fd)
-    finally:
-        os.close(transition_fd)
-
-
-def install_lab_slot() -> dict:
-    """Compatibility entry point for updating only the local LAB slot."""
-    return install_lane_slot("LAB")
 
 
 def _verify_staged_runtime(runtime: Path, manifest: dict) -> None:
@@ -2728,170 +1621,6 @@ def _verify_runtime_assets(runtime: Path, manifest: dict) -> None:
             raise RuntimeError("worker_runtime_asset_content_mismatch")
 
 
-def _binding_for_migration(manifest: dict) -> dict | None:
-    destination = ROOT / "config/tenant-bindings.json"
-    if destination.is_symlink():
-        raise RuntimeError("worker_tenant_binding_invalid")
-    if destination.exists():
-        binding = _validated_current_tenant_binding()
-        if binding is None:
-            raise RuntimeError("worker_tenant_binding_invalid")
-    else:
-        binding = _validated_legacy_tenant_binding(manifest)
-        if binding is None:
-            return None
-    return binding
-
-
-def _write_migrated_tenant_binding(manifest: dict, binding: dict, snapshot: dict, *,
-                                   now: datetime | None = None) -> None:
-    source_id = _validate_binding_migration_snapshot(binding["tenant_id"], snapshot, now=now)
-    if (not re.fullmatch(r"[0-9a-f]{40}", manifest.get("source_sha", ""))
-            or not re.fullmatch(r"[0-9a-f]{64}", manifest.get("assets", {}).get("gpoint_mac_worker.py", ""))):
-        raise RuntimeError("worker_tenant_binding_invalid")
-    binding = dict(binding)
-    binding["candidate_sha"] = manifest["source_sha"]
-    binding["worker_sha256"] = manifest["assets"]["gpoint_mac_worker.py"]
-    binding["source_id"] = source_id
-    binding["snapshot_at"] = snapshot["queue_snapshot_at"]
-    _atomic_json(ROOT / "config/tenant-bindings.json", binding)
-
-
-def _migrate_tenant_binding(manifest: dict, queue_status: dict | None = None) -> None:
-    binding = _binding_for_migration(manifest)
-    if binding is None:
-        return
-    if queue_status is None:
-        raise RuntimeError("authoritative_queue_snapshot_unavailable")
-    require_fresh_empty_production_queues(queue_status)
-    snapshot = _read_live_runtime_queue_snapshot("GPOINT", binding["tenant_id"])
-    _write_migrated_tenant_binding(manifest, binding, snapshot)
-
-
-class _ApplyPausedQueueProof(NamedTuple):
-    """Historical evidence captured by apply while the old worker is paused."""
-    binding: dict | None
-    queue_evidence: dict
-    lanes: dict
-    runtime_pin: tuple
-
-
-def _apply_runtime_pin() -> tuple:
-    current = ROOT / "runtime/current"
-    if current.is_symlink():
-        runtime = current.resolve(strict=True)
-        manifest = _read_installed_runtime_manifest(runtime)
-        return (os.readlink(current), str(runtime), manifest)
-    if current.exists():
-        raise RuntimeError("worker_runtime_identity_changed")
-    # The first transition can still run the legacy flat runtime.
-    assets = []
-    for name in ASSETS:
-        path = LEGACY / name
-        if path.exists() or path.is_symlink():
-            content, _ = _read_owned_regular_file(path, forbidden_mode_bits=0o022)
-            assets.append((name, hashlib.sha256(content).hexdigest()))
-    if not assets:
-        raise RuntimeError("worker_runtime_identity_unavailable")
-    return (None, str(LEGACY), tuple(assets))
-
-
-def _capture_apply_paused_queue_proof(manifest: dict, status: dict) -> _ApplyPausedQueueProof:
-    binding = _binding_for_migration(manifest)
-    budget = QueueSnapshotRetryBudget()
-    lanes = {}
-    for lane in ("GPOINT", "GSALES"):
-        tenant = _configured_tenant_id(lane, manifest)
-        if lane == "GPOINT" and binding is not None and binding["tenant_id"] != tenant:
-            raise RuntimeError("worker_tenant_binding_invalid")
-        value = status["lanes"][lane]
-        if value.get("queue_snapshot_source_id") != f"{LIVE_QUEUE_SOURCE}:{lane.lower()}":
-            value = _read_live_runtime_queue_snapshot(lane, tenant, retry_budget=budget)
-        provenance = _validate_live_queue_snapshot_provenance(value, lane)
-        if provenance["tenant_id"] != tenant:
-            raise RuntimeError("worker_tenant_binding_invalid")
-        if value.get("health") != status["lanes"][lane].get("health"):
-            raise RuntimeError("apply_queue_snapshot_identity_changed")
-        lanes[lane] = value
-    now = datetime.now(UTC)
-    evidence = require_fresh_empty_production_queues(status, now=now)
-    lane_evidence = _validate_production_queue_lanes(lanes, current=now)
-    if any(item["pending_jobs"] or item["running_jobs"] for item in lane_evidence.values()):
-        raise RuntimeError("production_queue_not_empty")
-    return _ApplyPausedQueueProof(binding, evidence, lanes, _apply_runtime_pin())
-
-
-def _assert_apply_stopped_worker(lock_fd: int, runtime_pin: tuple) -> None:
-    """Prove apply still holds the private transition and the worker cannot claim."""
-    try:
-        _, lock_stat = _read_owned_regular_file(TRANSITION_LOCK, expected_mode=0o600)
-        held = os.fstat(lock_fd)
-        if ((held.st_dev, held.st_ino) != (lock_stat.st_dev, lock_stat.st_ino)
-                or not _transition_lock_is_busy()):
-            raise ValueError("transition_lock_not_held")
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (OSError, ValueError) as exc:
-        raise RuntimeError("apply_transition_lock_not_held") from exc
-    try:
-        _read_owned_regular_file(ROOT / "state/maintenance-stop", expected_mode=0o600)
-    except (OSError, ValueError) as exc:
-        raise RuntimeError("apply_maintenance_marker_invalid") from exc
-    # A loaded launchd job can be exited and therefore report not running.
-    # Require the actual label to be absent, including a successful process read.
-    _wait_launchagent_unloaded(None, deadline=0)
-    if launchctl_loaded():
-        raise RuntimeError("apply_launchagent_not_unloaded")
-    if _running_inference_pids() or inventory().get("active_inference") is not False:
-        raise RuntimeError("active_inference_blocks_transition")
-    if _apply_runtime_pin() != runtime_pin:
-        raise RuntimeError("worker_runtime_identity_changed")
-
-
-def _migrate_tenant_binding_after_stopped_copy(manifest: dict, proof: _ApplyPausedQueueProof,
-                                               *, lock_fd: int) -> dict:
-    """Apply-only proof: fresh remote queues under a continuously stopped local worker."""
-    if not isinstance(proof, _ApplyPausedQueueProof):
-        raise RuntimeError("apply_paused_queue_proof_invalid")
-    _assert_apply_stopped_worker(lock_fd, proof.runtime_pin)
-    budget = QueueSnapshotRetryBudget()
-    lanes = {}
-    for lane in ("GPOINT", "GSALES"):
-        pin = _validate_live_queue_snapshot_provenance(proof.lanes[lane], lane)
-        lanes[lane] = _read_live_runtime_queue_snapshot(lane, pin["tenant_id"], retry_budget=budget)
-    _assert_apply_stopped_worker(lock_fd, proof.runtime_pin)
-    if _binding_for_migration(manifest) != proof.binding:
-        raise RuntimeError("worker_tenant_binding_invalid")
-    now = datetime.now(UTC)
-    evidence = _validate_production_queue_lanes(lanes, current=now)
-    pinned_identities = {}
-    for lane in ("GPOINT", "GSALES"):
-        actual = lanes[lane]
-        expected = proof.lanes[lane]
-        provenance = _validate_live_queue_snapshot_provenance(actual, lane)
-        if (actual["queue_snapshot_source_id"] != f"{LIVE_QUEUE_SOURCE}:{lane.lower()}"
-                or provenance != expected["queue_snapshot_provenance"]
-                or actual.get("health") != expected.get("health")
-                or actual.get("queue_snapshot_authority") != expected.get("queue_snapshot_authority")):
-            raise RuntimeError("apply_queue_snapshot_identity_changed")
-        if evidence[lane]["pending_jobs"] or evidence[lane]["running_jobs"]:
-            raise RuntimeError("production_queue_not_empty")
-        # Keep content-free runtime pins auditable, without database names or payloads.
-        pinned_identities[lane] = {
-            key: provenance[key] for key in (
-                "source_id", "release_sha", "api_image_id", "core_image_id", "tenant_id",
-                "transaction_read_only", "tenant_identity_verified", "stopped_runtime_fingerprint",
-            ) if key in provenance
-        } | {"health": actual["health"], "authority": actual["queue_snapshot_authority"]}
-    # No intervening snapshot read: persist the exact GPOINT proof checked above.
-    if proof.binding is not None:
-        _write_migrated_tenant_binding(manifest, proof.binding, lanes["GPOINT"], now=now)
-    return {"authority": "apply_stopped_worker_postcopy_v1", "checked_at": now.isoformat(),
-            "paused_preboot_queue_evidence": proof.queue_evidence,
-            "preboot_pins_matched": pinned_identities, "lanes": evidence,
-            "launchagent_unloaded": True, "active_inference_absent": True,
-            "maintenance_marker_verified": True, "transition_lock_held": True}
-
-
 def _render_plist(runtime: Path, diagnostics_directory: Path | None = None) -> bytes:
     wrapper = str(runtime / "run_codex_worker.sh")
     log_root = diagnostics_directory or ROOT / "logs"
@@ -2905,6 +1634,18 @@ def _render_plist(runtime: Path, diagnostics_directory: Path | None = None) -> b
         "StandardErrorPath": str(log_root / "candidate.stderr.log"),
         "EnvironmentVariables": _launchagent_environment(),
     }, fmt=plistlib.FMT_XML, sort_keys=True)
+
+
+def _ensure_runtime_directories() -> None:
+    """Create only the private Eros state directories required by startup validation."""
+    ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    paths = (ROOT, *(ROOT / name for name in ("config", "state", "locks", "receipts", "status", "logs")))
+    for path in paths:
+        if path != ROOT:
+            path.mkdir(exist_ok=True, mode=0o700)
+        if path.is_symlink() or not path.is_dir() or path.stat().st_uid != os.getuid():
+            raise RuntimeError("worker_runtime_directory_owner_invalid")
+        path.chmod(0o700)
 
 
 def _safe_remove_tree(path: Path) -> None:
@@ -2937,24 +1678,24 @@ def _same_tree(left: Path, right: Path) -> bool:
     return inventory_tree(left) == inventory_tree(right)
 
 
-def _restore_legacy_snapshot(backup: Path) -> None:
+def _restore_legacy_snapshot(backup: Path, *, destination: Path = LEGACY) -> None:
     previous = backup.with_name(".legacy-runtime-previous")
     if backup.is_symlink() or not backup.is_dir():
         if previous.is_symlink() or not previous.is_dir():
             raise RuntimeError("rollback_snapshot_missing")
         backup = previous
-    if LEGACY.exists() and _same_tree(LEGACY, backup):
+    if destination.exists() and _same_tree(destination, backup):
         return
-    _safe_remove_tree(LEGACY)
-    shutil.copytree(backup, LEGACY, symlinks=True)
-    LEGACY.chmod(0o700)
-    if not _same_tree(LEGACY, backup):
+    _safe_remove_tree(destination)
+    shutil.copytree(backup, destination, symlinks=True)
+    destination.chmod(0o700)
+    if not _same_tree(destination, backup):
         raise RuntimeError("rollback_legacy_snapshot_mismatch")
 
 
-def _prepare_legacy_snapshot(backup: Path) -> Path:
+def _prepare_legacy_snapshot(backup: Path, *, source_root: Path = LEGACY) -> Path:
     """Atomically refresh the rollback copy from the stopped live legacy runtime."""
-    if not LEGACY.is_dir() or LEGACY.is_symlink():
+    if not source_root.is_dir() or source_root.is_symlink():
         raise RuntimeError("legacy_runtime_missing")
     backup.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     backup.parent.chmod(0o700)
@@ -2964,7 +1705,7 @@ def _prepare_legacy_snapshot(backup: Path) -> Path:
     # Recover an interrupted two-rename swap before creating the next snapshot.
     if not backup.exists() and previous.exists():
         os.replace(previous, backup)
-    shutil.copytree(LEGACY, stage, symlinks=True, copy_function=shutil.copy2)
+    shutil.copytree(source_root, stage, symlinks=True, copy_function=shutil.copy2)
     for directory, _dirs, files in os.walk(stage, followlinks=False):
         Path(directory).chmod(0o700)
         for filename in files:
@@ -2980,7 +1721,7 @@ def _prepare_legacy_snapshot(backup: Path) -> Path:
         if not backup.exists() and previous.exists():
             os.replace(previous, backup)
         raise
-    if not _same_tree(LEGACY, backup):
+    if not _same_tree(source_root, backup):
         _safe_remove_tree(backup)
         if previous.exists():
             os.replace(previous, backup)
@@ -2990,13 +1731,14 @@ def _prepare_legacy_snapshot(backup: Path) -> Path:
 
 
 def _health_check(deadline: float = 60.0) -> dict:
+    """Wait for the sole Eros Worker and its fresh GPOINT queue snapshot."""
     python = ROOT / "runtime/current/.venv/bin/python3.12"
     worker = ROOT / "runtime/current/gpoint_mac_worker.py"
-    last = {}
     until = time.monotonic() + deadline
+    last = {}
     while time.monotonic() < until:
-        if not launchctl_loaded():
-            time.sleep(2)
+        if not launchctl_loaded(LABEL) or launchctl_loaded(OLD_LABEL):
+            time.sleep(1)
             continue
         result = subprocess.run([str(python), str(worker), "status"], capture_output=True,
                                 text=True, timeout=15, check=False)
@@ -3004,67 +1746,42 @@ def _health_check(deadline: float = 60.0) -> dict:
             last = json.loads(result.stdout)
         except ValueError:
             last = {}
-        lanes = last.get("lanes", {}) if isinstance(last.get("lanes"), dict) else {}
-        production_healthy = all(lanes.get(lane, {}).get("health") == "HEALTHY" for lane in ("GPOINT", "GSALES"))
-        if result.returncode == 0 and last.get("pool") and lanes and production_healthy:
-            try:
-                last["production_queue_snapshot"] = validate_fresh_production_queue_snapshots(last)
-            except RuntimeError:
-                time.sleep(2)
-                continue
-            return last
-        time.sleep(2)
+        try:
+            validate_fresh_production_queue_snapshots(
+                {**last, "launch_agent_loaded": True}, lanes=("GPOINT",),
+            )
+            lane = last.get("lanes", {}).get("GPOINT", {})
+            if (result.returncode == 0 and lane.get("health") == "HEALTHY"
+                    and lane.get("queue_snapshot_state") == "VERIFIED"):
+                return last
+        except (PreflightFailure, RuntimeError, AttributeError):
+            pass
+        time.sleep(1)
     raise RuntimeError("new_worker_health_check_failed")
 
 
-def _wait_for_successful_polls(baseline: dict, deadline: float = 90.0,
-                               stopped_gsales_baseline: dict | None = None) -> dict:
+def _wait_for_successful_polls(baseline: dict, deadline: float = 90.0) -> dict:
     status_path = ROOT / "status/worker-status.json"
-    previous = baseline.get("targets", {}) if isinstance(baseline.get("targets"), dict) else {}
+    old_poll = baseline.get("last_poll_at")
     until = time.monotonic() + deadline
     latest = {}
     while time.monotonic() < until:
         latest = safe_worker_status(status_path)
-        targets = latest.get("targets", {}) if isinstance(latest.get("targets"), dict) else {}
-        checks = {}
-        lanes_to_check = ("GPOINT",) if stopped_gsales_baseline is not None else ("GPOINT", "GSALES")
-        for lane in lanes_to_check:
-            before = previous.get(lane, {}) if isinstance(previous.get(lane), dict) else {}
-            after = targets.get(lane, {}) if isinstance(targets.get(lane), dict) else {}
-            old_poll = before.get("last_poll_at")
-            new_poll = after.get("last_poll_at")
-            try:
-                progressed = bool(new_poll and (not old_poll or datetime.fromisoformat(
-                    str(new_poll).replace("Z", "+00:00")) > datetime.fromisoformat(
-                    str(old_poll).replace("Z", "+00:00"))))
-            except (ValueError, TypeError):
-                progressed = False
-            checks[lane] = {"poll_advanced": progressed,
-                            "stale_error_cleared": after.get("last_error_code") in (None, "")}
-        if all(value["poll_advanced"] and value["stale_error_cleared"] for value in checks.values()):
-            if stopped_gsales_baseline is not None:
-                try:
-                    stopped_proof = _assert_stopped_gsales_proof_matches(stopped_gsales_baseline)
-                except (OSError, RuntimeError, subprocess.SubprocessError, ValueError):
-                    return {"passed": False, "lanes": checks,
-                            "stopped_gsales_proof_verified": False}
-                return {
-                    "passed": True,
-                    "lanes": {
-                        **checks,
-                        "GSALES": {
-                            "poll_required": False,
-                            "poll_status": "NOT_REQUIRED_INTENTIONALLY_STOPPED",
-                            "stopped_proof_verified": True,
-                        },
-                    },
-                    "stopped_gsales_proof": stopped_proof,
-                }
-            return {"passed": True, "lanes": checks}
-        time.sleep(min(2.0, max(0.0, until - time.monotonic())))
-    return {"passed": False, "lanes": checks if "checks" in locals() else {},
-            "last_poll_at": latest.get("last_poll_at")}
-
+        new_poll = latest.get("last_poll_at")
+        try:
+            progressed = bool(new_poll and (not old_poll or datetime.fromisoformat(
+                str(new_poll).replace("Z", "+00:00")) > datetime.fromisoformat(
+                str(old_poll).replace("Z", "+00:00"))))
+        except (ValueError, TypeError):
+            progressed = False
+        lane = latest.get("targets", {}).get("GPOINT", {}) if isinstance(latest.get("targets"), dict) else {}
+        no_error = latest.get("last_error_code") in (None, "") and lane.get("last_error_code") in (None, "")
+        if progressed and no_error and latest.get("current_job_present") is False:
+            return {"passed": True, "last_poll_at": new_poll,
+                    "gpoint_poll_advanced": True, "last_error_code": None}
+        time.sleep(min(1.0, max(0.0, until - time.monotonic())))
+    return {"passed": False, "last_poll_at": latest.get("last_poll_at"),
+            "gpoint_poll_advanced": False, "last_error_code": latest.get("last_error_code")}
 
 def _network_state_sha256() -> str:
     observations = []
@@ -3073,25 +1790,6 @@ def _network_state_sha256() -> str:
         observations.append(result.stdout)
     return hashlib.sha256("\n".join(observations).encode()).hexdigest()
 
-
-def _ensure_pool_config() -> None:
-    pool_config = ROOT / "config/pool.env"
-    if not pool_config.exists():
-        pool_config.write_text("AGATA_WORKER_CONCURRENCY=1\nAGATA_CODEX_PARALLEL_CAPABILITY=NOT_VERIFIED\nAGATA_WORKER_POLL_SECONDS=3\n")
-        pool_config.chmod(0o600)
-        return
-    if pool_config.is_symlink() or pool_config.stat().st_uid != os.getuid() or pool_config.stat().st_mode & 0o077:
-        raise RuntimeError("worker_pool_config_permissions_invalid")
-    values = {}
-    for line in pool_config.read_text(encoding="utf-8").splitlines():
-        item = line.strip()
-        if item and not item.startswith("#") and "=" in item:
-            key, value = item.split("=", 1)
-            if key not in {"AGATA_WORKER_CONCURRENCY", "AGATA_CODEX_PARALLEL_CAPABILITY", "AGATA_WORKER_POLL_SECONDS"}:
-                raise RuntimeError("worker_pool_config_key_invalid")
-            values[key] = value.strip().strip('"').strip("'")
-    if values.get("AGATA_WORKER_CONCURRENCY", "1") != "1" or values.get("AGATA_CODEX_PARALLEL_CAPABILITY", "NOT_VERIFIED") != "NOT_VERIFIED":
-        raise RuntimeError("worker_pool_must_start_at_n1_unverified")
 
 
 def _transition_lock_is_busy() -> bool:
@@ -3140,7 +1838,9 @@ def _run_safety_preflight(stage: str, *, manifest: dict | None = None,
         if before.get("launchagent_loaded") is not True:
             raise PreflightFailure("launchagent_not_loaded", stage="local_inventory",
                                    legacy_error="worker_launchagent_not_loaded")
-        status = _read_production_queue_status(candidate_manifest, retry_budget=retry_budget)
+        status = _read_production_queue_status(
+            candidate_manifest, retry_budget=retry_budget, lane_scope=("GPOINT",),
+        )
         try:
             evidence = require_fresh_empty_production_queues(status)
         except PreflightFailure as exc:
@@ -3153,17 +1853,9 @@ def _run_safety_preflight(stage: str, *, manifest: dict | None = None,
             "locks_free": True,
             "queue_snapshots_verified": True,
             "queues_empty": True,
-            "lane_health_healthy": all(
-                status.get("lanes", {}).get(lane, {}).get("health") == "HEALTHY"
-                for lane in ("GPOINT", "GSALES")
-            ),
-            "lane_states": {
-                lane: status.get("lanes", {}).get(lane, {}).get("health")
-                for lane in ("GPOINT", "GSALES")
-            },
+            "gpoint_health_healthy": status.get("lanes", {}).get("GPOINT", {}).get("health") == "HEALTHY",
+            "gpoint_state": status.get("lanes", {}).get("GPOINT", {}).get("health"),
         }
-        if status.get("lanes", {}).get("GSALES", {}).get("health") == "INTENTIONALLY_STOPPED":
-            summary["stopped_gsales_proof"] = _stopped_gsales_proof(status)
         _record_preflight(stage, summary=summary, attempts=retry_budget.attempts, started_at=started_at)
         return {"manifest": candidate_manifest, "inventory": before, "status": status, "queue_evidence": evidence}
     except PreflightFailure as exc:
@@ -3176,7 +1868,7 @@ def _run_safety_preflight(stage: str, *, manifest: dict | None = None,
         mappings = {
             "production_queue_snapshot_invalid": "queue_snapshot_invalid",
             "production_queue_snapshot_stale": "queue_snapshot_stale",
-            "worker_slots_busy": "local_pool_not_idle",
+            "worker_slots_busy": "local_worker_not_idle",
             "production_queue_not_empty": "production_queue_not_empty",
             "production_queue_status_unavailable": "authoritative_queue_snapshot_unavailable",
         }
@@ -3192,7 +1884,7 @@ def read_only_preflight() -> dict:
     status = preflight["status"]
     evidence = preflight["queue_evidence"]
     lanes = {}
-    for lane in ("GPOINT", "GSALES"):
+    for lane in ("GPOINT",):
         lane_status = status["lanes"][lane]
         queue = evidence["lanes"][lane]
         lanes[lane] = {
@@ -3209,13 +1901,13 @@ def read_only_preflight() -> dict:
         "launchagent_loaded": True,
         "active_inference_absent": True,
         "release_and_transition_locks_free": True,
-        "pool_busy": evidence["busy_slots"],
+        "active_workers": evidence["active_workers"],
         "lanes": lanes,
         "mutation_performed": False,
     }
 
 
-def apply(*, preserve_stopped_gsales: bool = False) -> dict:
+def apply() -> dict:
     TRANSITION_LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(TRANSITION_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
     try:
@@ -3227,292 +1919,165 @@ def apply(*, preserve_stopped_gsales: bool = False) -> dict:
         _record_preflight("APPLY_INITIAL", failure)
         raise failure from exc
     try:
-        # Repeat all safety checks at the point of mutation.
         preflight = _run_safety_preflight("APPLY_INITIAL", transition_lock_already_held=True)
-        manifest = preflight["manifest"]
-        queue_evidence = preflight["queue_evidence"]
-        stopped_gsales_baseline = None
-        initial_gsales = preflight["status"].get("lanes", {}).get("GSALES", {})
-        if initial_gsales.get("queue_snapshot_authority") == "stopped_runtime_ephemeral_readonly_v1":
-            if not preserve_stopped_gsales:
-                raise RuntimeError("preserve_stopped_gsales_opt_in_required")
-            stopped_gsales_baseline = _stopped_gsales_proof(preflight["status"])
-        elif preserve_stopped_gsales:
-            raise RuntimeError("stopped_gsales_state_not_proven")
-        network_before = _network_state_sha256()
-        if not ROOT.is_dir() or ROOT.is_symlink() or ROOT.stat().st_uid != os.getuid():
+        manifest, queue_evidence = preflight["manifest"], preflight["queue_evidence"]
+        identity = preflight["inventory"]
+        source_label = identity["label"]
+        source_root = Path(identity["active_runtime_root"])
+        source_plist = Path(identity["active_plist"])
+        if ROOT.exists() and (ROOT.is_symlink() or ROOT.stat().st_uid != os.getuid()):
             raise RuntimeError("worker_runtime_root_owner_invalid")
+        _ensure_runtime_directories()
         rollback_tree = _ensure_rollback_tree(manifest["source_sha"])
-        staged_release = _stage_runtime(manifest)
-        startup_check = _validate_candidate_startup(staged_release, manifest)
-        attempt_id = uuid.uuid4().hex
-        attempt_started_at = datetime.now(UTC).isoformat()
-        diagnostics_directory = _create_diagnostic_attempt(manifest["source_sha"], attempt_id)
+        staged = _stage_runtime(manifest)
+        startup_check = _validate_candidate_startup(staged, manifest)
+        _save_original_launchagent(rollback_tree)
+        original_plist = source_plist.read_bytes()
+        identity_path = rollback_tree / "source-identity.json"
+        source_identity = json.loads(identity_path.read_text(encoding="utf-8"))
         backup = rollback_tree / "legacy-runtime"
-        if PLIST.is_file():
-            _save_original_launchagent(rollback_tree)
-        original_plist = PLIST.read_bytes() if PLIST.is_file() else None
+        diagnostics = _create_diagnostic_attempt(manifest["source_sha"], uuid.uuid4().hex)
+        attempt_started = datetime.now(UTC).isoformat()
         target_link = ROOT / "runtime/current"
-        prior_link_target = os.readlink(target_link) if target_link.is_symlink() else None
-        state_dir = ROOT / "state"
-        state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if state_dir.is_symlink() or state_dir.stat().st_uid != os.getuid():
-            raise RuntimeError("worker_state_directory_permissions_invalid")
-        maintenance_marker = ROOT / "state/maintenance-stop"
-        next_plist = _render_plist(target_link, diagnostics_directory)
-        switch_started = False
+        marker = ROOT / "state/maintenance-stop"
+        marker.touch(mode=0o600, exist_ok=True)
+        marker.chmod(0o600)
+        paused_pid = _pause_worker_or_clear_marker(source_label, marker)
+        if paused_pid is None:
+            marker.unlink(missing_ok=True)
+            raise RuntimeError("worker_launchagent_unloaded_during_transition")
+        switched = False
         stopped_snapshot_verified = False
         restart_evidence = None
-        paused_queue_status = None
-        paused_proof = None
         try:
-            # Freeze the verified LaunchAgent and repeat the idle check while
-            # it cannot claim another job. This closes the preflight/bootout race.
-            marker_fd = os.open(maintenance_marker, os.O_CREAT | os.O_WRONLY, 0o600)
-            os.close(marker_fd)
-            maintenance_marker.chmod(0o600)
-            paused_pid = _pause_idle_launchagent()
-            if paused_pid is None:
-                raise RuntimeError("worker_launchagent_unloaded_during_transition")
+            paused = _run_safety_preflight("APPLY_PAUSED_PRE_BOOTOUT", manifest=manifest,
+                                           transition_lock_already_held=True)
+            queue_evidence = paused["queue_evidence"]
+            # Only after the paused GPOINT queue and generation checks pass do
+            # we unload the old label. Never bootstrap Eros until it is absent.
+            _bootout_and_wait(source_label)
             try:
-                # The worker cannot claim another job while paused. Re-read
-                # the authoritative queue immediately before bootout. Queue
-                # producers remain independent; any later enqueue stays durable.
-                paused_preflight = _run_safety_preflight(
-                    "APPLY_PAUSED_PRE_BOOTOUT", manifest=manifest, transition_lock_already_held=True,
-                )
-                queue_evidence = paused_preflight["queue_evidence"]
-                paused_queue_status = paused_preflight["status"]
-                if stopped_gsales_baseline is not None:
-                    paused_proof = _stopped_gsales_proof(paused_queue_status)
-                    if paused_proof != stopped_gsales_baseline:
-                        raise RuntimeError("stopped_gsales_preboot_fingerprint_changed")
-                paused_apply_proof = _capture_apply_paused_queue_proof(manifest, paused_queue_status)
-            except Exception:
-                try:
-                    os.kill(paused_pid, signal.SIGCONT)
-                except ProcessLookupError:
-                    pass
-                raise
-            switch_started = True
-            try:
-                subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], check=True, timeout=20)
-            finally:
-                try:
-                    os.kill(paused_pid, signal.SIGCONT)
-                except ProcessLookupError:
-                    pass
-            _wait_launchagent_unloaded(paused_pid)
+                os.kill(paused_pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+            if launchctl_loaded(source_label) or _running_inference_pids():
+                raise RuntimeError("worker_process_did_not_stop")
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline and _running_inference_pids():
-                time.sleep(1)
+                time.sleep(0.5)
             if _running_inference_pids():
-                raise RuntimeError("worker_process_did_not_stop")
-            # Snapshot only while the old process is stopped, so queue/status
-            # state cannot change between rollback capture and the switch.
-            maintenance_marker.unlink(missing_ok=True)
-            backup = _prepare_legacy_snapshot(backup)
+                raise RuntimeError("active_inference_blocks_transition")
+            backup = _prepare_legacy_snapshot(backup, source_root=source_root)
             stopped_snapshot_verified = True
-            marker_fd = os.open(maintenance_marker, os.O_CREAT | os.O_WRONLY, 0o600)
-            os.close(marker_fd)
-            maintenance_marker.chmod(0o600)
-            for name in ("runtime", "config", "state", "locks", "receipts", "status", "logs", "queues", "slots"):
+            release = _install_staged_runtime(staged, manifest)
+            for name in ("runtime", "config", "state", "locks", "receipts", "status", "logs"):
                 directory = ROOT / name
                 directory.mkdir(parents=True, exist_ok=True, mode=0o700)
                 if directory.is_symlink() or directory.stat().st_uid != os.getuid():
                     raise RuntimeError("worker_runtime_directory_owner_invalid")
                 directory.chmod(0o700)
-            _ensure_pool_config()
-            release = _install_staged_runtime(staged_release, manifest)
-            # Migrate only queue/status state. Secret credentials stay in their
-            # existing external mode-600 config; the LAB approval is rechecked
-            # against the new bundle and remains fail-closed if stale.
-            migrations = (("lab-queue", ROOT / "queues/lab"),
-                          ("worker-status.json", ROOT / "status/worker-status.json"),
-                          ("lab-approval-usage", ROOT / "state/lab-approval-usage"))
-            for source_name, destination in migrations:
-                source = LEGACY / source_name
-                if source.exists() and not destination.exists():
-                    shutil.copytree(source, destination, dirs_exist_ok=True) if source.is_dir() else shutil.copy2(source, destination)
-            queue_evidence = _migrate_tenant_binding_after_stopped_copy(
-                manifest, paused_apply_proof, lock_fd=fd,
-            )
-            _switch_all_lane_runtime_pointers(ROOT, manifest["source_sha"])
-            poll_baseline = safe_worker_status(ROOT / "status/worker-status.json")
-            switch_started = True
             next_link = ROOT / "runtime/.current-next"
             _safe_remove_tree(next_link)
             next_link.symlink_to(release.name)
             os.replace(next_link, target_link)
-            temp = PLIST.with_suffix(".plist.new")
-            temp.write_bytes(next_plist)
-            temp.chmod(0o600)
-            os.replace(temp, PLIST)
-            maintenance_marker.unlink(missing_ok=True)
-            subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST)], check=True, timeout=20)
-            # One bounded restart command owns both success and timeout
-            # adjudication. Do not fail on CLI timing before checking the live PID.
-            if stopped_gsales_baseline is None:
-                restart_evidence = _kickstart_and_verify(manifest["source_sha"])
-            else:
-                restart_evidence = _kickstart_and_verify(
-                    manifest["source_sha"], stopped_gsales_baseline=stopped_gsales_baseline,
-                )
-            if restart_evidence["verification"] != "PASS":
+            next_plist = _render_plist(target_link, diagnostics)
+            temp_plist = PLIST.with_suffix(".plist.new")
+            temp_plist.write_bytes(next_plist)
+            temp_plist.chmod(0o600)
+            os.replace(temp_plist, PLIST)
+            marker.unlink(missing_ok=True)
+            _bootstrap_candidate_only(source_label, PLIST)
+            switched = True
+            restart_evidence = _kickstart_and_verify(manifest["source_sha"])
+            if restart_evidence.get("verification") != "PASS":
                 raise RuntimeError("restart_verification_failed")
-            restarted = restart_evidence["adjudication"].get("status", {})
-            status = restarted
-            if restarted.get("configured_concurrency") != 1:
-                raise RuntimeError("restart_verification_failed")
-            if any(not isinstance(restarted.get("lanes", {}).get(lane), dict) for lane in ("GPOINT", "GSALES", "LAB")):
-                raise RuntimeError("lane_status_missing")
-            if stopped_gsales_baseline is None:
-                poll_evidence = _wait_for_successful_polls(poll_baseline)
-            else:
-                poll_evidence = _wait_for_successful_polls(
-                    poll_baseline, stopped_gsales_baseline=stopped_gsales_baseline,
-                )
-            if not poll_evidence["passed"]:
+            status = restart_evidence["adjudication"].get("status", {})
+            if set(status.get("lanes", {})) != {"GPOINT"}:
+                raise RuntimeError("worker_status_lane_scope_mismatch")
+            if not status.get("checks", {}).get("exactly_one_launchagent", True):
+                raise RuntimeError("multiple_worker_launchagents_loaded")
+            poll_baseline = safe_worker_status(ROOT / "status/worker-status.json")
+            poll = _wait_for_successful_polls(poll_baseline)
+            if not poll.get("passed"):
                 raise RuntimeError("successful_worker_polls_not_verified")
-            network_after = _network_state_sha256()
-            if network_before != network_after:
-                raise RuntimeError("network_state_changed_during_transition")
-            attempts = restart_evidence.get("adjudication", {}).get("attempts") or [{}]
-            diagnostic_receipt = _write_diagnostic_evidence(
-                diagnostics_directory, manifest=manifest, attempt_id=attempt_id,
-                rendered_plist=next_plist, launchctl_print=attempts[-1].get("launchctl_print", ""),
-                process_evidence=attempts[-1], command_evidence=restart_evidence.get("command", {}),
-                started_at=attempt_started_at,
-            )
-            stopped_gsales_completion_proof = None
-            if stopped_gsales_baseline is not None:
-                stopped_gsales_completion_proof = _assert_stopped_gsales_proof_matches(
-                    stopped_gsales_baseline,
-                )
-            # Legacy runtime is removed only after health and restart pass.
-            if stopped_gsales_baseline is None:
-                health_passed = bool(status.get("lanes")) and all(
-                    status.get("lanes", {}).get(lane, {}).get("health") == "HEALTHY"
-                    for lane in ("GPOINT", "GSALES")
-                )
-                stopped_gsales_evidence = None
-            else:
-                health_passed = status.get("lanes", {}).get("GPOINT", {}).get("health") == "HEALTHY"
-                restart_attempts = restart_evidence.get("adjudication", {}).get("attempts") or []
-                stopped_gsales_restart_proof = restart_attempts[-1].get("stopped_gsales_proof") if restart_attempts else None
-                stopped_gsales_evidence = {
-                    "baseline": stopped_gsales_baseline,
-                    "restart": stopped_gsales_restart_proof,
-                    "poll": poll_evidence.get("stopped_gsales_proof"),
-                    "completion": stopped_gsales_completion_proof,
-                }
-            _remove_legacy_after_verification(
-                health_passed=health_passed,
-                restart_evidence=restart_evidence,
-                stopped_gsales_evidence=stopped_gsales_evidence,
-            )
-            evidence = {
-                "state": "COMPLETE", "at": datetime.now(UTC).isoformat(), "label": LABEL,
-                "source_sha": manifest["source_sha"], "bundle_sha256": manifest["bundle_sha256"],
-                "configured_concurrency": 1, "provider_parallel_capability": "NOT_VERIFIED",
-                "health_check": status, "restart_check": restarted,
-                "fresh_poll_check": poll_evidence,
-                "restart_evidence": restart_evidence,
-                "legacy_runtime_removed": LEGACY != ROOT and not LEGACY.exists(),
-                "canonical_runtime_path": str(ROOT),
-                "network_state_sha256_before": network_before,
-                "network_state_sha256_after": network_after,
-                "network_configuration_writes_performed": False,
-                "production_queue_snapshot": queue_evidence,
-                "gsales_runtime_mode": (
-                    "INTENTIONALLY_STOPPED" if stopped_gsales_baseline is not None else "HEALTHY"
-                ),
-                "gsales_stopped_proof_before": stopped_gsales_baseline,
-                "gsales_stopped_proof_paused_preboot": paused_proof,
-                "gsales_stopped_proof_after_restart": stopped_gsales_evidence.get("restart")
-                    if stopped_gsales_evidence else None,
-                "gsales_stopped_proof_after_poll": poll_evidence.get("stopped_gsales_proof"),
-                "gsales_stopped_proof_at_completion": stopped_gsales_completion_proof,
-                "rollback_snapshot": str(backup),
-                "startup_check": startup_check,
-                "diagnostics": str(diagnostic_receipt),
-                "original_plist_sha256": hashlib.sha256(original_plist or b"").hexdigest(),
+            health = _health_check()
+            if set(health.get("lanes", {})) != {"GPOINT"}:
+                raise RuntimeError("worker_status_lane_scope_mismatch")
+            # Keep the old tree only in the rollback snapshot. It has no plist
+            # and cannot be launched after successful handover.
+            if source_root != ROOT:
+                _safe_remove_tree(source_root)
+            if source_plist != PLIST:
+                source_plist.unlink(missing_ok=True)
+            receipt = {
+                "state": "COMPLETE", "at": datetime.now(UTC).isoformat(),
+                "label": LABEL, "source_sha": manifest["source_sha"],
+                "bundle_sha256": manifest["bundle_sha256"],
+                "worker_process_count": 1, "launchagent_count": 1,
+                "queue_preflight": queue_evidence, "startup_check": startup_check,
+                "health_check": health, "restart_check": restart_evidence,
+                "fresh_poll_check": poll, "rollback_snapshot": str(backup),
+                "source_identity": source_identity,
+                "old_runtime_retained_only_for_rollback": True,
+                "old_plist_removed": source_plist != PLIST,
+                "completed_at": datetime.now(UTC).isoformat(),
             }
-            _atomic_json(ROOT / "receipts/runtime-migration.json", evidence)
-            return evidence
+            _atomic_json(ROOT / "receipts/runtime-migration.json", receipt)
+            return receipt
         except Exception as failure:
-            if not switch_started:
-                maintenance_marker.unlink(missing_ok=True)
+            marker.unlink(missing_ok=True)
+            if launchctl_loaded(source_label) and not switched:
+                if source_label != LABEL and launchctl_loaded(LABEL):
+                    try:
+                        _restore_single_launchagent(source_label, source_plist, original_plist)
+                    except Exception as rollback_failure:
+                        _atomic_json(ROOT / "receipts/runtime-migration-rollback.json", {
+                            "state": "ROLLBACK_INCOMPLETE", "at": datetime.now(UTC).isoformat(),
+                            "source_sha": manifest["source_sha"], "source_label": source_label,
+                            "launchagent_restore": {"restored_label": None, "launchagent_loaded": False},
+                            "rollback_error_code": _safe_error_code(rollback_failure),
+                            "rollback_snapshot": str(backup), "failure_code": _safe_error_code(failure),
+                            "restart_evidence": restart_evidence,
+                        })
+                        raise
+                # The source service is still registered. Resume that one
+                # worker in place; do not replace its live queue/state tree
+                # with the earlier prepare snapshot.
+                try:
+                    os.kill(paused_pid, signal.SIGCONT)
+                except ProcessLookupError:
+                    pass
                 raise
-            diagnostic_receipt = None
             try:
-                attempts = (restart_evidence or {}).get("adjudication", {}).get("attempts") or [{}]
-                launchctl_result, _ = _run_readonly_command(
-                    ["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"], 8,
-                )
-                diagnostic_receipt = _write_diagnostic_evidence(
-                    diagnostics_directory, manifest=manifest, attempt_id=attempt_id,
-                    rendered_plist=next_plist,
-                    launchctl_print=attempts[-1].get("launchctl_print") or launchctl_result.stdout,
-                    process_evidence=attempts[-1],
-                    command_evidence=(restart_evidence or {}).get("command", {}), error=failure,
-                    started_at=attempt_started_at,
-                )
-            except Exception:
-                # Diagnostic capture must never prevent a safety rollback.
-                pass
-            # Restore old service and its files from the private snapshot.
-            legacy_restored = False
-            launchagent_restored = False
-            rollback_error_code = None
-            try:
-                subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], timeout=15, check=False,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                _wait_launchagent_unloaded(None)
-                # Before the stopped snapshot passes, the live tree has not
-                # been switched. Preserve it instead of restoring an older
-                # prepare-time copy over newly durable queue/state files.
+                # Make the candidate absent first. If that cannot be proven,
+                # do not bootstrap the source agent; zero agents is safer than two.
+                _bootout_and_wait(LABEL)
+                if launchctl_loaded(LABEL):
+                    raise RuntimeError("rollback_candidate_launchagent_still_loaded")
                 if stopped_snapshot_verified:
-                    _restore_legacy_snapshot(backup)
-                elif not LEGACY.exists():
-                    raise RuntimeError("rollback_snapshot_missing")
-                legacy_restored = LEGACY.exists()
-                target_link = ROOT / "runtime/current"
-                if prior_link_target is None:
-                    _safe_remove_tree(target_link)
-                else:
-                    temporary_link = ROOT / "runtime/.current-rollback"
-                    _safe_remove_tree(temporary_link)
-                    temporary_link.symlink_to(prior_link_target)
-                    os.replace(temporary_link, target_link)
-                maintenance_marker.unlink(missing_ok=True)
-                if original_plist is not None:
-                    PLIST.write_bytes(original_plist)
-                    PLIST.chmod(0o600)
-                    subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST)], timeout=20, check=True)
-                    subprocess.run(["launchctl", "kickstart", f"gui/{os.getuid()}/{LABEL}"], timeout=15, check=True)
-                    if PLIST.read_bytes() != original_plist:
-                        raise RuntimeError("rollback_launchagent_plist_mismatch")
-                    if not launchctl_loaded():
-                        raise RuntimeError("rollback_launchagent_not_loaded")
-                    launchagent_restored = PLIST.read_bytes() == original_plist and launchctl_loaded()
-                    if not launchagent_restored:
-                        raise RuntimeError("rollback_launchagent_not_loaded")
+                    _restore_legacy_snapshot(backup, destination=source_root)
+                restored = _restore_single_launchagent(source_label, source_plist, original_plist)
+                rollback_state = "ROLLED_BACK"
+                rollback_error = None
             except Exception as rollback_failure:
-                rollback_error_code = _safe_error_code(rollback_failure)
-                launchagent_restored = bool(
-                    original_plist is not None and PLIST.is_file()
-                    and PLIST.read_bytes() == original_plist and launchctl_loaded()
-                )
+                restored = {"restored_label": None, "launchagent_loaded": False}
+                rollback_state = "ROLLBACK_INCOMPLETE"
+                rollback_error = _safe_error_code(rollback_failure)
+                # Explicit final guard: if both labels somehow appear, stop
+                # the new Eros service before recording the failed recovery.
+                if launchctl_loaded(OLD_LABEL) and launchctl_loaded(LABEL):
+                    try:
+                        _bootout_and_wait(LABEL)
+                    except Exception:
+                        try:
+                            _bootout_and_wait(source_label)
+                        except Exception:
+                            pass
             _atomic_json(ROOT / "receipts/runtime-migration-rollback.json", {
-                "state": "ROLLED_BACK" if legacy_restored and launchagent_restored else "ROLLBACK_INCOMPLETE",
-                "at": datetime.now(UTC).isoformat(),
-                "source_sha": manifest["source_sha"], "legacy_restored": legacy_restored,
-                "launchagent_restored": launchagent_restored,
-                "rollback_error_code": rollback_error_code,
-                "rollback_snapshot": str(backup),
-                "diagnostics": str(diagnostic_receipt) if diagnostic_receipt else str(diagnostics_directory),
-                "startup_check": startup_check,
+                "state": rollback_state, "at": datetime.now(UTC).isoformat(),
+                "source_sha": manifest["source_sha"], "source_label": source_label,
+                "launchagent_restore": restored, "rollback_error_code": rollback_error,
+                "rollback_snapshot": str(backup), "failure_code": _safe_error_code(failure),
                 "restart_evidence": restart_evidence,
             })
             raise
@@ -3527,16 +2092,23 @@ def rollback() -> dict:
         candidates = [entry for entry in snapshots.iterdir()
                       if entry.is_dir() and not entry.is_symlink()
                       and (entry / "legacy-runtime").is_dir()
-                      and (entry / "original-launchagent.plist").is_file()]
+                      and (entry / "original-launchagent.plist").is_file()
+                      and (entry / "source-identity.json").is_file()]
     if not candidates:
         raise RuntimeError("rollback_snapshot_missing")
     snapshot_root = max(candidates, key=lambda entry: entry.stat().st_mtime)
     backup = snapshot_root / "legacy-runtime"
     original_plist_file = snapshot_root / "original-launchagent.plist"
-    previous_backup = backup.with_name(".legacy-runtime-previous")
-    if ((backup.is_symlink() or not backup.is_dir()) and
-            (previous_backup.is_symlink() or not previous_backup.is_dir())) or not original_plist_file.is_file():
+    identity_file = snapshot_root / "source-identity.json"
+    if backup.is_symlink() or not backup.is_dir() or not original_plist_file.is_file():
         raise RuntimeError("rollback_snapshot_missing")
+    identity = json.loads(identity_file.read_text(encoding="utf-8"))
+    source_label = identity.get("label")
+    source_root = Path(identity.get("runtime_root", ""))
+    source_plist = Path(identity.get("plist_path", ""))
+    if source_label not in {OLD_LABEL, LABEL} or source_root not in {OLD_ROOT, ROOT} \
+            or source_plist not in {OLD_PLIST, PLIST}:
+        raise RuntimeError("rollback_source_identity_invalid")
     TRANSITION_LOCK.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(TRANSITION_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
     try:
@@ -3550,37 +2122,36 @@ def rollback() -> dict:
             raise RuntimeError("production_release_lock_busy")
         if before["active_inference"]:
             raise RuntimeError("active_inference_blocks_rollback")
-        paused_pid = _pause_idle_launchagent()
+        active_label, _active_root, _active_plist = _active_worker_identity()
+        paused_pid = _pause_idle_launchagent(active_label)
         if paused_pid is not None:
             try:
-                subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], check=True, timeout=20)
+                _bootout_and_wait(active_label)
             finally:
                 try:
                     os.kill(paused_pid, signal.SIGCONT)
                 except ProcessLookupError:
                     pass
-        _wait_launchagent_unloaded(paused_pid)
+        _wait_launchagent_unloaded(paused_pid, label=active_label)
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline and _running_inference_pids():
             time.sleep(1)
         if _running_inference_pids():
             raise RuntimeError("worker_process_did_not_stop")
-        _restore_legacy_snapshot(backup)
+        _restore_legacy_snapshot(backup, destination=source_root)
         original_plist = original_plist_file.read_bytes()
-        PLIST.write_bytes(original_plist)
-        PLIST.chmod(0o600)
         (ROOT / "state/maintenance-stop").unlink(missing_ok=True)
-        subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST)], check=True, timeout=20)
-        subprocess.run(["launchctl", "kickstart", f"gui/{os.getuid()}/{LABEL}"], check=True, timeout=15)
-        if not launchctl_loaded():
-            raise RuntimeError("rollback_launchagent_not_loaded")
-        if PLIST.read_bytes() != original_plist:
+        restored = _restore_single_launchagent(source_label, source_plist, original_plist)
+        subprocess.run(["launchctl", "kickstart", f"gui/{os.getuid()}/{source_label}"], check=True, timeout=15)
+        if not source_plist.is_file() or source_plist.read_bytes() != original_plist:
             raise RuntimeError("rollback_launchagent_plist_mismatch")
+        if not launchctl_loaded(source_label) or (source_label != LABEL and launchctl_loaded(LABEL)):
+            raise RuntimeError("rollback_multiple_launchagents_loaded")
         evidence = {
-            "state": "ROLLED_BACK", "at": datetime.now(UTC).isoformat(), "label": LABEL,
-            "legacy_runtime_restored": LEGACY.exists(), "launchagent_loaded": True,
+            "state": "ROLLED_BACK", "at": datetime.now(UTC).isoformat(), "label": source_label,
+            "legacy_runtime_restored": source_root.exists(), "launchagent_loaded": True,
             "restored_plist_sha256": hashlib.sha256(original_plist).hexdigest(),
-            "rollback_snapshot": str(backup),
+            "rollback_snapshot": str(backup), "launchagent_restore": restored,
         }
         _atomic_json(ROOT / "receipts/runtime-migration-rollback.json", evidence)
         return evidence
@@ -3590,21 +2161,11 @@ def rollback() -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("plan", "preflight", "prepare", "apply", "rollback",
-                                            "install-lab-slot", "install-lane-slot"))
-    parser.add_argument("--lane", choices=("GPOINT", "GSALES", "LAB"))
-    parser.add_argument("--preserve-stopped-gsales", action="store_true")
+    parser.add_argument("action", choices=("plan", "preflight", "prepare", "apply", "rollback"))
     args = parser.parse_args()
-    if args.preserve_stopped_gsales and args.action != "apply":
-        raise RuntimeError("preserve_stopped_gsales_apply_only")
-    if args.action == "install-lane-slot" and not args.lane:
-        raise RuntimeError("worker_lane_required")
     result = (read_only_plan() if args.action == "plan" else read_only_preflight() if args.action == "preflight"
               else prepare() if args.action == "prepare"
-              else rollback() if args.action == "rollback" else
-              install_lab_slot() if args.action == "install-lab-slot" else
-              install_lane_slot(args.lane) if args.action == "install-lane-slot" and args.lane else
-              apply(preserve_stopped_gsales=args.preserve_stopped_gsales))
+              else rollback() if args.action == "rollback" else apply())
     print(json.dumps(result, sort_keys=True, indent=2))
     return 0
 

@@ -16,20 +16,34 @@ Production Compose entries are behind the explicit `agata` profile. The canonica
 
 Use `.env.example` only as a key-name/template reference. Generate independent random keys for each purpose, keep the real `.env` untracked, and do not rotate the AEAD/HMAC keys without a planned data re-encryption/re-index procedure. HMAC search tokens preserve token equality/frequency and support lexical matching; they do not reveal the original words, but still represent sensitive derived metadata.
 
-## Temporary local Codex test provider
+## Mac Codex Worker
 
-Shared worker V3 additionally requires a trusted `GPOINT_AGATA_TENANT_ID` pin
-for its GPOINT runtime. An optional GSALES target requires independent
-`GSALES_AGATA_WORKER_URL`, `GSALES_AGATA_WORKER_TOKEN`, and
-`GSALES_AGATA_TENANT_ID` values. Keep both tenant pins in the mode-600 worker
-configuration; never copy the production GPOINT pin into a disposable Core
-runtime.
+The Mac Product Worker has one route: GPOINT Eros through the authenticated
+Codex CLI subscription. Its private config remains at
+`~/.config/gpoint/agata-worker.env` for compatibility and uses only
+`GPOINT_EROS_WORKER_URL`, `GPOINT_EROS_WORKER_TOKEN`, and
+`GPOINT_EROS_TENANT_ID` for gateway identity. It does not poll or claim GSALES
+or Conversation Lab work. Conversation Lab's local queue and saved results
+remain separate from the Mac Worker.
 
-The owner-approved Unified Mac Worker V3 is an allowed production Codex inference provider for GPoint and G Sales. Provider selection remains configuration-driven: only `AGATA_LLM_PROVIDER=mac_worker` together with `AGATA_CODEX_LOCAL_ENABLED=true` selects the authenticated worker; the default remains `disabled`. This mode uses the existing worker gateway and the logged-in Codex CLI, with concurrency one, a bounded generation timeout, expiring durable inference jobs and a capped queue. Runtime health reports the G Sales provider degraded when authenticated worker polling is stale or the Core cannot prove its tenant security contract. It does not use an OpenAI API key or copy Codex/ChatGPT credentials to the VPS. When the bounded queue is full or the worker is unavailable, new messages fail closed with a controlled unavailable/pending response rather than causing uncontrolled work.
+The active immutable runtime lives at
+`~/Library/Application Support/GPoint/gpoint-eros-worker/runtime/<source-sha>`;
+`runtime/current` points to its verified bundle. One LaunchAgent,
+`one.gpoint.eros-worker`, runs one locked Worker process. State, receipts,
+locks, and status stay outside the immutable source bundle. Codex CLI continues
+to use the logged-in subscription; no API key or Codex credentials are copied
+to GPoint servers.
 
-The local worker reads credentials from `~/.config/gpoint/agata-worker.env` (mode 600). Runtime code is sourced only from this repository and installed into `~/Library/Application Support/GPoint/agata-codex-worker/runtime/<source-sha>`; `runtime/current` points to the active immutable bundle. State, queues, receipts, logs, locks, and status live beside `runtime/`, outside source bundles. One LaunchAgent (`one.gpoint.agata-codex-worker`) runs the AGATA supervisor. GPOINT and GSALES are production lanes; LAB runs in the background only when production queues are empty and requires a valid, current approval immediately before inference. The default is one isolated process slot. Increasing concurrency is rejected unless provider parallel-safety has been explicitly verified; provider status remains `NOT_VERIFIED` until then. `run_codex_worker.sh` resolves the immutable bundle containing itself under the canonical Application Support runtime.
-
-Use `python3 services/agata/worker/migrate_worker_runtime.py plan` for a read-only inventory and `prepare` to stage the exact candidate plus a verified rollback snapshot without stopping the LaunchAgent or changing `runtime/current`. The guarded `apply` action repeats the clean exact `origin/main`, idle, and release-lock checks, freezes the installed LaunchAgent, refreshes the rollback snapshot, then switches and verifies the new process, lanes, and successful polling. The old flat worker files share the canonical Application Support root with persistent state, so they are retained for rollback; only the active LaunchAgent moves to `runtime/current`. `rollback` restores the snapshot and original LaunchAgent plist. Failed health or restart checks automatically restore the previous service. The migration controller does not call VPS, database, MAXIBOT, or network-configuration tools.
+Use `python3 services/agata/worker/migrate_worker_runtime.py plan` for a
+read-only inventory and `prepare` to stage the exact candidate and private
+rollback snapshot without stopping the active Worker. Before `apply`, the
+controller requires a fresh empty authoritative GPOINT queue and no active
+generation, then pauses and unloads the source LaunchAgent before bootstrapping
+Eros. It verifies the exact runtime SHA, one LaunchAgent/process, health, and a
+fresh successful poll. The old plist and runtime are retained only in the
+rollback snapshot. Recovery unloads Eros before restoring the source; if that
+cannot be proven, it does not start a second agent. No old VPS or unrelated
+GPoint service is contacted.
 
 ## Natural Conversation MVP — Naturalness Policy V1
 
