@@ -78,7 +78,8 @@ services:
       EROS_EMBEDDING_API_KEY: ${EROS_TEST_GPOINT_API_KEY:?set synthetic provider key}
       EROS_OLLAMA_EMBEDDING_URL: http://127.0.0.1:11434/api/embed
       GPOINT_API_KEY: ${EROS_TEST_GPOINT_API_KEY:?set synthetic provider key}
-      GPOINT_AGATA_WORKER_TOKEN: ${EROS_TEST_WORKER_TOKEN:?set synthetic Worker token}
+      GPOINT_EROS_WORKER_TOKEN: ${EROS_TEST_WORKER_TOKEN:?set synthetic Worker token}
+      GPOINT_CHAT_POLICY_TENANT_ID: ${EROS_TEST_TENANT_ID:?set synthetic tenant UUID}
       AGATA_ENABLED: "true"
       AGATA_SERVICE_URL: http://127.0.0.1:18080
       AGATA_INTERNAL_API_TOKEN: ${EROS_TEST_AGATA_TOKEN:?set synthetic local fixture token}
@@ -107,11 +108,11 @@ services:
     depends_on:
       gpoint-api: {condition: service_healthy}
     environment:
-      GPOINT_AGATA_WORKER_LOCAL_TEST: "true"
-      GPOINT_AGATA_WORKER_URL: http://127.0.0.1:3000/agata-worker
-      GPOINT_AGATA_WORKER_TOKEN: ${EROS_TEST_WORKER_TOKEN:?set synthetic Worker token}
-      GPOINT_AGATA_TENANT_ID: ${EROS_TEST_TENANT_ID:?set synthetic tenant UUID}
-      GPOINT_AGATA_WORKER_SUPPORT: /tmp/worker-support
+      GPOINT_EROS_WORKER_LOCAL_TEST: "true"
+      GPOINT_EROS_WORKER_URL: http://127.0.0.1:3000/gpoint-worker
+      GPOINT_EROS_WORKER_TOKEN: ${EROS_TEST_WORKER_TOKEN:?set synthetic Worker token}
+      GPOINT_EROS_TENANT_ID: ${EROS_TEST_TENANT_ID:?set synthetic tenant UUID}
+      GPOINT_EROS_WORKER_SUPPORT: /tmp/worker-support
       EROS_TEST_WORKER_IDLE_SECONDS: "60"
     volumes:
       - ../..:/workspace:ro

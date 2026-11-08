@@ -210,12 +210,17 @@ test('Mac Ollama tunnel retries SSH after a disconnect and stops cleanly on TERM
 
 test('local Worker fixture refuses non-isolated or non-local mode', () => {
   const worker = readFileSync(new URL('local-test-worker.py', directory), 'utf8');
-  assert.match(worker, /GPOINT_AGATA_WORKER_LOCAL_TEST/);
-  assert.match(worker, /http:\/\/127\.0\.0\.1:3000\/agata-worker/);
+  assert.match(worker, /GPOINT_EROS_WORKER_LOCAL_TEST/);
+  assert.match(worker, /http:\/\/127\.0\.0\.1:3000\/gpoint-worker/);
   assert.match(worker, /DETERMINISTIC_LOCAL_E2E_REPLY/);
   assert.match(worker, /SYNTHETIC_MEMORY_EXTRACTION_RESULT/);
   assert.match(worker, /purpose == 'eros_chat_completion'/);
   assert.match(worker, /SYNTH_CITY_ZEPHYRBAY/);
+  const compose = readFileSync(new URL('compose.local-test.yml', directory), 'utf8');
+  assert.match(compose, /GPOINT_CHAT_POLICY_TENANT_ID: \$\{EROS_TEST_TENANT_ID/);
+  assert.match(compose, /GPOINT_EROS_WORKER_TOKEN: \$\{EROS_TEST_WORKER_TOKEN/);
+  assert.match(compose, /GPOINT_EROS_WORKER_URL: http:\/\/127\.0\.0\.1:3000\/gpoint-worker/);
+  assert.doesNotMatch(compose, /GPOINT_AGATA_WORKER_(?:URL|TOKEN|LOCAL_TEST)/);
 });
 
 test('local Worker fixture treats SIGTERM as a clean stop, not a job timeout', () => {
