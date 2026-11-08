@@ -9,6 +9,16 @@ from urllib.parse import urlsplit
 from pathlib import Path
 
 
+def test_staging_ssh_keeps_silent_transfers_alive_without_weakening_host_keys():
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    text = '\n'.join(s.get('run', '') for s in workflow['jobs']['layer7_staging']['steps'])
+    commands = re.findall(r'\b(?:ssh|scp) -F /dev/null(?:[^\n]*\\\n)*[^\n]*', text)
+    assert len(commands) >= 15
+    for command in commands:
+        assert '-o ServerAliveInterval=15 -o ServerAliveCountMax=3' in command
+        assert '-o StrictHostKeyChecking=yes' in command
+
+
 def test_staging_preserves_legacy_and_builds_kamal_compatible_eros_image():
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
     build = next(s for s in workflow['jobs']['build']['steps'] if s.get('id') == 'eros')
