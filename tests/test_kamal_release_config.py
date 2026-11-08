@@ -1356,6 +1356,7 @@ def test_manifest_writer_behavior_tests_run_in_python_ci():
     assert oras_setup < evidence_tests
     assert "oras_1.3.0_linux_amd64.tar.gz" in tests_job
     assert "6cdc692f929100feb08aa8de584d02f7bcc30ec7d88bc2adc2054d782db57c64" in tests_job
+    assert "--retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 60" in tests_job
     assert '"$GITHUB_ENV"' in tests_job
 
 
