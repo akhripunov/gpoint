@@ -1,6 +1,38 @@
 import yaml
 import re
+import os
+import subprocess
+import pytest
 from pathlib import Path
+
+
+@pytest.mark.parametrize('previous,raced,expected,actions', [
+    ('', 'false', 0, []),
+    ('gpoint-core-api-' + 'a' * 40 + '-1-1', 'false', 0, ['stop']),
+    ('gpoint-core-api-' + 'a' * 40 + '-1-1', 'true', 1, ['stop', 'start']),
+    ('unexpected-container', 'false', 1, []),
+])
+def test_private_gateway_stop_shell_preserves_first_install_and_race_recovery(tmp_path, previous, raced, expected, actions):
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    deploy = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
+    section = deploy[deploy.index('check_queue_empty() {'):]
+    section = section[:section.index('GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST"')]
+    log = tmp_path / 'kamal.log'
+    script = '''set -euo pipefail
+    queue_calls=0
+    ssh() {
+      if [[ "${!#}" == 'docker ps'* ]]; then printf '%s' "$PREVIOUS"; return; fi
+      cat >/dev/null
+      queue_calls=$((queue_calls+1))
+      if [[ "$RACED" == true && "$queue_calls" == 2 ]]; then return 1; fi
+    }
+    kamal() { printf '%s\\n' "$2" >> "$ACTION_LOG"; }
+    ''' + section
+    result = subprocess.run(['bash', '-c', script], stdin=subprocess.DEVNULL, text=True, capture_output=True,
+                            env={**os.environ, 'PREVIOUS': previous, 'RACED': raced, 'ACTION_LOG': str(log),
+                                 'GITHUB_WORKSPACE': str(ROOT), 'GPOINT_LAYER7_STAGING_HOST': '95.133.236.59'})
+    assert result.returncode == expected, result.stderr
+    assert (log.read_text().splitlines() if log.exists() else []) == actions
 
 
 def test_staging_api_keeps_the_existing_private_worker_forward_port():
@@ -19,6 +51,9 @@ def test_staging_stops_only_managed_api_after_proving_queue_empty():
     boot = deploy.index('kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api')
     assert queue < stop < boot
     assert stop < deploy.index('check_queue_empty', stop) < boot
+    assert deploy.index('if [[ -n "$previous_api" ]]') < stop
+    assert 'if ! check_queue_empty; then' in deploy
+    assert 'kamal app start --version "$previous_version" --roles api' in deploy
     assert "status IN ('PENDING','RUNNING')" in deploy
     assert '-d gpoint_staging' in deploy
     assert '127.0.0.1:13001' in next(x['run'] for x in steps if x.get('name') == 'Verify runtime roles, health, Eros embeddings, and API-to-engine route')

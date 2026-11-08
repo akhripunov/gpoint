@@ -2187,9 +2187,26 @@ jobs:
           REMOTE_QUEUE
           }
           check_queue_empty
-          GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
-            kamal app stop --roles api --config-file config/deploy.layer7-staging.eros-api.yml
-          check_queue_empty
+          previous_api="$(ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+            "root@$GPOINT_LAYER7_STAGING_HOST" "docker ps --filter label=service=gpoint-core --filter label=role=api --filter label=destination= --format '{{.Names}}'")"
+          if [[ -n "$previous_api" ]]; then
+            [[ "$previous_api" =~ ^gpoint-core-api-[0-9a-f]{40}-[0-9]+-[0-9]+$ ]] || {
+              echo 'managed staging API identity is ambiguous or non-native' >&2
+              exit 1
+            }
+            GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
+              kamal app stop --roles api --config-file config/deploy.layer7-staging.eros-api.yml
+          fi
+          if ! check_queue_empty; then
+            if [[ -n "$previous_api" ]]; then
+              previous_version="${previous_api#gpoint-core-api-}"
+              GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
+                kamal app start --version "$previous_version" --roles api --config-file config/deploy.layer7-staging.eros-api.yml
+            fi
+            exit 1
+          fi
           GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.layer7-staging.eros-api.yml
           for role in worker bot; do
