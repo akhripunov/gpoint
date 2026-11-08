@@ -7,6 +7,12 @@ import sys
 import pytest
 
 
+@pytest.mark.parametrize('path', ['scripts/transition-agata-worker-v3.py', 'services/gsales/tests/test_shared_worker_http.py'])
+def test_retired_host_transition_and_shared_worker_fixture_are_known_non_runtime(path):
+    assert MODULE._known_non_runtime_path(path)
+    assert not MODULE._known_non_runtime_path(path + '.unreviewed')
+
+
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
     "native_release_intent", ROOT / "scripts/native_release_intent.py"

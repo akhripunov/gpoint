@@ -2170,6 +2170,26 @@ jobs:
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles engine --config-file config/deploy.layer7-staging.eros.yml
           GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles relay --config-file config/deploy.layer7-staging.eros-relay.yml
+          # The permanent Mac SSH forward targets this private fixed port.
+          # Drain its managed API before replacing the loopback listener.
+          check_queue_empty() {
+          ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+            "root@$GPOINT_LAYER7_STAGING_HOST" bash -s <<'REMOTE_QUEUE'
+          set -euo pipefail
+          postgres_user="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shared_postgres_1 | sed -n 's/^POSTGRES_USER=//p')"
+          test -n "$postgres_user"
+          queue_jobs="$(docker exec shared_postgres_1 psql -XqAt -U "$postgres_user" -d gpoint_staging \
+            -c "SELECT count(*) FROM engine.eros_inference_jobs WHERE status IN ('PENDING','RUNNING')")"
+          test "$queue_jobs" = 0
+          echo 'LAYER7_GPOINT_QUEUE_EMPTY=PASS'
+          REMOTE_QUEUE
+          }
+          check_queue_empty
+          GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
+            kamal app stop --roles api --config-file config/deploy.layer7-staging.eros-api.yml
+          check_queue_empty
           GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
             kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.layer7-staging.eros-api.yml
           for role in worker bot; do
@@ -2219,6 +2239,14 @@ jobs:
             fi
           done
           api="gpoint-core-api-$version" engine="gpoint-eros-pilot-engine-$version"
+          curl --fail --silent --show-error --max-time 5 http://127.0.0.1:13001/health/live >/dev/null
+          python3 - "$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$api")" <<'PY'
+          import json, sys
+          bindings = json.loads(sys.argv[1])
+          if bindings.get('3000/tcp') != [{'HostIp': '127.0.0.1', 'HostPort': '13001'}]:
+              raise SystemExit('staging Worker gateway is not bound exclusively to the expected loopback port')
+          print('LAYER7_PRIVATE_WORKER_GATEWAY=PASS')
+          PY
           docker exec "$api" node -e 'fetch("http://127.0.0.1:3000/health/live").then(r=>{if(!r.ok)process.exit(1);console.log("CORE_API_HEALTH=PASS")}).catch(()=>process.exit(1))'
           docker exec "$api" node --input-type=module - <<'JS'
           import dns from 'node:dns/promises';

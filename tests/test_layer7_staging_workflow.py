@@ -1,5 +1,27 @@
 import yaml
+import re
 from pathlib import Path
+
+
+def test_staging_api_keeps_the_existing_private_worker_forward_port():
+    text = (ROOT / 'config/deploy.layer7-staging.eros-api.yml').read_text()
+    config = yaml.safe_load(re.sub(r'<%=.*?%>', 'rendered', text))
+    assert config['servers']['api']['options']['publish'] == ['127.0.0.1:13001:3000']
+    assert config['servers']['api']['proxy'] is False
+
+
+def test_staging_stops_only_managed_api_after_proving_queue_empty():
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    steps = workflow['jobs']['layer7_staging']['steps']
+    deploy = next(x['run'] for x in steps if x.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
+    queue = deploy.index('LAYER7_GPOINT_QUEUE_EMPTY=PASS')
+    stop = deploy.index('kamal app stop --roles api')
+    boot = deploy.index('kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api')
+    assert queue < stop < boot
+    assert stop < deploy.index('check_queue_empty', stop) < boot
+    assert "status IN ('PENDING','RUNNING')" in deploy
+    assert '-d gpoint_staging' in deploy
+    assert '127.0.0.1:13001' in next(x['run'] for x in steps if x.get('name') == 'Verify runtime roles, health, Eros embeddings, and API-to-engine route')
 
 
 ROOT = Path(__file__).resolve().parents[1]
