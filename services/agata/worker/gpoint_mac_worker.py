@@ -710,17 +710,6 @@ def build_eros_completion_prompt(request: dict) -> str:
     )
 
 
-def eros_reply_character_limit(request: dict) -> int:
-    """Enforce a conservative character cap no larger than the requested token budget."""
-    max_tokens = request.get("max_tokens", 1024) if isinstance(request, dict) else None
-    temperature = request.get("temperature", 1) if isinstance(request, dict) else None
-    if (isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or not 1 <= max_tokens <= 4096
-            or isinstance(temperature, bool) or not isinstance(temperature, (int, float))
-            or temperature != 1):
-        raise RuntimeError("eros_chat_request_invalid")
-    return min(4096, max_tokens)
-
-
 def build_codex_exec_command(codex: Path, temp: Path, schema_file: Path,
                             result_file: Path, job: dict) -> list[str]:
     command = [
@@ -752,8 +741,6 @@ def run_inference(job: dict, *, cancel_check=None, metadata_out: dict | None = N
     request = job.get("request")
     if not isinstance(request, dict):
         raise RuntimeError("malformed_inference_job")
-    if eros_job:
-        max_length = eros_reply_character_limit(request)
     codex = Path(os.environ.get("GPOINT_CODEX_CLI", str(DEFAULT_CODEX)))
     if not codex.is_file():
         raise FatalConfigurationError("codex_cli_missing")
@@ -838,6 +825,9 @@ def run_inference(job: dict, *, cancel_check=None, metadata_out: dict | None = N
             schema["properties"]["text"]["maxLength"] = max_length
         schema_file.write_text(json.dumps(schema), encoding="utf-8")
         command = build_codex_exec_command(codex, temp, schema_file, result_file, job)
+        if eros_job:
+            max_tokens = request.get("max_tokens", 1024)
+            command.extend(["--config", f"model_max_output_tokens={max_tokens}"])
         if model:
             command.extend(["--model", model])
         if reasoning:

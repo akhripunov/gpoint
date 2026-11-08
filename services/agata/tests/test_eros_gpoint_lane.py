@@ -92,6 +92,49 @@ class ErosGpointLaneTests(unittest.TestCase):
             self.assertNotIn("GPOINT_AGATA_WORKER_TOKEN", observed["env"])
             self.assertEqual(observed["stderr"], subprocess.DEVNULL)
 
+    def test_eros_max_tokens_is_forwarded_as_tokens_not_character_limit(self):
+        with tempfile.TemporaryDirectory() as root:
+            temp = Path(root)
+            executable = temp / "codex"
+            executable.touch()
+            observed = {}
+
+            def execute(args, **kwargs):
+                observed["args"] = args
+                schema_path = Path(args[args.index("--output-schema") + 1])
+                observed["schema"] = json.loads(schema_path.read_text(encoding="utf-8"))
+                Path(args[args.index("--output-last-message") + 1]).write_text(
+                    json.dumps({"text": "A response longer than thirty-two characters."}),
+                    encoding="utf-8",
+                )
+
+                class MockProcess:
+                    pid = 134
+                    returncode = 0
+
+                    def poll(self):
+                        return self.returncode
+
+                    def communicate(self, input=None, timeout=None):
+                        return None, None
+
+                return MockProcess()
+
+            with patch.dict(os.environ, {**ENV, "GPOINT_CODEX_CLI": str(executable)}, clear=True), \
+                 patch.object(worker, "SUPPORT", temp), \
+                 patch.object(worker, "INFERENCE_PROCESS", temp / "inference-process.json"), \
+                 patch.object(worker.subprocess, "Popen", side_effect=execute):
+                result = worker.run_inference({
+                    "target": "GPOINT", "purpose": "eros_chat_completion",
+                    "request": {"model": "gpoint-codex", "messages": [
+                        {"role": "user", "content": "Please answer naturally."},
+                    ], "max_tokens": 32},
+                })
+
+            self.assertEqual(result, "A response longer than thirty-two characters.")
+            self.assertIn("model_max_output_tokens=32", observed["args"])
+            self.assertEqual(observed["schema"]["properties"]["text"]["maxLength"], 4096)
+
     def test_eros_chat_prompt_accepts_full_queue_request_including_model(self):
         prompt = worker.build_eros_completion_prompt({
             "model": "gpoint-codex",
@@ -100,7 +143,6 @@ class ErosGpointLaneTests(unittest.TestCase):
             "temperature": 1,
         })
         self.assertIn('"content":"hello"', prompt)
-        self.assertEqual(worker.eros_reply_character_limit({"max_tokens": 32, "temperature": 1}), 32)
 
     def test_eros_chat_rejects_unsupported_temperature(self):
         with self.assertRaisesRegex(RuntimeError, "eros_chat_request_invalid"):
