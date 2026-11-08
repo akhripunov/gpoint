@@ -3,7 +3,44 @@ import re
 import os
 import subprocess
 import pytest
+import json
+import sys
+from urllib.parse import urlsplit
 from pathlib import Path
+
+
+def test_staging_label_lookup_templates_use_valid_string_literals():
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    commands = '\n'.join(s.get('run', '') for s in workflow['jobs']['layer7_staging']['steps'])
+    args = re.findall(r"\{\{index \.Config\.Labels (.*?)\}\}", commands)
+    assert len(args) >= 4
+    assert {json.loads(arg) for arg in args} == {'com.gpoint.source.revision', 'org.opencontainers.image.revision'}
+
+
+def test_staging_route_probe_receives_stdin_and_uses_generated_eros_host():
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    verify = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Verify runtime roles, health, Eros embeddings, and API-to-engine route')
+    assert 'docker exec -i "$api" node --input-type=module -' in verify
+    writer = (ROOT / 'scripts/eros-production-secrets.py').read_text()
+    endpoint = re.search(r"'EROS_SERVICE_URL': '([^']+)'", writer).group(1)
+    checked_host = re.search(r"endpoint.hostname !== '([^']+)'", verify).group(1)
+    assert checked_host == urlsplit(endpoint).hostname
+
+
+@pytest.mark.parametrize('leak', ['', 'core_on_data', 'alias_on_shared'])
+def test_staging_network_isolation_probe_uses_actual_topology(tmp_path, leak):
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    verify = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Verify runtime roles, health, Eros embeddings, and API-to-engine route')
+    code = re.search(r"<<'PY_CORE_DB'\n(.*?)\nPY_CORE_DB", verify, re.S).group(1)
+    api = {'gpoint_eros_api': {}, 'shared_internal': {}}
+    db = {'gpoint_eros_data': {'Aliases': ['gpoint-eros-db']}, 'shared_internal': {'Aliases': None}}
+    if leak == 'core_on_data':
+        api['gpoint_eros_data'] = {}
+    if leak == 'alias_on_shared':
+        db['shared_internal']['Aliases'] = ['gpoint-eros-db']
+    result = subprocess.run([sys.executable, '-c', code, json.dumps(api), json.dumps(db)], text=True, capture_output=True)
+    assert (result.returncode == 0) == (not leak)
+    assert ('EROS_DATABASE_NETWORK_ISOLATION=PASS' in result.stdout) == (not leak)
 
 
 @pytest.mark.parametrize('previous,raced,expected,actions', [
