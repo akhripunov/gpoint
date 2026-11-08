@@ -4,7 +4,6 @@ import { createErosEngineClient, ErosAdapterError, erosIdentityFor } from '../..
 
 const api = 'http://127.0.0.1:3000';
 const creator = '20000000-0000-4000-8000-000000000002';
-const control = 'http://127.0.0.1:18080/control/state';
 
 async function request(url, { method = 'GET', token, body } = {}) {
   const response = await fetch(url, {
@@ -17,15 +16,6 @@ async function request(url, { method = 'GET', token, body } = {}) {
     signal: AbortSignal.timeout(60_000),
   });
   return { status: response.status, data: await response.json().catch(() => null) };
-}
-
-async function setFixtureState(update) {
-  const response = await request(control, {
-    method: 'POST',
-    token: process.env.EROS_TEST_AGATA_TOKEN,
-    body: update,
-  });
-  assert.equal(response.status, 200);
 }
 
 async function authenticate() {
@@ -127,26 +117,58 @@ const unauthenticated = await request(`${api}/messages/creator/${creator}`, {
 assert.equal(unauthenticated.status, 401);
 
 const token = await authenticate();
-await setFixtureState({ ageAssuranceRequired: true, longTermMemory: true });
+const policyState = await request(`${api}/messages/state`, { token });
+assert.equal(policyState.status, 200, JSON.stringify(policyState.data));
+assert.equal(policyState.data?.ageAssuranceRequired, true, 'the synthetic user starts without age assurance');
 const ageGate = await request(`${api}/messages/creator/${creator}`, {
   method: 'POST',
   token,
   body: { clientMessageId: randomUUID(), text: 'synthetic age gate check' },
 });
 assert.equal(ageGate.status, 403);
+assert.equal(ageGate.data?.code, 'AGE_ASSURANCE_REQUIRED');
 
-await setFixtureState({ ageAssuranceRequired: false, longTermMemory: false });
+const attestation = await request(`${api}/age-assurance/self-attest`, {
+  method: 'POST', token, body: { confirmed18Plus: true },
+});
+assert.equal(attestation.status, 201, JSON.stringify(attestation.data));
+assert.equal(attestation.data?.eligible, true);
+
+const consentBody = {
+  chatHistory: true,
+  longTermMemory: true,
+  termsAccepted: true,
+  privacyAccepted: true,
+  termsVersion: policyState.data?.termsVersion,
+  privacyVersion: policyState.data?.privacyVersion,
+  disclosureVersion: policyState.data?.disclosureVersion,
+};
+const consent = await request(`${api}/messages/consent`, { method: 'POST', token, body: consentBody });
+assert.equal(consent.status, 201, JSON.stringify(consent.data));
+
+const revoked = await request(`${api}/messages/consent/revoke`, {
+  method: 'POST', token, body: { purpose: 'long_term_memory' },
+});
+assert.equal(revoked.status, 201, JSON.stringify(revoked.data));
 const noConsent = await request(`${api}/messages/creator/${creator}`, {
   method: 'POST',
   token,
   body: { clientMessageId: randomUUID(), text: 'synthetic no-memory-consent check' },
 });
-assert.equal(noConsent.status, 201, JSON.stringify(noConsent.data));
-assert.equal(noConsent.data?.response?.text, 'DETERMINISTIC_LOCAL_E2E_REPLY',
-  'the deprecated optional memory flag must not block Eros after required disclosure is current');
+assert.equal(noConsent.status, 403, JSON.stringify(noConsent.data));
+assert.equal(noConsent.data?.code, 'CHAT_CONSENT_REQUIRED');
+
+const restoredConsent = await request(`${api}/messages/consent`, { method: 'POST', token, body: consentBody });
+assert.equal(restoredConsent.status, 201, JSON.stringify(restoredConsent.data));
+const consentRestoredMessage = await request(`${api}/messages/creator/${creator}`, {
+  method: 'POST', token,
+  body: { clientMessageId: randomUUID(), text: 'Synthetic consent restored check before our continuity exercise.' },
+});
+assert.equal(consentRestoredMessage.status, 201, JSON.stringify(consentRestoredMessage.data));
+assert.equal(consentRestoredMessage.data?.status, 'completed');
+assert.equal(consentRestoredMessage.data?.response?.text, 'DETERMINISTIC_LOCAL_E2E_REPLY');
 await assertStockApiUserIsolation();
 
-await setFixtureState({ ageAssuranceRequired: false, longTermMemory: true });
 const dialogue = [
   'SYNTH_CITY_ZEPHYRBAY: In this synthetic continuity test, I live in Zephyr Bay. My meeting is currently on 22 October 2026 at 18:40, marker SYNTH_OLD_2026-10-22_18:40.',
   'Correction: the meeting moved to 23 October 2026 at 19:15, marker SYNTH_CURRENT_2026-10-23_19:15. Keep the earlier date as history only.',

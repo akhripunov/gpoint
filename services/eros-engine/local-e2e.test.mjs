@@ -228,6 +228,17 @@ test('local Worker fixture treats SIGTERM as a clean stop, not a job timeout', (
   assert.match(worker, /if not stopped and time\.monotonic\(\) >= deadline:/);
 });
 
+test('local Eros E2E uses persisted GPoint age and explicit consent state', () => {
+  const runner = readFileSync(new URL('./run-local-e2e.sh', import.meta.url), 'utf8');
+  const e2e = readFileSync(new URL('./local-test-e2e.mjs', import.meta.url), 'utf8');
+  assert.match(runner, /INSERT INTO "GpointChatPolicyProfile"/);
+  assert.match(e2e, /\/age-assurance\/self-attest/);
+  assert.match(e2e, /\/messages\/consent/);
+  assert.match(e2e, /\/messages\/consent\/revoke/);
+  assert.match(e2e, /CHAT_CONSENT_REQUIRED/);
+  assert.doesNotMatch(e2e, /setFixtureState/);
+});
+
 test('Compose exposes no test service outside the internal Docker network', (context) => {
   const environment = {
     ...process.env,
