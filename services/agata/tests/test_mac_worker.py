@@ -182,11 +182,13 @@ class MacWorkerTests(unittest.TestCase):
         token = "test-worker-secret"
         responses = iter([
             {"status": "ready"},
-            {"job": {"id": "job-1", "leaseToken": "lease-1", "request": {"user_message": "hi"}}},
+            {"job": {"id": "job-1", "leaseToken": "lease-1", "target": "GPOINT",
+                      "tenant_id": TEST_GPOINT_TENANT_ID, "purpose": "response",
+                      "request": {"user_message": "hi"}}},
             {"completed": True},
             {"status": "ready"},
             {
-                "source_id": "agata-worker-queue-status-v1:gpoint",
+                "source_id": "gpoint-eros-worker-queue-status-v1:gpoint",
                 "lane": "GPOINT",
                 "pending_jobs": 2,
                 "running_jobs": 1,
@@ -200,7 +202,9 @@ class MacWorkerTests(unittest.TestCase):
             calls.append((path, body))
             return next(responses)
 
-        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_TOKEN": token, "GPOINT_AGATA_TENANT_ID": TEST_GPOINT_TENANT_ID, "AGATA_WORKER_MODEL": "test-model"}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"), patch("sys.stdout", output):
+        with patch.dict(os.environ, {"GPOINT_EROS_WORKER_URL": "https://gpoint.one/api/gpoint-worker",
+                                     "GPOINT_EROS_WORKER_TOKEN": token, "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID,
+                                     "AGATA_WORKER_MODEL": "test-model"}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"), patch("sys.stdout", output):
             self.assertTrue(worker.process_one())
             self.assertEqual(worker.status(), 0)
 
@@ -226,13 +230,17 @@ class MacWorkerTests(unittest.TestCase):
             worker._last_heartbeat_attempt = float("-inf")
             def api(path, body=None, expected_model=expected):
                 if path == "claim":
-                    return {"job": {"id": "7508f36f-774a-48aa-8c6b-42f6f160415d", "leaseToken": "x" * 32, "request": {}}}
+                    return {"job": {"id": "7508f36f-774a-48aa-8c6b-42f6f160415d", "leaseToken": "x" * 32,
+                                    "target": "GPOINT", "tenant_id": TEST_GPOINT_TENANT_ID,
+                                    "purpose": "response", "request": {}}}
                 if path == "complete":
                     validated = WorkerCompleteRequest(**body)
                     self.assertEqual(validated.model, expected_model)
                 return {"accepted": True}
 
-            with self.subTest(model=model), patch.dict(os.environ, {"AGATA_CODEX_MODEL": model, "GPOINT_AGATA_WORKER_TOKEN": "test-only", "GPOINT_AGATA_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"):
+            with self.subTest(model=model), patch.dict(os.environ, {"AGATA_CODEX_MODEL": model,
+                    "GPOINT_EROS_WORKER_URL": "https://gpoint.one/api/gpoint-worker",
+                    "GPOINT_EROS_WORKER_TOKEN": "test-only", "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(worker, "api_request", side_effect=api), patch.object(worker, "run_inference", return_value="answer"):
                 self.assertTrue(worker.process_one())
 
     def test_inference_failure_reports_retryable_safe_code(self):
@@ -241,10 +249,12 @@ class MacWorkerTests(unittest.TestCase):
         def api(path, body=None):
             calls.append((path, body))
             if path == "claim":
-                return {"job": {"id": "job-2", "leaseToken": "lease-2", "request": {}}}
+                return {"job": {"id": "job-2", "leaseToken": "lease-2", "target": "GPOINT",
+                                "tenant_id": TEST_GPOINT_TENANT_ID, "purpose": "response", "request": {}}}
             return {"accepted": True, "state": "pending"}
 
-        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_TOKEN": "test-only", "GPOINT_AGATA_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(worker, "api_request", side_effect=api), patch.object(
+        with patch.dict(os.environ, {"GPOINT_EROS_WORKER_URL": "https://gpoint.one/api/gpoint-worker",
+                                    "GPOINT_EROS_WORKER_TOKEN": "test-only", "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(worker, "api_request", side_effect=api), patch.object(
             worker, "run_inference", side_effect=RuntimeError("codex_execution_failed_1")
         ):
             self.assertFalse(worker.process_one())
@@ -254,7 +264,8 @@ class MacWorkerTests(unittest.TestCase):
         self.assertNotIn("lease-2", worker.STATUS.read_text(encoding="utf-8"))
 
     def test_gateway_requires_https_and_token(self):
-        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_URL": "http://example.test", "GPOINT_AGATA_WORKER_TOKEN": "secret"}):
+        with patch.dict(os.environ, {"GPOINT_EROS_WORKER_URL": "http://example.test",
+                                     "GPOINT_EROS_WORKER_TOKEN": "secret", "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "worker_gateway_or_auth_unconfigured"):
                 worker.api_request("claim")
 

@@ -267,6 +267,13 @@ compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP
 INSERT INTO "User" (id,"telegramUserId","telegramUsername","firstName","createdAt","updatedAt") VALUES ('10000000-0000-4000-8000-000000000001',900000001,'eros_test_dialogue','Synthetic',now(),now());
 INSERT INTO "Creator" (id,"displayName",slug,"createdAt") VALUES ('20000000-0000-4000-8000-000000000002','Synthetic Eros Persona','eros-test-persona',now());
 SQL
+compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 <<SQL
+INSERT INTO "GpointChatPolicyProfile"
+  (id,"sourceTenantId",version,"termsVersion","privacyVersion",status,"effectiveFrom",rules)
+VALUES
+  ('eros_test_gpoint_policy','$tenant',1,'gpoint-terms-v1','gpoint-privacy-v1','active',now(),
+   '{"minimum_age":18,"ai_disclosure_required":true,"self_attestation_allowed":true,"adult_only_features":[],"disclosure_repeat_hours":24}'::jsonb);
+SQL
 compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c \
   "INSERT INTO \"CreatorProfile\" (id,\"creatorId\",status,bio,\"tagsJson\",\"erosGenomeId\") VALUES ('eros_test_profile','20000000-0000-4000-8000-000000000002','APPROVED','Local synthetic test persona','[]','$genome_id'::uuid);"
 postgres_id=$(compose ps -q postgres)

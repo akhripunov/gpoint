@@ -15,7 +15,6 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worker"))
 import gpoint_mac_worker as worker  # noqa: E402
-from agata_worker_pool import PoolConfig, PoolPaths, PoolSupervisor  # noqa: E402
 
 TEST_GPOINT_TENANT_ID = "7508f36f-774a-48aa-8c6b-42f6f160415d"
 
@@ -76,8 +75,8 @@ class MacWorkerHttpTests(unittest.TestCase):
             return httpx.Response(200, json={"status": "ready"})
 
         with patch.dict(os.environ, {
-            "GPOINT_AGATA_WORKER_URL": "https://gpoint.one/api/agata-worker",
-            "GPOINT_AGATA_WORKER_TOKEN": "test-secret",
+            "GPOINT_EROS_WORKER_URL": "https://gpoint.one/api/gpoint-worker",
+            "GPOINT_EROS_WORKER_TOKEN": "test-secret",
         }), patch.object(worker.httpx, "AsyncClient", side_effect=lambda **_kwargs: self.client_for(handler)):
             self.assertEqual(worker.api_request("health"), {"status": "ready"})
             worker.api_request("complete", {"text": "reply"})
@@ -95,14 +94,14 @@ class MacWorkerHttpTests(unittest.TestCase):
         def handler(request):
             observed.append(request)
             return httpx.Response(200, json={
-                "source_id": "agata-worker-queue-status-v1:gpoint",
+                "source_id": "gpoint-eros-worker-queue-status-v1:gpoint",
                 "lane": "GPOINT", "pending_jobs": 0, "running_jobs": 0,
                 "snapshot_at": "2026-10-07T10:00:00+00:00",
             })
 
         with patch.dict(os.environ, {
-            "GPOINT_AGATA_WORKER_URL": "https://gpoint.one/api/agata-worker",
-            "GPOINT_AGATA_WORKER_TOKEN": "test-secret",
+            "GPOINT_EROS_WORKER_URL": "https://gpoint.one/api/gpoint-worker",
+            "GPOINT_EROS_WORKER_TOKEN": "test-secret",
         }), patch.object(worker.httpx, "AsyncClient", side_effect=lambda **_kwargs: self.client_for(handler)):
             result = worker.api_request("queue-status")
 
@@ -113,21 +112,12 @@ class MacWorkerHttpTests(unittest.TestCase):
         self.assertNotIn("claim", observed[0].url.path)
 
     def test_status_includes_sanitized_per_lane_queue_counts(self):
-        status_file = PoolPaths(Path(self.temp.name)).worker_status_file
-        status_file.parent.mkdir(parents=True, exist_ok=True)
-        status_file.write_text(json.dumps({"targets": {}}))
-        pool_status = PoolPaths(Path(self.temp.name)).status_file
-        pool_status.write_text(json.dumps({
-            "pool": {"state": "HEALTHY", "busy": 0, "total": 1, "idle": 1},
-            "updated_at": "2026-10-07T10:00:00+00:00",
-            "lanes": {"GPOINT": {"state": "HEALTHY"}, "GSALES": {"state": "HEALTHY"}},
-        }))
+        worker.STATUS.parent.mkdir(parents=True, exist_ok=True)
+        worker.STATUS.write_text(json.dumps({"targets": {}}))
         queue = {
-            "GPOINT": {"source_id": "agata-worker-queue-status-v1:gpoint", "lane": "GPOINT", "pending_jobs": 2,
+            "GPOINT": {"source_id": "gpoint-eros-worker-queue-status-v1:gpoint", "lane": "GPOINT", "pending_jobs": 2,
                        "running_jobs": 0, "snapshot_at": "2026-10-07T10:00:00+00:00",
                        "private_payload": "must-not-appear"},
-            "GSALES": {"source_id": "agata-worker-queue-status-v1:gsales", "lane": "GSALES", "pending_jobs": 0,
-                       "running_jobs": 0, "snapshot_at": "2026-10-07T10:00:01+00:00"},
         }
         def request(target, path):
             if path == "health":
@@ -137,17 +127,18 @@ class MacWorkerHttpTests(unittest.TestCase):
             self.fail(f"unexpected request {path}")
         output = io.StringIO()
         with patch.object(worker, "load_worker_configs"), patch.object(worker.shutil, "which", return_value=None), \
-             patch.object(worker, "configured_targets", return_value={"GPOINT": ("url", "token"), "GSALES": ("url", "token")}), \
+             patch.object(worker, "configured_targets", return_value={"GPOINT": ("url", "token")}), \
              patch.object(worker, "target_request", side_effect=request), patch("sys.stdout", output):
             self.assertEqual(worker.status(), 0)
 
         rendered = output.getvalue()
         value = json.loads(rendered)
         self.assertEqual(value["lanes"]["GPOINT"]["pending_inference_jobs"], 2)
-        self.assertEqual(value["lanes"]["GSALES"]["pending_inference_jobs"], 0)
         self.assertEqual(value["lanes"]["GPOINT"]["queue_snapshot_state"], "VERIFIED")
         self.assertEqual(value["lanes"]["GPOINT"]["health"], "HEALTHY")
-        self.assertEqual(value["pool"]["busy"], 0)
+        self.assertEqual(set(value["lanes"]), {"GPOINT"})
+        self.assertNotIn("pool", value)
+        self.assertNotIn("slots", value)
         self.assertNotIn("must-not-appear", rendered)
         self.assertNotIn("private_payload", value["lanes"]["GPOINT"])
 
@@ -173,26 +164,40 @@ class MacWorkerHttpTests(unittest.TestCase):
         self.assertEqual(lane["queue_snapshot_error_code"], "worker_gateway_http_404")
         self.assertNotIn("token", value)
 
-    def test_reg_b_worker_survives_connect_timeout_and_recovers(self):
+    def _run_watch_until_sleep(self, results, stop_after):
         calls = []
+        delays = []
 
-        def claim():
-            calls.append(True)
-            if len(calls) == 1:
-                raise worker.TransientNetworkError("worker_gateway_network_error")
-            return None
+        class StopLoop(Exception):
+            pass
 
-        pool = PoolSupervisor(PoolPaths(Path(self.temp.name)), PoolConfig(), {"GPOINT": claim}, clock=lambda: 0)
-        try:
-            pool.start()
-            self.assertEqual(pool.poll_once(now=0), 0)
-            self.assertEqual(pool.poll_once(now=1), 0)
-            self.assertEqual(pool.poll_once(now=2), 0)
-            self.assertEqual(len(calls), 2)
-            status = json.loads(pool.paths.status_file.read_text())
-            self.assertEqual(status["lanes"]["GPOINT"]["state"], "HEALTHY")
-        finally:
-            pool.close()
+        def process_one(target):
+            calls.append(target)
+            result = results[len(calls) - 1]
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+        def sleep(delay):
+            delays.append(delay)
+            if len(delays) == stop_after:
+                raise StopLoop
+
+        with patch.object(worker, "validate_startup_configuration"), \
+             patch.object(worker, "acquire_worker_lock", return_value=io.StringIO()), \
+             patch.object(worker, "_clear_stale_inference_record"), \
+             patch.object(worker, "write_status") , \
+             patch.object(worker, "process_one", side_effect=process_one):
+            with self.assertRaises(StopLoop):
+                worker.run_single_worker(sleep_fn=sleep)
+        return calls, delays
+
+    def test_reg_b_worker_survives_connect_timeout_and_recovers(self):
+        calls, delays = self._run_watch_until_sleep(
+            [worker.TransientNetworkError("worker_gateway_network_error"), False], 2,
+        )
+        self.assertEqual(calls, ["GPOINT", "GPOINT"])
+        self.assertEqual(delays, [1.0, 3.0])
 
     def test_reg_c_network_failure_during_complete_does_not_fail_or_duplicate_job(self):
         paths = []
@@ -202,12 +207,19 @@ class MacWorkerHttpTests(unittest.TestCase):
             if path == "health":
                 return {"status": "ready"}
             if path == "claim":
-                return {"job": {"id": "job-1", "leaseToken": "lease-1", "request": {}}}
+                return {"job": {
+                    "id": "job-1", "leaseToken": "lease-1", "target": "GPOINT",
+                    "tenant_id": TEST_GPOINT_TENANT_ID,
+                    "purpose": "eros_chat_completion", "request": {},
+                }}
             if path == "complete":
                 raise worker.TransientNetworkError("worker_gateway_network_error")
             self.fail(f"unexpected {path} request")
 
-        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_TOKEN": "test-secret", "GPOINT_AGATA_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(
+        with patch.dict(os.environ, {
+            "GPOINT_EROS_WORKER_URL": "https://gpoint.one/api/gpoint-worker",
+            "GPOINT_EROS_WORKER_TOKEN": "test-secret", "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID,
+        }), patch.object(
             worker, "api_request", side_effect=api
         ), patch.object(worker, "run_inference", return_value="reply"):
             with self.assertRaises(worker.TransientNetworkError):
@@ -217,28 +229,15 @@ class MacWorkerHttpTests(unittest.TestCase):
         self.assertIn('"current_job_present":true', worker.STATUS.read_text())
 
     def test_reg_d_recovery_resets_backoff(self):
-        calls = iter((
+        calls, delays = self._run_watch_until_sleep([
             worker.TransientNetworkError("network"),
             worker.TransientNetworkError("network"),
-            None,
+            False,
             worker.TransientNetworkError("network"),
-            None,
-        ))
-        def claim():
-            value = next(calls)
-            if value:
-                raise value
-            return None
-
-        pool = PoolSupervisor(PoolPaths(Path(self.temp.name)), PoolConfig(), {"GPOINT": claim}, clock=lambda: 0)
-        try:
-            pool.start()
-            for now in (0, 2, 6, 7, 9):
-                pool.poll_once(now=now)
-            status = json.loads(pool.paths.status_file.read_text())
-            self.assertEqual(status["lanes"]["GPOINT"]["state"], "HEALTHY")
-        finally:
-            pool.close()
+            False,
+        ], 5)
+        self.assertEqual(calls, ["GPOINT"] * 5)
+        self.assertEqual(delays, [1.0, 2.0, 3.0, 1.0, 3.0])
 
     def test_reg_e_completed_job_has_one_completion_and_no_failure_call(self):
         calls = []
@@ -246,10 +245,17 @@ class MacWorkerHttpTests(unittest.TestCase):
         def api(path, body=None):
             calls.append(path)
             if path == "claim":
-                return {"job": {"id": "job-2", "leaseToken": "lease-2", "request": {}}}
+                return {"job": {
+                    "id": "job-2", "leaseToken": "lease-2", "target": "GPOINT",
+                    "tenant_id": TEST_GPOINT_TENANT_ID,
+                    "purpose": "eros_chat_completion", "request": {},
+                }}
             return {"completed": True}
 
-        with patch.dict(os.environ, {"GPOINT_AGATA_WORKER_TOKEN": "test-secret", "GPOINT_AGATA_TENANT_ID": TEST_GPOINT_TENANT_ID}), patch.object(
+        with patch.dict(os.environ, {
+            "GPOINT_EROS_WORKER_URL": "https://gpoint.one/api/gpoint-worker",
+            "GPOINT_EROS_WORKER_TOKEN": "test-secret", "GPOINT_EROS_TENANT_ID": TEST_GPOINT_TENANT_ID,
+        }), patch.object(
             worker, "api_request", side_effect=api
         ), patch.object(worker, "run_inference", return_value="reply"):
             self.assertTrue(worker.process_one())
@@ -257,16 +263,16 @@ class MacWorkerHttpTests(unittest.TestCase):
         self.assertNotIn("fail", calls)
 
     def test_reg_f_fatal_configuration_error_stops_watch(self):
-        with self.assertRaises(ValueError):
-            PoolConfig.from_env({"AGATA_WORKER_CONCURRENCY": "2"})
+        with self.assertRaises(worker.FatalConfigurationError):
+            worker.run_single_worker(poll_seconds=61)
 
     def test_reg_g_network_error_does_not_expose_credentials(self):
         def handler(_request):
             raise httpx.ConnectTimeout("test-secret")
 
         with patch.dict(os.environ, {
-            "GPOINT_AGATA_WORKER_URL": "https://gpoint.one/api/agata-worker",
-            "GPOINT_AGATA_WORKER_TOKEN": "test-secret",
+            "GPOINT_EROS_WORKER_URL": "https://gpoint.one/api/gpoint-worker",
+            "GPOINT_EROS_WORKER_TOKEN": "test-secret",
         }), patch.object(worker.httpx, "AsyncClient", side_effect=lambda **_kwargs: self.client_for(handler)):
             with self.assertRaises(worker.TransientNetworkError) as raised:
                 worker.api_request("health")

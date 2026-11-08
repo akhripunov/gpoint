@@ -46,9 +46,10 @@ SOURCES = {
 TARGETS = {"worker": WORKER, "helper": HELPER, "fixture_manifest": FIXTURE_MANIFEST,
            "wrapper": WRAPPER, "plist": PLIST, "tenant_bindings": TENANT_BINDINGS}
 STATE_ROOT = SUPPORT / "v3-transition-recovery"
-TRANSITION_LOCK = HOME / ".config/gpoint/unified-worker-transition.lock"
+TRANSITION_LOCK = HOME / ".config/gpoint/agata-worker-pool-transition.lock"
 UTC = timezone.utc
 LEGACY_GPOINT_GATEWAY_URL = "https://gpoint.one/api/agata-worker"
+EROS_LABEL = "one.gpoint.eros-worker"
 
 
 def digest(path: Path) -> str:
@@ -62,6 +63,12 @@ def git_output(*args: str) -> str:
 
 def loaded() -> bool:
     result = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+    return result.returncode == 0
+
+
+def eros_loaded() -> bool:
+    result = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{EROS_LABEL}"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
     return result.returncode == 0
 
@@ -346,6 +353,8 @@ def _bounded_timeout(seconds: float, deadline: float | None) -> float:
 
 
 def _bootstrap(deadline: float | None = None) -> None:
+    if eros_loaded():
+        raise RuntimeError("eros_worker_already_loaded")
     domain = f"gui/{os.getuid()}"
     # The installed plist is RunAtLoad + KeepAlive. `bootstrap` starts it;
     # force-kickstarting immediately afterward can block while launchd is

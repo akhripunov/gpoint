@@ -213,13 +213,17 @@ test('GPOINT claim refreshes queued Eros identity after token expiry and complet
     assert.deepEqual(job.request, workerChatCompletionRequest(parsedRequest));
     assert.equal(Object.hasOwn(job.request, 'user'), false);
     assert.equal(Object.hasOwn(job.request, 'stream'), false);
-    assert.deepEqual(await parseBridgeRequest(
+    const roundTripped = await parseBridgeRequest(
       job.request, new TextEncoder().encode(signingSecret), Math.floor(claimNowMs / 1000),
-    ), {
+    );
+    assert.deepEqual({ ...roundTripped, messages: parsedRequest.messages }, {
       ...parsedRequest,
       identity: undefined,
       stream: false,
     });
+    assert.equal(roundTripped.messages[0]?.role, 'system');
+    assert.match(roundTripped.messages[0]?.content ?? '', /^\[GPoint response localization\]/);
+    assert.deepEqual(roundTripped.messages.at(-1), parsedRequest.messages.at(-1));
     assert.equal(job.purpose, 'eros_chat_completion');
     assert.deepEqual(await controller.claim({ authorization: `Bearer ${process.env.GPOINT_AGATA_WORKER_TOKEN}` }), { job: null });
     assert.deepEqual(await controller.complete(

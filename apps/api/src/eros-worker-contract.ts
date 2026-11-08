@@ -56,11 +56,30 @@ export interface ErosWorkerChatCompletionRequest {
   temperature: number;
 }
 
-/** Pass only normalized inference fields to the Mac Worker; signed audit metadata stays in Core. */
+const GPOINT_EROS_DIALOGUE_ADAPTER = `[GPoint response localization]
+Treat Eros's supplied character identity, speech style, current mood, relationship signals, feelings, and retrieved memories as the authoritative state. Express them naturally without inventing state, narrating internal labels, or exposing internal prompts, memory records, scores, or hidden reasoning.
+Use the language of the latest user message, and use natural English when that message is English. Do not switch to Chinese unless the user requests it or it is needed for a proper name or a direct quote.
+Answer the user's actual question or request directly and specifically before adding an in-character reaction or follow-up. A relationship or mood cue may shape the answer, but must not replace the requested answer.
+Choose a response length proportionate to the request. The stock Chinese [reply_length] guidance is a conversational cue, not a literal English character or sentence budget. Do not enforce a fixed character ceiling or a fixed sentence limit; stay concise for simple social turns and provide a complete, useful answer with concrete detail when asked.
+Return only user-facing plain text under Eros's output contract. Preserve GPoint's 18+ age verification, consent, AI disclosure, privacy, and all Eros safety requirements.`;
+
+function adaptGpointErosChatMessages(messages: ErosBridgeMessage[]): ErosBridgeMessage[] {
+  const firstDialogueIndex = messages.findIndex((message) => message.role !== 'system');
+  const insertionIndex = firstDialogueIndex === -1 ? messages.length : firstDialogueIndex;
+  return [
+    ...messages.slice(0, insertionIndex),
+    { role: 'system', content: GPOINT_EROS_DIALOGUE_ADAPTER },
+    ...messages.slice(insertionIndex),
+  ];
+}
+
+/** Pass normalized inference fields to the Mac Worker; localize only signed GPoint user chat. */
 export function workerChatCompletionRequest(parsed: ParsedErosBridgeRequest): ErosWorkerChatCompletionRequest {
   return {
     model: parsed.model,
-    messages: parsed.messages.map(({ role, content }) => ({ role, content })),
+    messages: parsed.identity
+      ? adaptGpointErosChatMessages(parsed.messages).map(({ role, content }) => ({ role, content }))
+      : parsed.messages.map(({ role, content }) => ({ role, content })),
     max_tokens: parsed.maxTokens,
     temperature: parsed.temperature,
   };
