@@ -1946,6 +1946,8 @@ jobs:
           test "$(ssh-keygen -lf infra/staging/layer7_known_hosts | awk '{print $2}')" = \
             SHA256:kFA7rNcjar68J6lmq25teS0uV6DVCmTx+t7I0xTof/U
           ssh-keygen -F "$GPOINT_LAYER7_STAGING_HOST" -f infra/staging/layer7_known_hosts >/dev/null
+          # The single-quoted check expands on the remote host, not locally.
+          # shellcheck disable=SC2016
           LAYER7_SSH_KEY="$key" "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" 'test "$(id -u)" = 0'
       - name: Validate staging-only application environment without logging values
