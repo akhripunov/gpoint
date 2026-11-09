@@ -68,9 +68,12 @@ for role in $(printf '%s' "$roles" | tr ',' ' '); do
       -o IdentitiesOnly=yes \
       -o StrictHostKeyChecking=yes \
       -o UserKnownHostsFile="$known_hosts" \
-      "root@$host" bash -s -- "$service" "$role" "$version" "$networks" "$candidate" "$app_source_sha" <<'REMOTE'
+      "root@$host" bash -s -- "$service" "$role" "$version" "${networks:--}" "$candidate" "$app_source_sha" <<'REMOTE'
 set -euo pipefail
 service="$1"; role="$2"; version="$3"; networks="$4"; candidate="$5"; app_source_sha="$6"
+# ssh joins remote arguments without quoting, so an empty network list would
+# vanish and shift every later positional parameter. "-" is the empty marker.
+if [ "$networks" = "-" ]; then networks=""; fi
 container="${service}-${role}-${version}"
 [[ "$container" =~ ^[A-Za-z0-9._-]+$ && "$candidate" =~ ^[0-9a-f]{40}$ && "$app_source_sha" =~ ^[0-9a-f]{40}$ ]]
 [[ "$version" == "$candidate-"* && "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
