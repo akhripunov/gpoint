@@ -1946,9 +1946,7 @@ jobs:
           test "$(ssh-keygen -lf infra/staging/layer7_known_hosts | awk '{print $2}')" = \
             SHA256:kFA7rNcjar68J6lmq25teS0uV6DVCmTx+t7I0xTof/U
           ssh-keygen -F "$GPOINT_LAYER7_STAGING_HOST" -f infra/staging/layer7_known_hosts >/dev/null
-          ssh -F /dev/null -i "$key" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          LAYER7_SSH_KEY="$key" "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" 'test "$(id -u)" = 0'
       - name: Validate staging-only application environment without logging values
         id: staging_env
@@ -1977,48 +1975,30 @@ jobs:
           set -euo pipefail
           install_id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           remote_script="/run/gpoint-layer7-staging-env-$install_id.py"
-          scp -q -F /dev/null -i "$HOME/.ssh/gpoint_layer7" \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" scp \
             scripts/layer7_staging_env.py scripts/write_layer7_staging_env.py \
             "root@$GPOINT_LAYER7_STAGING_HOST:/run/"
-          ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" install -m 0600 \
             /run/write_layer7_staging_env.py "$remote_script"
-          trap 'ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" "root@$GPOINT_LAYER7_STAGING_HOST" rm -f "$remote_script" /run/layer7_staging_env.py /run/layer7_staging_database.py /run/eros-production-secrets.py /run/write_layer7_staging_eros_api_env.py' EXIT
-          printf '%s' "$STAGING_ENV_BUNDLE" | ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          trap '"$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh "root@$GPOINT_LAYER7_STAGING_HOST" rm -f "$remote_script" /run/layer7_staging_env.py /run/layer7_staging_database.py /run/eros-production-secrets.py /run/write_layer7_staging_eros_api_env.py' EXIT
+          printf '%s' "$STAGING_ENV_BUNDLE" | "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" python3 "$remote_script" \
             --run-id "$install_id" --sha256 "$(printf '%s' "$STAGING_ENV_BUNDLE" | python3 -c 'import sys; from pathlib import Path; sys.path.insert(0,"scripts"); from layer7_staging_env import parse_staging_env; print(parse_staging_env(sys.stdin.read(48001))[1])')"
-          scp -q -F /dev/null -i "$HOME/.ssh/gpoint_layer7" \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" scp \
             scripts/layer7_staging_database.py "root@$GPOINT_LAYER7_STAGING_HOST:/run/layer7_staging_database.py"
-          ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" python3 /run/layer7_staging_database.py
-          scp -q -F /dev/null -i "$HOME/.ssh/gpoint_layer7" \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" scp \
             scripts/eros-production-secrets.py scripts/write_layer7_staging_eros_api_env.py \
             "root@$GPOINT_LAYER7_STAGING_HOST:/run/"
-          ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" chmod 0600 /run/write_layer7_staging_eros_api_env.py
-          ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" python3 /run/write_layer7_staging_eros_api_env.py \
             --eros-env /opt/gpoint/env/eros.env --source-env /opt/gpoint/env/staging.env \
             --output /opt/gpoint/env/layer7-staging-eros-api.env
-          ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" rm -f /run/eros-production-secrets.py
       - name: Layer7 staging preflight and isolated GPoint schema bootstrap
         id: staging_preflight
@@ -2027,9 +2007,7 @@ jobs:
           IMAGE_VERSION: ${{ steps.prepared.outputs.image_version }}
         run: |
           set -euo pipefail
-          ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" bash -s -- \
             "$CANDIDATE_SHA" "$IMAGE_VERSION" "$CORE_DIGEST" <<'REMOTE'
           set -euo pipefail
@@ -2073,34 +2051,24 @@ jobs:
           set -euo pipefail
           [[ "$CORE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ && "$MINIAPP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ && "$EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           cleanup_registry() {
-            ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-              -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-              -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+            "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
               "root@$GPOINT_LAYER7_STAGING_HOST" rm -rf "/run/gpoint-ghcr-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           }
           trap cleanup_registry EXIT
           remote_docker_config="/run/gpoint-ghcr-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" install -d -o root -g root -m 0700 "$remote_docker_config"
-          printf '%s' "$GHCR_TOKEN" | ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          printf '%s' "$GHCR_TOKEN" | "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" \
             "DOCKER_CONFIG='$remote_docker_config' docker login ghcr.io --username '$GITHUB_ACTOR' --password-stdin" >/dev/null
           for spec in "ghcr.io/akhripunov/gpoint-runtime|$CORE_DIGEST" \
                       "ghcr.io/akhripunov/gpoint-miniapp|$MINIAPP_DIGEST" \
                       "ghcr.io/akhripunov/gpoint-eros|$EROS_DIGEST"; do
             image="${spec%%|*}" digest="${spec#*|}"
-            ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-              -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-              -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+            "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
               "root@$GPOINT_LAYER7_STAGING_HOST" env DOCKER_CONFIG="$remote_docker_config" \
               docker pull --platform linux/amd64 "$image:$IMAGE_VERSION" >/dev/null
-            ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-              -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-              -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+            "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
               "root@$GPOINT_LAYER7_STAGING_HOST" bash -s -- "$image" "$digest" "$IMAGE_VERSION" "$CANDIDATE_SHA" <<'REMOTE'
           set -euo pipefail
           image="$1" digest="$2" version="$3" sha="$4"
@@ -2123,22 +2091,16 @@ jobs:
         run: |
           set -euo pipefail
           remote_docker_config="/run/gpoint-ghcr-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" env DOCKER_CONFIG="$remote_docker_config" \
             docker run --rm --network shared_internal --env-file /opt/gpoint/env/staging.env \
             --workdir /app/packages/db "ghcr.io/akhripunov/gpoint-runtime:$IMAGE_VERSION" \
             pnpm exec prisma migrate deploy
-          ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" python3 - --mode prepare \
             --candidate "$CANDIDATE_SHA" --image "ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST" \
             --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" < scripts/eros-native-database.py
-          ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" python3 - --mode apply \
             --candidate "$CANDIDATE_SHA" --image "ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST" \
             --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" < scripts/eros-native-database.py
@@ -2157,23 +2119,17 @@ jobs:
           kamal() { command kamal "$@"; }
           eros_model_digest="$(python3 -c 'import json; print(json.load(open("services/eros-engine/ollama-model.lock.json"))["digest"])')"
           [[ "$eros_model_digest" =~ ^[0-9a-f]{64}$ ]]
-          ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" docker inspect gpoint-eros-relay-ollama >/dev/null 2>&1 || {
               GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay kamal accessory boot ollama --hosts "$GPOINT_LAYER7_STAGING_HOST" --config-file config/deploy.layer7-staging.eros-relay.yml
               GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay kamal accessory exec ollama ollama pull qwen3-embedding:0.6b --reuse --hosts "$GPOINT_LAYER7_STAGING_HOST" --config-file config/deploy.layer7-staging.eros-relay.yml
             }
-          ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" python3 - "$eros_model_digest" gpoint-eros-relay-ollama \
             < scripts/verify-layer7-ollama.py
           # App#run always adds --network kamal; host networking is supported
           # by stock Accessory#run instead. Reuse the exact verified OCI digest.
-          relay_container="$(ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          relay_container="$("$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" "docker ps -a --filter 'name=^/gpoint-eros-relay-relay$' --filter label=service=gpoint-eros-relay-relay --format '{{.Names}}'")"
           case "$relay_container" in
             '') relay_action=boot ;;
@@ -2193,9 +2149,7 @@ jobs:
           # The permanent Mac SSH forward targets this private fixed port.
           # Drain its managed API before replacing the loopback listener.
           check_queue_empty() {
-          ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" bash -s <<'REMOTE_QUEUE'
           set -euo pipefail
           postgres_user="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shared_postgres_1 | sed -n 's/^POSTGRES_USER=//p')"
@@ -2207,9 +2161,7 @@ jobs:
           REMOTE_QUEUE
           }
           check_queue_empty
-          previous_api="$(ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          previous_api="$("$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" "docker ps --filter label=service=gpoint-core --filter label=role=api --filter label=destination= --format '{{.Names}}'")"
           if [[ -n "$previous_api" ]]; then
             [[ "$previous_api" =~ ^gpoint-core-api-[0-9a-f]{40}-[0-9]+-[0-9]+$ ]] || {
@@ -2248,9 +2200,7 @@ jobs:
           STAGING_BOT_ENABLED: ${{ steps.staging_env.outputs.bot_enabled }}
         run: |
           set -euo pipefail
-          ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" \
             "$CORE_DIGEST" "$MINIAPP_DIGEST" "$EROS_DIGEST" "$STAGING_BOT_ENABLED" <<'REMOTE'
           set -euo pipefail
@@ -2322,9 +2272,7 @@ jobs:
         if: always() && steps.staging_preflight.outcome == 'success'
         run: |
           set -euo pipefail
-          ssh -F /dev/null -i "$HOME/.ssh/gpoint_layer7" -T \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
-            -o UserKnownHostsFile="$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts" \
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" bash -s <<'REMOTE'
           set -euo pipefail
           docker logout ghcr.io >/dev/null 2>&1 || true

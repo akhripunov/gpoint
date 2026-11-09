@@ -12,11 +12,83 @@ from pathlib import Path
 def test_staging_ssh_keeps_silent_transfers_alive_without_weakening_host_keys():
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
     text = '\n'.join(s.get('run', '') for s in workflow['jobs']['layer7_staging']['steps'])
-    commands = re.findall(r'\b(?:ssh|scp) -F /dev/null(?:[^\n]*\\\n)*[^\n]*', text)
-    assert len(commands) >= 15
-    for command in commands:
-        assert '-o ServerAliveInterval=15 -o ServerAliveCountMax=3' in command
-        assert '-o StrictHostKeyChecking=yes' in command
+    # Every staging transport call goes through one bounded-retry wrapper, so the
+    # host-key, identity and keepalive policy cannot drift between call sites.
+    assert text.count('scripts/layer7-transport.sh') >= 20
+    assert 'ssh -F /dev/null' not in text
+    assert 'scp -q -F /dev/null' not in text
+
+    transport = (ROOT / 'scripts/layer7-transport.sh').read_text()
+    assert '-o ServerAliveInterval=15 -o ServerAliveCountMax=3' in transport
+    assert '-o StrictHostKeyChecking=yes' in transport
+    assert '-o BatchMode=yes -o IdentitiesOnly=yes' in transport
+    assert '-o ConnectionAttempts=3' in transport
+    assert '-o UserKnownHostsFile="$known_hosts"' in transport
+    assert 'infra/staging/layer7_known_hosts' in transport
+
+
+def _layer7_transport_env(tmp_path, failures_wanted, remote_status, stdin_payload=None):
+    """Install a fake `ssh` that fails with 255 N times, then runs the remote command."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    state = tmp_path / 'attempts'
+    state.write_text('0')
+    stub = tmp_path / 'ssh'
+    stub.write_text(
+        '#!/bin/sh\n'
+        f'state={state}\n'
+        'attempts=$(cat "$state")\n'
+        'attempts=$((attempts + 1))\n'
+        'echo "$attempts" > "$state"\n'
+        f'if [ "$attempts" -le {failures_wanted} ]; then\n'
+        '  if [ -n "${LAYER7_FAKE_STDIN:-}" ]; then cat > "${LAYER7_FAKE_STDIN}"; fi\n'
+        '  echo "Connection closed by example port 22" >&2\n'
+        '  exit 255\n'
+        'fi\n'
+        'if [ -n "${LAYER7_FAKE_STDIN:-}" ]; then cat > "${LAYER7_FAKE_STDIN}"; fi\n'
+        f'exit {remote_status}\n'
+    )
+    stub.chmod(0o755)
+    return state, {
+        **os.environ,
+        'PATH': f'{tmp_path}:{os.environ["PATH"]}',
+        'LAYER7_TRANSPORT_ATTEMPTS': '4',
+        'LAYER7_TRANSPORT_BACKOFF_SECONDS': '0',
+        'GITHUB_WORKSPACE': str(ROOT),
+    }
+
+
+def test_layer7_transport_retries_transport_failures_only(tmp_path):
+    script = ROOT / 'scripts/layer7-transport.sh'
+    state, env = _layer7_transport_env(tmp_path, failures_wanted=2, remote_status=0)
+    result = subprocess.run([str(script), 'ssh', 'root@example', 'true'],
+                            env=env, input='', capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert state.read_text().strip() == '3'
+    assert 'retry 1/4' in result.stderr
+
+    # A remote command failure (non-255) is a real failure and must not retry.
+    state2, env2 = _layer7_transport_env(tmp_path / 'remote', failures_wanted=0, remote_status=3)
+    result2 = subprocess.run([str(script), 'ssh', 'root@example', 'false'],
+                             env=env2, input='', capture_output=True, text=True)
+    assert result2.returncode == 3
+    assert state2.read_text().strip() == '1'
+
+    # Retries are bounded.
+    state3, env3 = _layer7_transport_env(tmp_path / 'bounded', failures_wanted=99, remote_status=0)
+    result3 = subprocess.run([str(script), 'ssh', 'root@example', 'true'],
+                             env=env3, input='', capture_output=True, text=True)
+    assert result3.returncode == 255
+    assert state3.read_text().strip() == '4'
+
+
+def test_layer7_transport_replays_stdin_after_a_transport_retry(tmp_path):
+    payload = tmp_path / 'received'
+    state, env = _layer7_transport_env(tmp_path, failures_wanted=2, remote_status=0)
+    env['LAYER7_FAKE_STDIN'] = str(payload)
+    result = subprocess.run([str(ROOT / 'scripts/layer7-transport.sh'), 'ssh', 'root@example', 'python3 -'],
+                            env=env, input='print("hi")\n', capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert payload.read_text() == 'print("hi")\n'
 
 
 def test_staging_preserves_legacy_and_builds_kamal_compatible_eros_image():
@@ -74,8 +146,13 @@ def test_relay_accessory_lifecycle_is_exact_and_stock_kamal(tmp_path, existing, 
     deploy = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
     code = deploy[deploy.index('relay_container="$('):deploy.index('# Accessory prepare creates the stock kamal bridge')]
     log = tmp_path / 'actions'
-    stub = "set -euo pipefail\nssh() { printf '%s' \"$EXISTING\"; }\nkamal() { printf '%s\\n' \"$*\" >> \"$LOG\"; }\n"
-    result = subprocess.run(['bash', '-c', stub + code], env=dict(os.environ, EXISTING=existing, LOG=str(log), CORE_DIGEST='sha256:' + 'a'*64, GITHUB_WORKSPACE='/scope', GPOINT_LAYER7_STAGING_HOST='95.133.236.59'), text=True, capture_output=True)
+    workspace = tmp_path / 'workspace'
+    (workspace / 'scripts').mkdir(parents=True)
+    transport = workspace / 'scripts/layer7-transport.sh'
+    transport.write_text('#!/usr/bin/env bash\nprintf \'%s\' "$EXISTING"\n')
+    transport.chmod(0o755)
+    stub = "set -euo pipefail\nkamal() { printf '%s\\n' \"$*\" >> \"$LOG\"; }\n"
+    result = subprocess.run(['bash', '-c', stub + code], env=dict(os.environ, EXISTING=existing, LOG=str(log), CORE_DIGEST='sha256:' + 'a'*64, GITHUB_WORKSPACE=str(workspace), GPOINT_LAYER7_STAGING_HOST='95.133.236.59'), text=True, capture_output=True)
     assert result.returncode == expected
     calls = log.read_text().splitlines() if log.exists() else []
     assert calls == ([f'accessory {action} relay --hosts 95.133.236.59 --config-file config/deploy.layer7-staging.eros-relay.yml'] if action else [])
@@ -127,19 +204,26 @@ def test_private_gateway_stop_shell_preserves_first_install_and_race_recovery(tm
     section = deploy[deploy.index('check_queue_empty() {'):]
     section = section[:section.index('GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST"')]
     log = tmp_path / 'kamal.log'
-    script = '''set -euo pipefail
-    queue_calls=0
-    ssh() {
-      if [[ "${!#}" == 'docker ps'* ]]; then printf '%s' "$PREVIOUS"; return; fi
-      cat >/dev/null
-      queue_calls=$((queue_calls+1))
-      if [[ "$RACED" == true && "$queue_calls" == 2 ]]; then return 1; fi
-    }
-    kamal() { printf '%s\\n' "$2" >> "$ACTION_LOG"; }
-    ''' + section
+    calls_file = tmp_path / 'queue-calls'
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    fake_ssh = bin_dir / 'ssh'
+    fake_ssh.write_text('''#!/usr/bin/env bash
+last="${!#}"
+if [[ "$last" == 'docker ps'* ]]; then printf '%s' "$PREVIOUS"; exit 0; fi
+cat >/dev/null
+calls=$(( $(cat "$CALLS_FILE" 2>/dev/null || echo 0) + 1 ))
+echo "$calls" > "$CALLS_FILE"
+if [[ "$RACED" == true && "$calls" == 2 ]]; then exit 1; fi
+exit 0
+''')
+    fake_ssh.chmod(0o755)
+    script = "set -euo pipefail\nkamal() { printf '%s\\n' \"$2\" >> \"$ACTION_LOG\"; }\n" + section
     result = subprocess.run(['bash', '-c', script], stdin=subprocess.DEVNULL, text=True, capture_output=True,
                             env={**os.environ, 'PREVIOUS': previous, 'RACED': raced, 'ACTION_LOG': str(log),
-                                 'GITHUB_WORKSPACE': str(ROOT), 'GPOINT_LAYER7_STAGING_HOST': '95.133.236.59'})
+                                 'CALLS_FILE': str(calls_file), 'GITHUB_WORKSPACE': str(ROOT),
+                                 'PATH': f'{bin_dir}:{os.environ["PATH"]}',
+                                 'GPOINT_LAYER7_STAGING_HOST': '95.133.236.59'})
     assert result.returncode == expected, result.stderr
     assert (log.read_text().splitlines() if log.exists() else []) == actions
 
@@ -224,7 +308,8 @@ def test_layer7_staging_requires_exact_successful_prepare_and_explicit_staging_i
     assert "verify_native_prepared_run.py" in step_text
     assert "prepared_run_id" in step_text
     assert "prepared_eros_digest" in step_text
-    assert "StrictHostKeyChecking=yes" in step_text
+    assert "scripts/layer7-transport.sh" in step_text
+    assert "StrictHostKeyChecking=yes" in (ROOT / "scripts/layer7-transport.sh").read_text()
     assert job["env"]["CANDIDATE_SHA"] == "${{ inputs.staging_image_sha }}"
     checkout = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@"))
     assert checkout["with"]["ref"] == "${{ github.sha }}"
@@ -299,7 +384,8 @@ def test_layer7_staging_is_separate_from_build_and_production_deploy_jobs():
     assert "--mode apply" in steps
     assert "docker inspect --format" in steps
     assert "com.gpoint.source.revision" in steps
-    assert "StrictHostKeyChecking=yes" in steps
+    assert "scripts/layer7-transport.sh" in steps
+    assert "StrictHostKeyChecking=yes" in (ROOT / "scripts/layer7-transport.sh").read_text()
 
 
 def test_layer7_staging_can_run_core_and_eros_without_a_staging_telegram_bot():
