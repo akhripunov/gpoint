@@ -72,6 +72,7 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "scripts/native_release_intent.py",
     "scripts/transition-agata-worker-v3.py",
     "services/gsales/tests/test_shared_worker_http.py",
+    "scripts/layer7-transport.sh",
     "scripts/layer7_staging_database.py",
     "scripts/layer7_staging_env.py",
     "scripts/write_layer7_staging_env.py",
