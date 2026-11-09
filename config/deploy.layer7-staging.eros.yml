@@ -11,6 +11,9 @@ servers:
       network:
         - gpoint_eros_data
         - gpoint_eros_api
+        # The embedding relay only trusts peers on 172.31.254.0/29, so the
+        # engine must reach it over that dedicated network, not the gateway.
+        - gpoint_eros_embeddings
       network-alias: gpoint-eros
       env-file:
         - /opt/gpoint/env/eros-engine.env
