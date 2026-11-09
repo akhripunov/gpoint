@@ -456,6 +456,7 @@ def test_layer7_staging_only_paths_do_not_select_application_images(tmp_path):
         "config/deploy.layer7-staging.eros.yml",
         "config/deploy.layer7-staging.eros-relay.yml",
         "infra/staging/layer7_known_hosts",
+        "scripts/layer7-transport.sh",
         "scripts/layer7_staging_database.py",
         "scripts/layer7_staging_env.py",
         "scripts/write_layer7_staging_env.py",
