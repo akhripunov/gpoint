@@ -406,3 +406,16 @@ def test_layer7_staging_can_run_core_and_eros_without_a_staging_telegram_bot():
     assert '[[ "$bot_enabled" == false && "$spec" == gpoint-core-bot\\|* ]]' in verify["run"]
     assert "STAGING_BOT_ENABLED" not in str(staging["env"])
     assert "secrets.GPOINT_PRODUCTION" not in yaml.safe_dump(staging)
+
+
+def test_staging_eros_engine_reaches_the_embedding_relay_on_its_trusted_network():
+    # The relay authorises peers on 172.31.254.0/29 only. The engine has to be
+    # attached to that dedicated network, otherwise its embed call arrives from
+    # a gateway address and the relay answers 403 during runtime verification.
+    text = (ROOT / 'config/deploy.layer7-staging.eros.yml').read_text()
+    config = yaml.safe_load(re.sub(r'<%=.*?%>', 'rendered', text))
+    networks = config['servers']['engine']['options']['network']
+    assert networks == ['gpoint_eros_data', 'gpoint_eros_api', 'gpoint_eros_embeddings']
+
+    relay = (ROOT / 'services/eros-engine/eros-pilot-embedding-relay.mjs').read_text()
+    assert 'EROS_DATA_NETWORK_PREFIX = "172.31.254."' in relay
