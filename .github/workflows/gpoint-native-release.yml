@@ -106,6 +106,9 @@ concurrency:
 jobs:
   tests:
     name: Tests (${{ matrix.suite }})
+    permissions:
+      contents: read
+      deployments: read
     # Both matrix legs run the same fail-closed intent step with identical event inputs.
     outputs:
       mode: ${{ steps.intent.outputs.mode }}
@@ -333,14 +336,41 @@ jobs:
           echo "ORAS_1_3_BIN=$install_dir/oras" >> "$GITHUB_ENV"
       - name: Detect pending schema dependencies before Build
         if: matrix.suite == 'python' && (steps.surface.outputs.database == 'true' || steps.surface.outputs.full_ci == 'true')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # Base per event: the PR target, the last successful production
+          # deployment (so previously added but unapplied migrations are still
+          # scanned), else the push predecessor. A manual dispatch has no
+          # predecessor and never blocks on an unknown base.
+          case "$EVENT_NAME" in
+            pull_request) base="$PR_BASE_SHA" ;;
+            *) base="$(gh api "repos/$REPOSITORY/deployments?environment=production&per_page=1" \
+                 --jq '.[0].sha // empty' 2>/dev/null || true)"
+               [ -n "$base" ] || base="$EVENT_BEFORE" ;;
+          esac
+          if [ -z "$base" ] || [ "$base" = "$HEAD_SHA" ]; then
+            if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+              base="$(git rev-parse --verify --quiet "$HEAD_SHA^")" || base=""
+            fi
+          fi
+          if [ -z "$base" ]; then
+            echo "GPOINT_KAMAL_SCHEMA_DEPENDENCY=SKIPPED reason=no_base_revision event=$EVENT_NAME"
+            exit 0
+          fi
+          git cat-file -e "$base^{commit}" 2>/dev/null || {
+            echo "GPOINT_KAMAL_SCHEMA_DEPENDENCY=SKIPPED reason=base_not_in_checkout event=$EVENT_NAME base=$base"
+            exit 0
+          }
           python3 scripts/verify-kamal-migration-parity.py --static-pending \
-            --repo-root . --baseline-source-sha "$BASE_SHA" --candidate-source-sha "$HEAD_SHA" \
+            --repo-root . --baseline-source-sha "$base" --candidate-source-sha "$HEAD_SHA" \
             --prisma-directory packages/db/prisma/migrations
-        env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ github.sha }}
       - name: Run workflow, Native First and Kamal boundary tests
         if: matrix.suite == 'python'
         run: >-
