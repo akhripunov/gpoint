@@ -216,6 +216,16 @@ migration, compatibility, worker, Runtime Verify или recovery gates.
 | `verify-kamal-production-baseline.py` | Keep | Supplements Kamal with six-role source/image digest/ID facts and runtime invariants Kamal does not expose. |
 | `write-kamal-production-manifest.py` | Keep | Writes the verified per-component source facts used by the native GitHub Deployment URL and the next selective Build. |
 | `check-kamal-configs.sh` | Keep | Pulls the pinned Kamal image, verifies linux/amd64 and its digest, then loads all three configs with synthetic credentials and network disabled. It does not read production. |
+## Local test selection under FULL
+
+FULL is a risk level, not a mandate to run every local test. `classify-release-prepush.py` stays the single canonical FAST/FULL procedure; to pick which local tests are worth running, use the same surface classifier that CI uses:
+
+```sh
+python3 scripts/native_change_surface.py --base origin/main --head HEAD --output /tmp/surface
+```
+
+It prints `eros`, `miniapp`, `database`, `full_ci` and related flags, so a FULL candidate for a narrow component runs that component's tests locally while the hosted PR CI remains the authoritative full check. Do not add a second pre-push procedure: the classifier above owns the FAST/FULL decision, and `native_change_surface.py` only reports the changed surface.
+
 | `classify-release-prepush.py` | Keep outside CI | Implements local FAST/FULL preparation rules only; it is not a release router and does not weaken hosted gates. |
 
 No second release controller or duplicate Deployment-status writer is in the
