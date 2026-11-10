@@ -1,5 +1,6 @@
 """Contract of the shared changed-surface classifier used by CI and release."""
 
+import re
 import sys
 from pathlib import Path
 
@@ -95,3 +96,20 @@ def test_staging_only_merge_runs_no_heavy_production_checks():
     assert surface["database"] is False
     assert surface["release_infra"] is False
     assert surface["full_ci"] is False
+
+
+def test_production_eros_api_publishes_only_a_loopback_worker_endpoint():
+    import yaml
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "config/deploy.eros-api.yml").read_text()
+    config = yaml.safe_load(re.sub(r"<%=.*?%>", "rendered", text))
+    publish = config["servers"]["api"]["options"]["publish"]
+    assert publish == ["127.0.0.1:13003:3000"]
+    # Never a public interface, and a different port from staging.
+    assert all(entry.startswith("127.0.0.1:") for entry in publish)
+    staging = yaml.safe_load(
+        re.sub(r"<%=.*?%>", "rendered", (root / "config/deploy.layer7-staging.eros-api.yml").read_text()))
+    assert staging["servers"]["api"]["options"]["publish"] == ["127.0.0.1:13001:3000"]
+    assert publish != staging["servers"]["api"]["options"]["publish"]
+    # The public route keeps using kamal-proxy.
+    assert config["servers"]["api"]["proxy"]["path_prefixes"] == ["/api"]
