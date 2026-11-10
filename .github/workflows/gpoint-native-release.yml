@@ -90,7 +90,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: gpoint-native-${{ github.ref }}
+  # Scope the workflow queue by event: a staging dispatch must not wait behind an
+  # unrelated production push. Mutating jobs still share the per-environment
+  # groups below (gpoint-production-release / gpoint-layer7-staging).
+  group: gpoint-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
