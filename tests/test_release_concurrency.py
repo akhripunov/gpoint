@@ -12,12 +12,19 @@ def load():
     return yaml.safe_load(WORKFLOW.read_text())
 
 
-def test_workflow_queue_is_scoped_by_event_not_only_ref():
-    workflow = load()
-    # A staging dispatch and a production push share refs/heads/main; keying the
-    # workflow queue by ref alone made staging wait for an unrelated release.
-    assert workflow["concurrency"]["group"] == "gpoint-${{ github.event_name }}-${{ github.ref }}"
-    assert workflow["concurrency"]["cancel-in-progress"] is False
+def test_workflow_queue_is_scoped_per_operation_not_per_branch():
+    group = load()["concurrency"]["group"]
+    # Keying by ref alone made staging wait for an unrelated production push.
+    assert group.startswith("gpoint-${{ github.event_name }}-")
+    # Every mutating dispatch operation gets its own queue key, so a staging
+    # deploy never waits for a rollback and vice versa.
+    for marker in ("inputs.rollback == true && 'rollback'",
+                   "inputs.migration_rehearsal == true && 'rehearsal'",
+                   "inputs.backup_maintenance == true && 'backup'",
+                   "inputs.deploy_layer7_staging == true && 'staging'"):
+        assert marker in group
+    assert "'release'" in group
+    assert load()["concurrency"]["cancel-in-progress"] is False
 
 
 def test_mutating_jobs_keep_one_lock_per_environment():

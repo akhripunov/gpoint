@@ -414,7 +414,59 @@ def verify_compatible(args, live_prisma, recorded):
     return live_prisma[-1], args.agata_current_head, bool(pending)
 
 
+def verify_static_pending(args):
+    """Detect pending-migration/app-code dependencies without production access.
+
+    Pending is derived from migrations *added* between the baseline and the
+    candidate, so the same identifier scan can run in Tests before Build. The
+    live-database gate stays mandatory in Deploy; this only fails earlier.
+    """
+    repo_root = Path(args.repo_root).resolve()
+    baseline, candidate = args.baseline_source_sha, args.candidate_source_sha
+    if not baseline or not candidate:
+        raise ValueError("static pending scan requires --baseline-source-sha and --candidate-source-sha")
+    added = subprocess.run(
+        ["git", "-C", str(repo_root), "diff", "--name-only", "--diff-filter=A", baseline, candidate],
+        check=True, capture_output=True, text=True,
+    ).stdout.split()
+    raw_prisma = Path(args.prisma_directory)
+    prisma_directory = (raw_prisma if raw_prisma.is_absolute() else repo_root / raw_prisma).resolve()
+    pending = []
+    for raw in added:
+        path = (repo_root / raw).resolve()
+        if path.name == "migration.sql" and path.parent.parent == prisma_directory:
+            pending.append((path.parent.name, path))
+        elif raw.startswith("services/agata/migrations/versions/") and path.suffix == ".py":
+            pending.append((path.stem, path))
+    changed = list(changed_application_lines(repo_root, baseline, candidate))
+    for migration, path in pending:
+        identifiers = migration_identifiers(
+            path, prisma_directory=args.prisma_directory, repo_root=repo_root)
+        if not identifiers:
+            if is_explicit_noop_migration(path):
+                continue
+            raise ValueError(f"cannot identify dependencies in pending migration {migration}")
+        for source_path, line in changed:
+            if migration in {name for name, _ in pending if str(path).endswith(".py")} \
+                    and not source_path.startswith("services/agata/"):
+                continue
+            for identifier in identifiers:
+                if identifier in COMMON_SCHEMA_FIELDS:
+                    anchors = identifiers - COMMON_SCHEMA_FIELDS
+                    if not any(re.search(rf"(?<![A-Za-z0-9_]){re.escape(anchor)}(?![A-Za-z0-9_])", line, re.IGNORECASE)
+                               for anchor in anchors):
+                        continue
+                if re.search(rf"(?<![A-Za-z0-9_]){re.escape(identifier)}(?![A-Za-z0-9_])", line, re.IGNORECASE):
+                    raise ValueError(f"PENDING_SCHEMA_DEPENDENCY:{migration}:{identifier}:{source_path}")
+    return pending
+
+
 def verify(args):
+    missing = [name for name in ("prisma_current_migrations", "prisma_current_head",
+                                 "agata_directory", "agata_current_head")
+               if not getattr(args, name, "")]
+    if missing:
+        raise ValueError(f"live parity check requires {','.join(missing)}")
     candidate_prisma = prisma_names(args.prisma_directory)
     live_prisma = args.prisma_current_migrations.split(",") if args.prisma_current_migrations else []
     if any(not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", name) for name in live_prisma):
@@ -456,15 +508,27 @@ def main():
     parser.add_argument("--baseline-source-sha")
     parser.add_argument("--candidate-source-sha")
     parser.add_argument("--prisma-directory", required=True)
-    parser.add_argument("--prisma-current-migrations", required=True)
+    parser.add_argument("--prisma-current-migrations", default="")
     parser.add_argument("--prisma-current-checksums", default="")
-    parser.add_argument("--prisma-current-head", required=True)
-    parser.add_argument("--agata-directory", required=True)
-    parser.add_argument("--agata-current-head", required=True)
+    parser.add_argument("--prisma-current-head", default="")
+    parser.add_argument("--agata-directory", default="")
+    parser.add_argument("--agata-current-head", default="")
     parser.add_argument("--agata-current-checksums", default="")
     parser.add_argument("--require-no-agata-pending", action="store_true",
                         help="block Native Prisma Deploy if any AGATA revision still needs a separate guarded Apply")
+    parser.add_argument("--static-pending", action="store_true",
+                        help="scan only migrations added by this candidate; needs no live database")
     args = parser.parse_args()
+    if args.static_pending:
+        try:
+            pending = verify_static_pending(args)
+        except (CommandError, OSError, RevisionError, SyntaxError, ValueError,
+                subprocess.CalledProcessError) as exc:
+            print(f"GPOINT_KAMAL_SCHEMA_DEPENDENCY=BLOCKED reason={exc}", file=sys.stderr)
+            return 1
+        names = ",".join(name for name, _ in pending) or "none"
+        print(f"GPOINT_KAMAL_SCHEMA_DEPENDENCY=PASS pending={names}")
+        return 0
     try:
         prisma_head, agata_head, pending = verify(args)
     except (CommandError, ImportError, OSError, RevisionError, SyntaxError, ValueError,

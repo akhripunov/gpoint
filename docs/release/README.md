@@ -51,3 +51,18 @@ rollback are separate decisions; migrations are not automatically reversed.
 `docs/release/state/production.json` is the current adoption/release pointer.
 `docs/release/manifests/` is append-only release history. A future release must
 read the actual live runtime and DB head and block on drift from this state.
+
+## FAST / FULL pre-push gate
+
+`python3 scripts/prepush_check.py` reuses the same changed-surface classifier as
+GitHub CI, so a local run cannot invent a different scope.
+
+- **FAST** (default for narrow changes): freshness against `origin/main`, secret
+  scan of added lines, protected-path notice, Python syntax, and only the
+  changed test files.
+- **FULL** (release infrastructure, unknown paths, schema changes): the same
+  checks plus the exact Python suite list that the workflow runs.
+
+`--dry-run` prints the selected mode and checks without executing them. The
+hosted PR CI remains the authoritative check; the gate exists to avoid pushing
+changes that CI would reject anyway.
