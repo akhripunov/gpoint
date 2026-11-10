@@ -1385,7 +1385,7 @@ def test_pinned_setup_go_uses_official_digest_pinned_tool_cache_seed():
 def test_native_release_runs_kamal_after_successful_main_push():
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
     deploy = workflow["jobs"]["deploy"]
-    assert deploy["if"] == "needs.tests.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true))"
+    assert deploy["if"] == "needs.tests.outputs.deploy == 'true' && needs.build.outputs.deploy_scope != 'NONE' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true))"
     assert deploy["environment"] == {
         "name": "production",
         "url": "${{ steps.verify.outputs.environment_url }}",
