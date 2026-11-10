@@ -17,7 +17,7 @@ servers:
       network-alias: gpoint-eros
       env-file:
         - /opt/gpoint/env/eros-engine.env
-      volume: /opt/gpoint/env/eros-production-model-config.toml:/etc/eros-engine/model_config.toml:ro
+      volume: /opt/gpoint/env/eros-layer7-staging-model-config.toml:/etc/eros-engine/model_config.toml:ro
       memory: 384m
       memory-swap: 384m
       cpus: 0.50
