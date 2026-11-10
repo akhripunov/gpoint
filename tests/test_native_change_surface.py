@@ -10,7 +10,7 @@ from native_change_surface import classify  # noqa: E402
 
 
 def test_docs_only_selection_is_minimal():
-    surface = classify(["docs/release/README.md", "AGENTS.md"])
+    surface = classify(["docs/release/README.md", "README.md"])
     assert surface["docs_only"] is True
     assert surface["full_ci"] is False
     assert surface["eros"] is False
@@ -18,13 +18,31 @@ def test_docs_only_selection_is_minimal():
 
 
 def test_staging_eros_config_does_not_select_the_eros_image_build():
-    # Config-only Eros change must not rebuild the stock Eros image.
-    surface = classify([
-        "config/deploy.layer7-staging.eros.yml",
-        "services/eros-engine/README.md",
-    ])
-    assert surface["eros"] is True
+    # Config-only Eros change must not rebuild the stock Eros image, but it is
+    # still an Eros change for reporting purposes.
+    surface = classify(["config/deploy.layer7-staging.eros.yml"])
+    assert surface["eros"] is False
+    assert surface["eros_config"] is True
     assert surface["full_ci"] is False
+
+
+def test_eros_toml_alone_does_not_select_the_image_build():
+    surface = classify(["services/eros-engine/eros-layer7-staging-model-config.toml"])
+    assert surface["eros"] is False
+    assert surface["eros_config"] is True
+
+
+def test_eros_engine_code_selects_the_image_build():
+    surface = classify(["services/eros-engine/run-local-e2e.sh"])
+    assert surface["eros"] is True
+    assert surface["eros_config"] is False
+
+
+def test_protected_instructions_fail_closed():
+    surface = classify(["AGENTS.md"])
+    assert surface["protected_paths"] == ["AGENTS.md"]
+    assert surface["full_ci"] is True
+    assert surface["docs_only"] is False
 
 
 def test_miniapp_change_selects_only_miniapp_checks():

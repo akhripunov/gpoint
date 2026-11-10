@@ -214,7 +214,7 @@ jobs:
         with:
           platforms: linux/amd64
       - name: Build stock Eros and run isolated SQLx and synthetic conversation E2E
-        if: matrix.suite == 'workspace' && steps.surface.outputs.eros == 'true'
+        if: matrix.suite == 'workspace' && (steps.surface.outputs.eros == 'true' || steps.surface.outputs.full_ci == 'true')
         env:
           EROS_UPSTREAM_SHA: d1a140083321687212fb7b17c09cc0c3c9639f5e
         run: |
@@ -279,10 +279,10 @@ jobs:
           pnpm test:release
           node --test scripts/release-component-bundle-v4.test.mjs scripts/release-static-v4.test.mjs
       - name: Install Playwright Chromium
-        if: matrix.suite == 'workspace'
+        if: matrix.suite == 'workspace' && (steps.surface.outputs.miniapp == 'true' || steps.surface.outputs.full_ci == 'true')
         run: pnpm exec playwright install --with-deps chromium
       - name: Run Mini App end-to-end tests
-        if: matrix.suite == 'workspace' && steps.surface.outputs.miniapp == 'true'
+        if: matrix.suite == 'workspace' && (steps.surface.outputs.miniapp == 'true' || steps.surface.outputs.full_ci == 'true')
         run: pnpm test:e2e
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065

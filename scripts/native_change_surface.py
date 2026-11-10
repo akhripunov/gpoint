@@ -18,22 +18,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from native_release_intent import _path_kind  # noqa: E402
 
-EROS_PREFIXES = (
+# Paths that change what the stock Eros image or its local E2E harness runs.
+EROS_RUNTIME_PREFIXES = (
     "services/eros-engine/",
     "docker/",
     "patches/",
-    "infra/production/eros",
+)
+# Paths that only select or configure an existing image: an Eros TOML or a
+# staging/production Eros Kamal config must never rebuild the stock image.
+EROS_CONFIG_PREFIXES = (
     "config/deploy.eros",
     "config/deploy.layer7-staging.eros",
+    "infra/production/eros",
 )
 MINIAPP_PREFIXES = ("apps/miniapp/",)
 AGATA_PREFIXES = ("services/agata/",)
 CORE_PREFIXES = ("apps/api/", "apps/bot/", "apps/worker/", "packages/")
 DOCS_PREFIXES = ("docs/", "design/")
-DOCS_ROOT_FILES = frozenset({"README.md", "AGENTS.md"})
+DOCS_ROOT_FILES = frozenset({"README.md"})
+# Release instructions are protected: changing them must run the full suite.
+PROTECTED_FILES = frozenset({"AGENTS.md"})
 DATABASE_KINDS = frozenset({"schema", "prisma_schema", "prisma_migration"})
 RELEASE_INFRA_PREFIXES = (".github/", "scripts/", ".kamal/", "systemd/")
-FLAGS = ("eros", "miniapp", "agata", "core", "database", "docs_only",
+FLAGS = ("eros", "eros_config", "miniapp", "agata", "core", "database", "docs_only",
          "release_infra", "full_ci", "app_backend")
 
 
@@ -44,10 +51,20 @@ def _matches(path: str, prefixes) -> bool:
 def classify(paths) -> dict:
     files = sorted({path.strip() for path in paths if path.strip()})
     kinds = {_path_kind(path) for path in files}
+    eros_config_paths = [path for path in files if _matches(path, EROS_CONFIG_PREFIXES)] or [
+        path for path in files
+        if path.startswith("services/eros-engine/") and path.endswith(".toml")
+    ]
+    eros_runtime = [
+        path for path in files
+        if _matches(path, EROS_RUNTIME_PREFIXES) and path not in eros_config_paths
+    ]
     surface = {
         "files": len(files),
         "unknown_paths": sorted(path for path in files if _path_kind(path) == "unknown"),
-        "eros": any(_matches(path, EROS_PREFIXES) for path in files),
+        "protected_paths": sorted(path for path in files if path in PROTECTED_FILES),
+        "eros": bool(eros_runtime),
+        "eros_config": bool(eros_config_paths),
         "miniapp": any(_matches(path, MINIAPP_PREFIXES) for path in files),
         "agata": any(_matches(path, AGATA_PREFIXES) for path in files),
         "core": any(
@@ -64,10 +81,15 @@ def classify(paths) -> dict:
     surface["release_infra"] = any(
         _matches(path, RELEASE_INFRA_PREFIXES) for path in files
     )
+    surface["unknown_paths"] = sorted(
+        set(surface["unknown_paths"])
+        | {path for path in files if path.endswith("/")}
+    )
     surface["full_ci"] = bool(
         surface["unknown_paths"]
         or surface["database"]
         or surface["release_infra"]
+        or surface["protected_paths"]
         or not files
     )
     surface["app_backend"] = bool(surface["core"] or surface["agata"])
@@ -76,10 +98,24 @@ def classify(paths) -> dict:
 
 def changed_paths(base: str, head: str) -> list:
     output = subprocess.run(
-        ["git", "diff", "--name-only", base, head],
+        ["git", "diff", "--name-status", "--no-renames", base, head],
         check=True, capture_output=True, text=True,
     ).stdout
-    return [line for line in output.splitlines() if line.strip()]
+    renamed = subprocess.run(
+        ["git", "diff", "--name-status", "-M", base, head],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    paths = set()
+    for line in output.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[1].strip():
+            paths.add(parts[1].strip())
+    for line in renamed.splitlines():
+        parts = line.split("\t")
+        if parts and parts[0].startswith("R") and len(parts) >= 3:
+            paths.add(parts[1].strip())
+            paths.add(parts[2].strip())
+    return sorted(paths)
 
 
 def main() -> int:
