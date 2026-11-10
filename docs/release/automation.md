@@ -224,7 +224,7 @@ FULL is a risk level, not a mandate to run every local test. `classify-release-p
 python3 scripts/native_change_surface.py --base origin/main --head HEAD --output /tmp/surface
 ```
 
-It prints `eros`, `miniapp`, `database`, `full_ci` and related flags, so a FULL candidate for a narrow component runs that component's tests locally while the hosted PR CI remains the authoritative full check. Do not add a second pre-push procedure: the classifier above owns the FAST/FULL decision, and `native_change_surface.py` only reports the changed surface.
+Run it after the candidate commit (it compares commits, not the working tree), then take the `--output` flags: `eros`, `miniapp`, `database`, `full_ci`. A FULL candidate for a narrow component runs that component's tests locally, while the hosted PR CI remains the authoritative full check. Measured administrative overhead for this flow is single-digit seconds (fetch ≈2.5 s, surface <0.2 s, focused tests <1 s, commit <0.1 s); the remaining pre-push time is the edit itself and the network push. Do not add a second pre-push procedure: the classifier above owns the FAST/FULL decision, and `native_change_surface.py` only reports the changed surface.
 
 | `classify-release-prepush.py` | Keep outside CI | Implements local FAST/FULL preparation rules only; it is not a release router and does not weaken hosted gates. |
 
