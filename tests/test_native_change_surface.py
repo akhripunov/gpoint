@@ -80,3 +80,18 @@ def test_release_infrastructure_change_fails_closed():
     surface = classify(["scripts/native_change_surface.py"])
     assert surface["release_infra"] is True
     assert surface["full_ci"] is True
+
+
+def test_staging_only_merge_runs_no_heavy_production_checks():
+    # Exact path set of the staging-only merge b997e1a8 that used to run the
+    # stock Eros build, Playwright and a production Deploy attempt.
+    surface = classify([
+        "config/deploy.layer7-staging.eros.yml",
+        "tests/test_layer7_staging_workflow.py",
+    ])
+    assert surface["eros"] is False        # no stock Eros image build
+    assert surface["eros_config"] is True
+    assert surface["miniapp"] is False     # no Chromium/E2E
+    assert surface["database"] is False
+    assert surface["release_infra"] is False
+    assert surface["full_ci"] is False
