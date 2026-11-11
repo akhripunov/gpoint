@@ -64,7 +64,7 @@ class DeployEvidenceWorkflowTests(unittest.TestCase):
         self.assertIn('candidate_sha', triggers['workflow_dispatch']['inputs'])
         deploy = native['jobs']['deploy']
         self.assertEqual(deploy['if'],
-                         "needs.tests.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true))")
+                         "needs.tests.outputs.deploy == 'true' && needs.build.outputs.deploy_scope != 'NONE' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true))")
         script = '\n'.join(step.get('run', '') for step in deploy['steps'])
         self.assertIn('REQUESTED_SHA', script)
         owner_gate = next(step for step in deploy['steps']

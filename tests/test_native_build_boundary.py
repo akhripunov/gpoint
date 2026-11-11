@@ -158,7 +158,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
                         if step.get("name") in {"Run workflow, Native First and Kamal boundary tests",
                                                  "Run isolated PostgreSQL 16 migration and integration suites"}]
         self.assertTrue(all(step["if"] == "matrix.suite == 'workspace'" for step in workspace_steps))
-        self.assertTrue(all(step["if"] == "matrix.suite == 'python'" for step in python_steps))
+        self.assertTrue(all(step["if"].startswith("matrix.suite == 'python'") for step in python_steps))
         self.assertIn("unset DATABASE_URL SHADOW_DATABASE_URL", python_steps[0]["run"])
         self.assertIn("unset DATABASE_URL SHADOW_DATABASE_URL", python_steps[1]["run"])
         for step in tests["steps"]:
@@ -171,7 +171,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("pull_request", triggers)
         self.assertEqual(triggers["push"]["branches"], ["main"])
         deploy = self.workflow["jobs"]["deploy"]
-        self.assertEqual(deploy["if"], "needs.tests.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true))")
+        self.assertEqual(deploy["if"], "needs.tests.outputs.deploy == 'true' && needs.build.outputs.deploy_scope != 'NONE' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true))")
         self.assertIn("github.event_name == 'push'", deploy["if"])
 
     def test_operational_only_push_and_migration_rehearsal_fail_closed(self):

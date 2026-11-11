@@ -51,3 +51,4 @@ rollback are separate decisions; migrations are not automatically reversed.
 `docs/release/state/production.json` is the current adoption/release pointer.
 `docs/release/manifests/` is append-only release history. A future release must
 read the actual live runtime and DB head and block on drift from this state.
+

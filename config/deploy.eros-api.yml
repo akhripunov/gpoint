@@ -11,6 +11,11 @@ servers:
       clear:
         RELEASE_SHA: <%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>
     options:
+      # Loopback-only endpoint for the Mac Product Worker tunnel. Public traffic
+      # keeps using kamal-proxy below; this port is never bound to a public
+      # interface and still requires the worker bearer token and tenant.
+      publish:
+        - "127.0.0.1:13003:3000"
       network:
         - shared_internal
         - gpoint_eros_data
