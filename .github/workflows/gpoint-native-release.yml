@@ -234,6 +234,7 @@ jobs:
           set -euo pipefail
           image="gpoint-eros:stock-$EROS_UPSTREAM_SHA"
           docker buildx build --platform linux/amd64 --load \
+            --cache-from type=gha,scope=gpoint-eros --cache-to type=gha,mode=max,scope=gpoint-eros \
             --file docker/Dockerfile \
             --label org.opencontainers.image.source=https://github.com/etherfunlab/eros-engine \
             --label "org.opencontainers.image.revision=$EROS_UPSTREAM_SHA" \
@@ -1212,18 +1213,15 @@ jobs:
         run: |
           set -euo pipefail
           eros_image="ghcr.io/akhripunov/gpoint-eros@${EROS_DIGEST}"
-          # The protected env is generated on the VPS by the existing provisioner;
-          # running it before the Prisma Apply means a bad tenant, a missing
-          # secret or an unreachable Eros database fails closed before GPoint's
-          # own schema changes. It is idempotent, 0600, root-owned, and never
-          # prints a value.
-          secrets_args=(--source-sha "$CANDIDATE_SHA" --image "$eros_image" --write-native-engine-env --write-native-api-env)
-          if [[ "$EROS_BOOTSTRAP" == true ]]; then
-            secrets_args+=(--ensure-postgres-network --provision-database)
-          fi
-          ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - "${secrets_args[@]}" \
+          # Read-only: validates the release identity, resolves the tenant from
+          # the existing GPoint environment and, when the protected file already
+          # exists, proves it is complete and consistent. It never writes,
+          # creates a network, a database or a role. Provisioning stays in the
+          # apply phase, after the Prisma Apply is authorised.
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - \
+            --check-only --source-sha "$CANDIDATE_SHA" --image "$eros_image" \
             < scripts/eros-production-secrets.py
-          echo "EROS_PREREQUISITES=PASS image=$eros_image bootstrap=$EROS_BOOTSTRAP" >> "$GITHUB_STEP_SUMMARY"
+          echo "EROS_PREREQUISITES=PASS image=$eros_image bootstrap=$EROS_BOOTSTRAP read_only=true" >> "$GITHUB_STEP_SUMMARY"
       - name: Plan the exact approved Prisma migration set
         id: migration_plan
         env:

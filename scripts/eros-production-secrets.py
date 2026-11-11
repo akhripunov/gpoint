@@ -109,6 +109,35 @@ def _source_tenant(path):
     return tenant
 
 
+def check_prerequisites(path=ENV_PATH, *, source_sha, image, tenant_id=None,
+                        source_env=SOURCE_ENV_PATH):
+    """Read-only readiness check: never writes, creates or alters anything.
+
+    Validates the release identity, resolves the tenant from the existing GPoint
+    environment, and, when the protected file already exists, proves it is
+    complete and consistent. A missing file is reported as WOULD_PROVISION; the
+    provisioner creates it later, in the apply phase.
+    """
+    _validate_release_identity(source_sha, image)
+    path = Path(path)
+    tenant = tenant_id or _source_tenant(source_env)
+    if not path.exists():
+        return 'WOULD_PROVISION'
+    values = read_env(path)
+    if not values:
+        raise RuntimeError('Eros protected environment is empty')
+    missing = set(MANAGED_KEYS) - set(values) - {
+        'EROS_TENANT_ID', 'EROS_TEST_USER_IDS', 'EROS_TEST_CREATOR_IDS'}
+    if missing:
+        raise RuntimeError('Eros protected environment is incomplete; credential recovery is required')
+    if any(not values.get(key) for key in SECRET_KEYS):
+        raise RuntimeError('Eros protected environment has an empty credential')
+    existing = values.get('EROS_TENANT_ID') or tenant
+    if existing != tenant:
+        raise RuntimeError('Eros protected environment tenant differs from the GPoint tenant')
+    return 'EXISTING'
+
+
 def provision(path=ENV_PATH, *, source_sha, image, tenant_id=None, source_env=SOURCE_ENV_PATH):
     _validate_release_identity(source_sha, image)
     path = Path(path)
@@ -470,11 +499,21 @@ def main():
     parser.add_argument('--tenant-id')
     parser.add_argument('--source-env', default=str(SOURCE_ENV_PATH))
     parser.add_argument('--ensure-postgres-network', action='store_true')
+    parser.add_argument('--check-only', action='store_true')
     parser.add_argument('--provision-database', action='store_true')
     parser.add_argument('--write-native-engine-env', action='store_true')
     parser.add_argument('--write-native-api-env', action='store_true')
     args = parser.parse_args()
     try:
+        if args.check_only:
+            if (args.provision_database or args.ensure_postgres_network
+                    or args.write_native_engine_env or args.write_native_api_env):
+                raise ValueError('check-only cannot be combined with a provisioning flag')
+            state = check_prerequisites(
+                args.path, source_sha=args.source_sha, image=args.image,
+                tenant_id=args.tenant_id, source_env=args.source_env)
+            print(f'EROS_PREREQUISITES=READY state={state}')
+            return
         if args.provision_database:
             assert_shared_database_acl_isolatable()
         print(provision(args.path, source_sha=args.source_sha, image=args.image,
