@@ -64,6 +64,7 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "config/deploy.layer7-staging.eros-relay.yml",
     "infra/staging/layer7_known_hosts",
     "scripts/classify-release-prepush.py",
+    "scripts/native_change_surface.py",
     "scripts/check-kamal-configs.sh",
     "scripts/eros-native-database.py",
     "scripts/eros-production-secrets.py",
