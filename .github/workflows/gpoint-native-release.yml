@@ -1202,6 +1202,28 @@ jobs:
             echo "prisma_checksums=$prisma_checksums"
             echo "agata_head=$agata_head"
           } >> "$GITHUB_OUTPUT"
+      - name: Verify Eros production prerequisites before any database mutation
+        id: eros_prereq
+        if: steps.component_plan.outputs.deploy_eros == 'true'
+        env:
+          CANDIDATE_SHA: ${{ github.sha }}
+          EROS_DIGEST: ${{ steps.component_plan.outputs.eros_digest }}
+          EROS_BOOTSTRAP: ${{ steps.component_plan.outputs.eros_bootstrap }}
+        run: |
+          set -euo pipefail
+          eros_image="ghcr.io/akhripunov/gpoint-eros@${EROS_DIGEST}"
+          # The protected env is generated on the VPS by the existing provisioner;
+          # running it before the Prisma Apply means a bad tenant, a missing
+          # secret or an unreachable Eros database fails closed before GPoint's
+          # own schema changes. It is idempotent, 0600, root-owned, and never
+          # prints a value.
+          secrets_args=(--source-sha "$CANDIDATE_SHA" --image "$eros_image" --write-native-engine-env --write-native-api-env)
+          if [[ "$EROS_BOOTSTRAP" == true ]]; then
+            secrets_args+=(--ensure-postgres-network --provision-database)
+          fi
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - "${secrets_args[@]}" \
+            < scripts/eros-production-secrets.py
+          echo "EROS_PREREQUISITES=PASS image=$eros_image bootstrap=$EROS_BOOTSTRAP" >> "$GITHUB_STEP_SUMMARY"
       - name: Plan the exact approved Prisma migration set
         id: migration_plan
         env:
