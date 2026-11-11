@@ -234,7 +234,6 @@ jobs:
           set -euo pipefail
           image="gpoint-eros:stock-$EROS_UPSTREAM_SHA"
           docker buildx build --platform linux/amd64 --load \
-            --cache-from type=gha,scope=gpoint-eros --cache-to type=gha,mode=max,scope=gpoint-eros \
             --file docker/Dockerfile \
             --label org.opencontainers.image.source=https://github.com/etherfunlab/eros-engine \
             --label "org.opencontainers.image.revision=$EROS_UPSTREAM_SHA" \
@@ -673,8 +672,6 @@ jobs:
             com.gpoint.eros.upstream-revision=d1a140083321687212fb7b17c09cc0c3c9639f5e
             com.gpoint.eros.patch-set.sha256=none
             service=gpoint-eros-pilot
-          cache-from: type=gha,scope=gpoint-eros-stock
-          cache-to: type=gha,scope=gpoint-eros-stock,mode=max
           sbom: true
           provenance: mode=max
       - name: Validate immutable image identity and expose digests
