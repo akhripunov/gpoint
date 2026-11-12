@@ -444,19 +444,15 @@ jobs:
         if: needs.tests.outputs.mode == 'DEPLOY' || needs.tests.outputs.mode == 'ARTIFACT_PREPARE'
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT_BEFORE: ${{ github.event.before || '' }}
         run: |
           set -euo pipefail
-          args=(--candidate-sha "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY")
-          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
-            args+=(--push-before "$EVENT_BEFORE")
-          fi
-          python3 scripts/resolve_native_build_scope.py "${args[@]}" \
+          python3 scripts/resolve_native_build_scope.py \
+            --candidate-sha "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY" \
             | tee "$RUNNER_TEMP/gpoint-build-scope.json"
           python3 - "$RUNNER_TEMP/gpoint-build-scope.json" >> "$GITHUB_OUTPUT" <<'PY'
           import json, sys
           value = json.load(open(sys.argv[1], encoding="utf-8"))
-          if value.get("status") not in {"VERIFIED", "BOOTSTRAP_FULL", "VERIFY_ONLY"}:
+          if value.get("status") not in {"VERIFIED", "BOOTSTRAP_FULL"}:
               raise SystemExit("production component build scope is not verified")
           print("status=" + value["status"])
           print("build_components=" + json.dumps(value["build_components"], separators=(",", ":")))
@@ -1067,9 +1063,6 @@ jobs:
           elif mode == "BOOTSTRAP_FULL":
               if not set(COMPONENT_ROLES).issubset(builds):
                   raise SystemExit("bootstrap release must build every GPoint runtime image")
-          elif mode == "VERIFY_ONLY":
-              if builds or scope["scope"] != "NONE":
-                  raise SystemExit("verify-only candidate has a changed live runtime component")
           else:
               raise SystemExit("production component baseline mode is unsupported")
           effective = {}
@@ -1224,8 +1217,7 @@ jobs:
         env:
           LIVE_MIGRATIONS: ${{ steps.migration_baseline.outputs.prisma_migrations }}
           LIVE_CHECKSUMS: ${{ steps.migration_baseline.outputs.prisma_checksums }}
-          LIVE_COMPONENT_SCOPE: ${{ steps.component_plan.outputs.scope }}
-          BUILD_BASELINE_MODE: ${{ needs.build.outputs.baseline_mode }}
+          BUILD_COMPONENTS: ${{ needs.build.outputs.build_components }}
         run: |
           set -euo pipefail
           plan="$(python3 scripts/prisma_migration_release_plan.py \
@@ -1239,8 +1231,8 @@ jobs:
           pending_checksums="$(sed -n 's/^pending_checksums=//p' <<< "$plan")"
           source_head="$(sed -n 's/^source_head=//p' <<< "$plan")"
           [[ "$apply" == true || "$apply" == false ]]
-          if [[ "$BUILD_BASELINE_MODE" == VERIFY_ONLY && "$LIVE_COMPONENT_SCOPE" == NONE && "$apply" == true ]]; then
-            echo 'verify-only release has pending Prisma migrations; refusing database mutation' >&2
+          if [[ "$BUILD_COMPONENTS" == "[]" && "$apply" == true ]]; then
+            echo 'release with pending Prisma migrations has no prebuilt candidate Core image; refusing database mutation' >&2
             exit 1
           fi
           [[ "$source_head" =~ ^[0-9]{14}_[a-z0-9_]+$ ]]

@@ -268,8 +268,29 @@ def test_legacy_success_without_component_sources_uses_one_bootstrap_build():
                         "reason": "successful_legacy_deployment_has_no_component_source_manifest"}
 
 
-def test_tooling_only_push_without_manifest_uses_verify_only_plan(tmp_path):
-    repo, before = repo_with_baseline(tmp_path)
+def test_build_plan_accepts_no_push_diff_input():
+    """The build plan must never be derived from the pushed diff alone.
+
+    Run 43148553035: a tooling-only push was treated as "no images needed" while
+    production still lagged the candidate by application code. Keeping a
+    push-diff parameter on the resolver is what allowed that contradiction, so
+    the API must not offer one at all.
+    """
+    import inspect
+
+    assert "push_before" not in inspect.signature(MODULE.resolve_build_plan).parameters
+    assert not hasattr(MODULE, "_is_verified_tooling_only_push")
+    assert "VERIFY_ONLY" not in Path(MODULE.__file__).read_text(encoding="utf-8")
+
+
+def test_tooling_only_push_without_manifest_still_builds_every_component(tmp_path):
+    """A tooling-only push is not proof that production already runs the candidate.
+
+    Without a component manifest the accumulated production -> candidate diff is
+    unknown, so the build must stay whole-image. The Deploy job narrows the Kamal
+    scope from the fresh live inventory.
+    """
+    repo, _before = repo_with_baseline(tmp_path)
     candidate = commit_file(repo, "tests/test_release_tooling.py", "assert True\n")
     deployments, statuses, runs = deployment_fixture(
         environment_url="https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA,
@@ -277,15 +298,14 @@ def test_tooling_only_push_without_manifest_uses_verify_only_plan(tmp_path):
     )
 
     plan = MODULE.resolve_build_plan(
-        repo, candidate, deployments, statuses, runs,
-        repository=REPOSITORY, push_before=before,
+        repo, candidate, deployments, statuses, runs, repository=REPOSITORY,
     )
 
     assert plan == {
-        "status": "VERIFY_ONLY",
+        "status": "BOOTSTRAP_FULL",
         "deploy_scope": "UNRESOLVED",
-        "build_components": [],
-        "reason": "verified_tooling_only_push",
+        "build_components": ["CORE", "AGATA", "MINIAPP", "EROS"],
+        "reason": "successful_legacy_deployment_has_no_component_source_manifest",
     }
 
 
@@ -294,27 +314,11 @@ def test_tooling_only_push_without_manifest_uses_verify_only_plan(tmp_path):
     "unmapped/release-file.bin",
     "packages/db/prisma/migrations/20261104120000_add_flag/migration.sql",
     "packages/db/prisma/production-approved-migrations.json",
+    "tests/test_release_tooling.py",
 ])
-def test_runtime_unknown_or_migration_push_path_does_not_use_verify_only(tmp_path, path):
-    repo, before = repo_with_baseline(tmp_path)
-    candidate = commit_file(repo, path, "candidate content\n")
-    deployments, statuses, runs = deployment_fixture(
-        environment_url="https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA,
-        run_head_sha=BASELINE,
-    )
-
-    plan = MODULE.resolve_build_plan(
-        repo, candidate, deployments, statuses, runs,
-        repository=REPOSITORY, push_before=before,
-    )
-
-    assert plan["status"] == "BOOTSTRAP_FULL"
-    assert plan["build_components"] == ["CORE", "AGATA", "MINIAPP", "EROS"]
-
-
-def test_tooling_only_candidate_without_exact_push_before_does_not_use_verify_only(tmp_path):
+def test_no_push_path_can_skip_images_without_a_component_manifest(tmp_path, path):
     repo, _before = repo_with_baseline(tmp_path)
-    candidate = commit_file(repo, "tests/test_release_tooling.py", "assert True\n")
+    candidate = commit_file(repo, path, "candidate content\n")
     deployments, statuses, runs = deployment_fixture(
         environment_url="https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA,
         run_head_sha=BASELINE,

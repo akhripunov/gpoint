@@ -14,8 +14,6 @@ from urllib.parse import parse_qsl, urlparse
 
 from native_release_intent import (
     EXACT_SHA,
-    _known_non_runtime_path,
-    _safe_component_path,
     classify_component_build_plan,
 )
 
@@ -202,37 +200,9 @@ def resolve_production_component_sources(deployments: list[dict], statuses_by_id
     return {"status": "VERIFIED", "deployment_id": identifier, **baseline}
 
 
-def _is_verified_tooling_only_push(repo: Path, before: str | None, candidate: str) -> bool:
-    """Allow no-image verification only for an exact, known non-runtime push diff."""
-    if not isinstance(before, str) or not EXACT_SHA.fullmatch(before) or before == "0" * 40:
-        return False
-    ancestor = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", before, candidate], cwd=repo,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    if ancestor.returncode:
-        return False
-    raw = subprocess.check_output(
-        ["git", "diff", "--name-status", "-z", "--no-renames", f"{before}..{candidate}", "--"],
-        cwd=repo,
-    )
-    entries = raw.decode("utf8").split("\x00")
-    if not entries or entries.pop() != "" or len(entries) % 2:
-        return False
-    pairs = list(zip(entries[::2], entries[1::2]))
-    return bool(pairs) and all(
-        status in {"A", "M"}
-        and _safe_component_path(path)
-        and not path.startswith("packages/db/prisma/migrations/")
-        and path != "packages/db/prisma/production-approved-migrations.json"
-        and _known_non_runtime_path(path)
-        for status, path in pairs
-    )
-
-
 def resolve_build_plan(repo: Path, candidate_sha: str, deployments: list[dict],
                        statuses_by_id: dict, runs_by_id: dict, *, repository: str,
-                       push_before: str | None = None, jobs_by_id: dict | None = None) -> dict:
+                       jobs_by_id: dict | None = None) -> dict:
     if not EXACT_SHA.fullmatch(candidate_sha or ""):
         raise ValueError("candidate SHA must be exact")
     repo = repo.resolve()
@@ -245,13 +215,9 @@ def resolve_build_plan(repo: Path, candidate_sha: str, deployments: list[dict],
     baseline = resolve_production_component_sources(
         deployments, statuses_by_id, runs_by_id, repository=repository, jobs_by_id=jobs_by_id)
     if baseline["status"] == "BOOTSTRAP_FULL":
-        if _is_verified_tooling_only_push(repo, push_before, candidate_sha):
-            return {
-                "status": "VERIFY_ONLY",
-                "deploy_scope": "UNRESOLVED",
-                "build_components": [],
-                "reason": "verified_tooling_only_push",
-            }
+        # Without a proven component baseline, no image identity can be assumed.
+        # Build every runtime image: the Deploy job's fresh live inventory then
+        # narrows the Kamal scope to the components that must actually change.
         return {
             "status": "BOOTSTRAP_FULL",
             "deploy_scope": "UNRESOLVED",
@@ -286,7 +252,6 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--repository", required=True)
-    parser.add_argument("--push-before")
     args = parser.parse_args()
     try:
         deployments = _gh_json(
@@ -330,7 +295,7 @@ def main() -> int:
                     jobs_by_id[int(job_id)] = json.loads(result.stdout)
         plan = resolve_build_plan(args.repo, args.candidate_sha, deployments,
                                   statuses_by_id, runs_by_id,
-                                  repository=args.repository, push_before=args.push_before,
+                                  repository=args.repository,
                                   jobs_by_id=jobs_by_id)
     except (ValueError, subprocess.CalledProcessError, OSError, json.JSONDecodeError) as error:
         reason = str(error) if isinstance(error, ValueError) else "GitHub production baseline lookup failed"
