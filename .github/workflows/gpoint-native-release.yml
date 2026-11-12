@@ -339,6 +339,7 @@ jobs:
           tests/test_native_build_scope.py
           tests/test_prepush_runner.py
           tests/test_release_scope_consistency.py
+          tests/test_release_routing_matrix.py
           tests/test_native_release_intent.py
           tests/test_native_prepared_run.py
           tests/test_release_pre_push_mode.py
@@ -701,7 +702,23 @@ jobs:
   deploy:
     name: Kamal production Deploy and Verify
     needs: [tests, build]
-    if: needs.tests.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (inputs.mode == 'rollback' || needs.build.outputs.deploy_scope != 'NONE')
+    if: >-
+      always() && !cancelled() &&
+      (
+        (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+         needs.tests.result == 'success' && needs.tests.outputs.deploy == 'true' &&
+         needs.build.result == 'success' && needs.build.outputs.deploy_scope != 'NONE') ||
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+         github.actor == github.repository_owner && needs.tests.result == 'success' &&
+         (
+           (inputs.mode == 'deploy' && needs.tests.outputs.mode == 'DEPLOY' &&
+            needs.tests.outputs.deploy == 'true' && needs.build.result == 'success' &&
+            needs.build.outputs.deploy_scope != 'NONE') ||
+           (inputs.mode == 'rollback' && needs.tests.outputs.mode == 'ROLLBACK' &&
+            needs.tests.outputs.deploy == 'true' &&
+            (needs.build.result == 'success' || needs.build.result == 'skipped'))
+         ))
+      )
     runs-on: ubuntu-latest
     environment:
       name: production

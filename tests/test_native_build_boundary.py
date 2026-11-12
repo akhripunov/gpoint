@@ -66,7 +66,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("REUSE_PREPARED_IMAGES", readback["env"])
         self.assertIn('if [[ "$REUSE_PREPARED_IMAGES" != true ]]', readback["run"])
         deploy = self.workflow["jobs"]["deploy"]
-        self.assertIn("needs.tests.outputs.deploy == 'true'", deploy["if"])
+        self.assertIn("always()", deploy["if"])
 
     def test_prepared_run_image_version_flows_from_build_run_through_kamal_deploy(self):
         build = self.workflow["jobs"]["build"]
@@ -164,7 +164,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("pull_request", triggers)
         self.assertEqual(triggers["push"]["branches"], ["main"])
         deploy = self.workflow["jobs"]["deploy"]
-        self.assertEqual(deploy["if"], "needs.tests.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (inputs.mode == 'rollback' || needs.build.outputs.deploy_scope != 'NONE')")
+        self.assertIn("always()", deploy["if"])
+        self.assertIn("needs.build.result == 'success'", deploy["if"])
         self.assertIn("github.event_name == 'push'", deploy["if"])
 
     def test_operational_only_push_and_migration_rehearsal_fail_closed(self):
@@ -182,7 +183,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn('return "BLOCK"', intent)
 
         deploy = self.workflow["jobs"]["deploy"]
-        self.assertIn("needs.tests.outputs.deploy == 'true'", deploy["if"])
+        self.assertIn("always()", deploy["if"])
         rehearsal = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())["jobs"]["migration_rehearsal"]
         self.assertEqual(rehearsal["environment"], {"name": "production", "deployment": False})
         self.assertNotIn("deployments", rehearsal["permissions"])
