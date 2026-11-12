@@ -357,7 +357,9 @@ def classify_dispatch(*, ref: str, candidate_sha: str, github_sha: str, actor: s
         return "INVALID_BACKUP_MAINTENANCE", False
     if rollback:
         if ref == "refs/heads/main" and exact and owner and approve_production:
-            return "ROLLBACK", False
+            # A rollback runs inside the protected Deploy job as a mode, so the
+            # release pipeline must admit it exactly like a forward deploy.
+            return "ROLLBACK", True
         return "INVALID_ROLLBACK", False
     if migration_rehearsal:
         if (ref == "refs/heads/main" and exact and owner and not approve_production):

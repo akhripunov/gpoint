@@ -403,7 +403,7 @@ def test_eros_image_rollback_is_opt_in_only_with_the_protected_rollback_operatio
         actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
         approve_production=True, rollback=True, rollback_eros=True,
     )
-    assert valid == ("ROLLBACK", False)
+    assert valid == ("ROLLBACK", True)
     invalid = MODULE.classify_dispatch(
         ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
         actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
@@ -984,7 +984,7 @@ def test_rollback_dispatch_requires_main_exact_owner_explicit_approval_and_no_ot
         migration_rehearsal=False, backup_maintenance=False,
         rollback=True, approve_production=True,
     )
-    assert MODULE.classify_dispatch(**args) == ("ROLLBACK", False)
+    assert MODULE.classify_dispatch(**args) == ("ROLLBACK", True)
     for changes in (
         {"ref": "refs/heads/feature"},
         {"candidate_sha": "b" * 40},

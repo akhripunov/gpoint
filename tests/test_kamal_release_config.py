@@ -111,7 +111,7 @@ def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
     assert jobs["deploy"]["needs"] == ["tests", "build"]
     assert jobs["deploy"]["environment"] == {
         "name": "production",
-        "url": "${{ steps.verify.outputs.environment_url }}",
+        "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
     assert "deployment" not in jobs["deploy"]["environment"]
 
@@ -696,10 +696,10 @@ def test_pinned_setup_go_uses_official_digest_pinned_tool_cache_seed():
 def test_native_release_runs_kamal_after_successful_main_push():
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
     deploy = workflow["jobs"]["deploy"]
-    assert deploy["if"] == "needs.tests.outputs.deploy == 'true' && needs.build.outputs.deploy_scope != 'NONE' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
+    assert deploy["if"] == "needs.tests.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (inputs.mode == 'rollback' || needs.build.outputs.deploy_scope != 'NONE')"
     assert deploy["environment"] == {
         "name": "production",
-        "url": "${{ steps.verify.outputs.environment_url }}",
+        "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
     deploy_script = "\n".join(step.get("run", "") for step in deploy["steps"])
     assert 'test "$APPROVE_PRODUCTION" = true' in deploy_script
@@ -707,10 +707,10 @@ def test_native_release_runs_kamal_after_successful_main_push():
     assert "Resolve exact GitHub environment Deployment ID" in [step.get("name") for step in deploy["steps"]]
     assert 'repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses' not in deploy_script
 
-    rollback_workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-operations.yml').read_text())
-    rollback = rollback_workflow["jobs"]["rollback"]
+    rollback_workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    rollback = rollback_workflow["jobs"]["deploy"]
     assert rollback["environment"] == {
-        "name": "production", "url": "${{ steps.verify.outputs.environment_url }}",
+        "name": "production", "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
     rollback_script = "\n".join(step.get("run", "") for step in rollback["steps"])
     assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in rollback_script
@@ -967,12 +967,12 @@ def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
 def test_consumer_process_checks_do_not_require_ps_inside_slim_images():
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
     deploy = "\n".join(step.get("run", "") for step in workflow["jobs"]["deploy"]["steps"])
-    rollback_workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-operations.yml').read_text())
-    rollback = "\n".join(step.get("run", "") for step in rollback_workflow["jobs"]["rollback"]["steps"])
+    rollback_workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    rollback = "\n".join(step.get("run", "") for step in rollback_workflow["jobs"]["deploy"]["steps"])
     for role in ['worker', 'bot']:
         assertion = f'docker top "gpoint-core-{role}-$core_version" -eo pid,args | grep -F "apps/{role}/dist/main.js"'
-        assert deploy.count(assertion) == 1
-        assert rollback.count(assertion) == 1
+        # The job now carries the ordinary and the rollback branch: one each.
+        assert deploy.count(assertion) == 2
     assert "sh -ec 'ps aux" not in workflow
 
 

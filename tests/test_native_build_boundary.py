@@ -20,13 +20,12 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
     def test_pipeline_has_release_gate_and_one_isolated_rehearsal_job(self):
         jobs = self.workflow["jobs"]
         self.assertEqual(set(jobs), {"tests", "build", "deploy"})
-        rollback = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())["jobs"]["rollback"]
-        self.assertIn("inputs.rollback == true", rollback["if"])
+        rollback = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())["jobs"]["deploy"]
+        self.assertIn("inputs.mode == 'rollback'", rollback["if"])
         self.assertEqual(rollback["environment"], {
-            "name": "production", "url": "${{ steps.verify.outputs.environment_url }}",
+            "name": "production", "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
         })
         self.assertEqual(rollback["concurrency"], {"group": "gpoint-production-release", "cancel-in-progress": False})
-        self.assertNotIn("needs", rollback)
         rehearsal = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())["jobs"]["migration_rehearsal"]
         self.assertNotIn("needs", rehearsal)
         self.assertIn("github.ref == 'refs/heads/main'", rehearsal["if"])
@@ -165,7 +164,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("pull_request", triggers)
         self.assertEqual(triggers["push"]["branches"], ["main"])
         deploy = self.workflow["jobs"]["deploy"]
-        self.assertEqual(deploy["if"], "needs.tests.outputs.deploy == 'true' && needs.build.outputs.deploy_scope != 'NONE' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')")
+        self.assertEqual(deploy["if"], "needs.tests.outputs.deploy == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (inputs.mode == 'rollback' || needs.build.outputs.deploy_scope != 'NONE')")
         self.assertIn("github.event_name == 'push'", deploy["if"])
 
     def test_operational_only_push_and_migration_rehearsal_fail_closed(self):
@@ -174,7 +173,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("scripts/native_release_intent.py", "\n".join(step.get("run", "") for step in gate["steps"]))
         gate_text = "\n".join(step.get("run", "") for step in gate["steps"])
         self.assertNotIn("--backup-maintenance", gate_text)
-        self.assertNotIn("--rollback", gate_text)
+        self.assertIn('[[ "$MODE" == rollback ]] && args+=(--rollback)', gate_text)
         backup = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())["jobs"]["backup_maintenance"]
         self.assertEqual(backup["environment"], {"name": "production", "deployment": False})
         intent = (ROOT / "scripts/native_release_intent.py").read_text()
@@ -380,7 +379,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertLess(resolve, verify)
         self.assertIn("manifest_sha", steps[verify]["run"])
         self.assertIn("environment_url=https://gpoint.one/#gpoint-manifest-sha256=$manifest_sha", steps[verify]["run"])
-        self.assertEqual(deploy["environment"]["url"], "${{ steps.verify.outputs.environment_url }}")
+        self.assertEqual(deploy["environment"]["url"], "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}")
         self.assertNotIn("deployments/$DEPLOYMENT_ID/statuses", "\n".join(step.get("run", "") for step in steps))
         verify_run = steps[verify]["run"]
         self.assertIn("scp -p scripts/write-kamal-production-manifest.py", verify_run)

@@ -8,7 +8,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/gpoint-native-release.yml"
 
-_ROLLBACK = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())
+_ROLLBACK = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
 _BACKUP = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())
 _REHEARSAL = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())
 _STAGING = yaml.safe_load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text())
@@ -29,7 +29,7 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert "workflow_dispatch" in deploy.get("if", "")
     assert deploy["environment"] == {
         "name": "production",
-        "url": "${{ steps.verify.outputs.environment_url }}",
+        "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
     build = workflow["jobs"]["build"]
     assert "release_intent" not in workflow["jobs"]
@@ -115,7 +115,7 @@ def test_rerun_by_non_owner_cannot_deploy_a_main_push(tmp_path):
 
 def test_non_owner_cannot_rerun_migration_rehearsal(tmp_path):
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    rehearsal = _SPECIAL_JOBS["migration_rehearsal"]["jobs"]["migration_rehearsal"]
+    rehearsal = _REHEARSAL["jobs"]["migration_rehearsal"]
     gate = next(step for step in rehearsal["steps"]
                 if step.get("name") == "Require exact main-only owner initiated rehearsal")
     sha = "a" * 40
@@ -235,8 +235,8 @@ def test_verify_only_component_scope_runs_runtime_verification_without_kamal_rep
 
     for component in ("CORE", "AGATA", "MINIAPP"):
         assert f'if [[ "$DEPLOY_{component}" == true ]]; then' in run
-    assert apply["if"] == "success()"
-    assert "if" not in verify
+    assert apply["if"] == "(success()) && inputs.mode != 'rollback'"
+    assert verify["if"] == "inputs.mode != 'rollback'"
     assert "EXPECTED_ROLE_IDENTITIES_B64" in verify["run"]
     for role in ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot",
                  "gpoint-agata-api", "gpoint-agata-memory-worker", "gpoint-miniapp-web"):
@@ -311,7 +311,7 @@ def test_ordinary_deployment_uses_native_environment_status_after_verify():
     resolve = names.index("Resolve exact GitHub environment Deployment ID")
     verify = names.index("Verify public routes and exact running services")
     assert resolve < verify
-    assert deploy["environment"]["url"] == "${{ steps.verify.outputs.environment_url }}"
+    assert deploy["environment"]["url"] == "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}"
     deployment_steps = "\n".join(step.get("run", "") for step in deploy["steps"])
     assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in deployment_steps
     assert "gpoint-manifest-sha256=" in deployment_steps
@@ -320,10 +320,10 @@ def test_ordinary_deployment_uses_native_environment_status_after_verify():
 
 def test_manual_rollback_uses_native_environment_deployment_and_target_metadata():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    rollback = _SPECIAL_JOBS["rollback"]["jobs"]["rollback"]
+    rollback = _ROLLBACK["jobs"]["deploy"]
     assert rollback["environment"] == {
         "name": "production",
-        "url": "${{ steps.verify.outputs.environment_url }}",
+        "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
     body = "\n".join(step.get("run", "") for step in rollback["steps"])
     assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in body
@@ -342,8 +342,7 @@ def test_production_mutations_share_one_non_cancelling_lock():
     native = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     expected = {"group": "gpoint-production-release", "cancel-in-progress": False}
     assert native["jobs"]["deploy"]["concurrency"] == expected
-    for workflow_name, job in (("gpoint-operations.yml", "rollback"),
-                               ("gpoint-operations.yml", "backup_maintenance"),
+    for workflow_name, job in (("gpoint-operations.yml", "backup_maintenance"),
                                ("gpoint-operations.yml", "migration_rehearsal")):
         special = yaml.safe_load((ROOT / ".github/workflows" / workflow_name).read_text())
         assert special["jobs"][job]["concurrency"] == expected
@@ -381,7 +380,7 @@ def test_backup_timer_setup_is_a_separate_exact_sha_owner_authorized_operation()
     events = workflow.get("on", workflow.get(True))
     inputs = events["workflow_dispatch"]["inputs"]
     assert inputs["backup_maintenance"]["type"] == "boolean"
-    job = _SPECIAL_JOBS["backup_maintenance"]["jobs"]["backup_maintenance"]
+    job = _BACKUP["jobs"]["backup_maintenance"]
     assert "refs/heads/main" in job["if"]
     assert "inputs.backup_maintenance == true" in job["if"]
     assert "inputs.approve_production == true" in job["if"]
@@ -399,7 +398,7 @@ def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_k
     workflow = _REHEARSAL
     events = workflow.get("on", workflow.get(True))
     assert events["workflow_dispatch"]["inputs"]["migration_rehearsal"]["type"] == "boolean"
-    rehearsal = _SPECIAL_JOBS["migration_rehearsal"]["jobs"]["migration_rehearsal"]
+    rehearsal = _REHEARSAL["jobs"]["migration_rehearsal"]
     assert "inputs.migration_rehearsal" in rehearsal["if"]
     assert "refs/heads/main" in rehearsal["if"]
     assert rehearsal["environment"] == {"name": "production", "deployment": False}
@@ -443,7 +442,7 @@ def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_k
 
 def test_migration_rehearsal_uses_immutable_oci_identity_across_docker_hosts():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    rehearsal = _SPECIAL_JOBS["migration_rehearsal"]["jobs"]["migration_rehearsal"]
+    rehearsal = _REHEARSAL["jobs"]["migration_rehearsal"]
     body = "\n".join(step.get("run", "") for step in rehearsal["steps"])
     build = workflow["jobs"]["build"]
     build_body = "\n".join(step.get("run", "") for step in build["steps"])
@@ -534,14 +533,14 @@ def test_scheduled_vps_backup_uploads_and_restores_same_bunny_snapshot_during_tr
 
 def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    rollback = _SPECIAL_JOBS["rollback"]["jobs"]["rollback"]
-    assert "inputs.rollback == true" in rollback["if"]
-    assert "inputs.approve_production == true" in rollback["if"]
+    rollback = _ROLLBACK["jobs"]["deploy"]
+    assert "inputs.mode == 'rollback'" in rollback["if"]
+    assert "inputs.mode == 'rollback'" in rollback["if"]
     assert rollback["environment"] == {
-        "name": "production", "url": "${{ steps.verify.outputs.environment_url }}",
+        "name": "production", "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
     assert rollback["concurrency"] == {"group": "gpoint-production-release", "cancel-in-progress": False}
-    assert rollback["permissions"] == {"contents": "read", "packages": "read", "deployments": "write"}
+    assert rollback["permissions"] == {"contents": "read", "packages": "read", "actions": "read", "deployments": "write"}
     body = yaml.safe_dump(rollback)
     names = [step.get("name", step.get("uses", "")) for step in rollback["steps"]]
     assert names.index("Validate linked build, successful Runtime Verify and component-role manifest") < names.index("Verify target digests, platform, revision and provenance")
@@ -549,7 +548,7 @@ def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
     assert names.index("Verify live DB compatibility and retained target containers before mutation") < names.index("Roll back consumers and then APIs with stock Kamal")
     assert names.index("Verify retained Eros rollback containers") < names.index("Verify Eros rollback image against an isolated current database restore")
     assert names.index("Verify Eros rollback image against an isolated current database restore") < names.index("Roll back consumers and then APIs with stock Kamal")
-    assert rollback["steps"][names.index("Verify Eros rollback image against an isolated current database restore")]["if"] == "inputs.rollback_eros == true"
+    assert rollback["steps"][names.index("Verify Eros rollback image against an isolated current database restore")]["if"] == "(inputs.rollback_eros == true) && inputs.mode == 'rollback'"
     assert names.index("Roll back consumers and then APIs with stock Kamal") < names.index("Verify rollback Runtime and preserve databases before SUCCESS")
     for gate in (
         "rollback_target_sha", "rollback_deployment_id", "verify_native_rollback_evidence.py",
@@ -562,7 +561,9 @@ def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
         assert gate in body
     events = _ROLLBACK.get("on", _ROLLBACK.get(True))
     inputs = events["workflow_dispatch"]["inputs"]
-    assert "rollback" in inputs and inputs["rollback"]["default"] is False
+    assert inputs["mode"]["default"] == "deploy"
+    assert "rollback" in inputs["mode"]["options"]
+    assert inputs["rollback_target_sha"]["type"] == "string"
     assert "rollback_target_sha" in inputs
     assert "rollback_deployment_id" in inputs
     assert "outputs.deploy == 'true'" in workflow["jobs"]["deploy"]["if"]

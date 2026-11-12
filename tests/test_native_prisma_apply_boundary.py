@@ -18,7 +18,7 @@ def test_approved_prisma_apply_is_inside_the_protected_deploy_before_kamal():
     assert ids.index("migration_plan") < ids.index("deployment")
     assert ids.index("deployment") < ids.index("migration_apply") < ids.index("kamal_apply")
     apply = next(step for step in steps if step.get("id") == "migration_apply")
-    assert "if" not in apply or "success()" in apply["if"]
+    assert apply["if"] == "inputs.mode != 'rollback'"
     assert 'if [[ "$APPLY" == false ]]' in apply["run"]
     assert 'echo "agata_head=$BASELINE_AGATA_HEAD"' in apply["run"]
     assert apply["env"]["BASELINE_AGATA_HEAD"] == "${{ steps.migration_baseline.outputs.agata_head }}"
@@ -29,7 +29,7 @@ def test_approved_prisma_apply_is_inside_the_protected_deploy_before_kamal():
     assert apply["env"]["APP_IMAGE"] == "ghcr.io/akhripunov/gpoint-runtime@${{ steps.component_plan.outputs.migration_app_digest }}"
     assert "apply_failed" not in apply
     kamal = next(step for step in steps if step.get("id") == "kamal_apply")
-    assert not kamal.get("if") or "success()" in kamal["if"]
+    assert kamal["if"] == "(success()) && inputs.mode != 'rollback'"
     verify = next(step for step in steps if step.get("id") == "verify")
     assert "steps.migration_apply.outputs.prisma_migrations" in verify["env"]["EXPECTED_PRISMA_MIGRATIONS"]
     assert verify["env"]["BASELINE_AGATA_HEAD"] == "${{ steps.migration_baseline.outputs.agata_head }}"
