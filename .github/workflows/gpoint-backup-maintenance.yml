@@ -134,4 +134,3 @@ jobs:
           rm -rf -- "$stage"
           REMOTE_INSTALL
           echo GPOINT_VPS_BACKUP_INSTALL=PASS >> "$GITHUB_STEP_SUMMARY"
-

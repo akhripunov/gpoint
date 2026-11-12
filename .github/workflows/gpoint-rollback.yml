@@ -523,4 +523,3 @@ jobs:
         run: |
           set -euo pipefail
           echo "RECOVERY_REQUIRED: rollback apply/verify did not PASS; no automatic rollback or second Apply. Confirm live topology read-only before another production mutation." >> "$GITHUB_STEP_SUMMARY"
-
