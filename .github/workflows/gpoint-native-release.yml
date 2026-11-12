@@ -498,20 +498,20 @@ jobs:
           fi
           printf 'image_version=%s\n' "$image_version" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-        if: steps.build_scope.outputs.build_components != '[]' || steps.rehearsal_scope.outputs.build_components != '[]'
+        if: steps.build_scope.outputs.build_components != '[]'
         with:
           platforms: linux/amd64
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
-        if: steps.build_scope.outputs.build_components != '[]' || steps.rehearsal_scope.outputs.build_components != '[]'
+        if: steps.build_scope.outputs.build_components != '[]'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Create dependency-manifest build context
-        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'CORE') || contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'MINIAPP')
+        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'CORE') || contains(fromJSON(steps.build_scope.outputs.build_components), 'MINIAPP')
         run: python3 scripts/docker_dependency_manifests.py "$RUNNER_TEMP/dependency-manifests"
       - name: Build and publish immutable runtime image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'CORE') && inputs.use_prepared_images != true
+        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'CORE') && inputs.use_prepared_images != true
         id: app
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -534,7 +534,7 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Build and publish immutable Mini App image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'MINIAPP') && inputs.use_prepared_images != true
+        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'MINIAPP') && inputs.use_prepared_images != true
         id: miniapp
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -557,7 +557,7 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Build and publish immutable AGATA image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'AGATA') && inputs.use_prepared_images != true
+        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'AGATA') && inputs.use_prepared_images != true
         id: agata
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -577,7 +577,7 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Build and publish stock Eros image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components || steps.rehearsal_scope.outputs.build_components), 'EROS') && inputs.use_prepared_images != true
+        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'EROS') && inputs.use_prepared_images != true
         id: eros
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -598,7 +598,7 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Validate immutable image identity and expose digests
-        if: steps.build_scope.outputs.build_components != '[]' || steps.rehearsal_scope.outputs.build_components != '[]'
+        if: steps.build_scope.outputs.build_components != '[]'
         env:
           CANDIDATE_SHA: ${{ github.sha }}
           APP_DIGEST: ${{ steps.app.outputs.digest || steps.prepared.outputs.app_digest }}
@@ -625,7 +625,7 @@ jobs:
           PY
       - name: Read back exact published images and verify candidate identity
         id: image_readback
-        if: steps.build_scope.outputs.build_components != '[]' || steps.rehearsal_scope.outputs.build_components != '[]'
+        if: steps.build_scope.outputs.build_components != '[]'
         env:
           CANDIDATE_SHA: ${{ github.sha }}
           IMAGE_VERSION: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
