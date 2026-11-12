@@ -566,3 +566,13 @@ def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
     assert "rollback_target_sha" in inputs
     assert "rollback_deployment_id" in inputs
     assert "outputs.deploy == 'true'" in workflow["jobs"]["deploy"]["if"]
+
+
+def test_deploy_publishes_release_timing_even_when_the_release_fails():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["deploy"]["steps"]
+    step = next(item for item in steps if item.get("name") == "Publish release timing")
+    assert step["if"] == "always()"
+    assert "GPOINT_RELEASE_TIMING=REPORTED" in step["run"]
+    assert "GPOINT_RELEASE_TIMING=UNVERIFIED" in step["run"]
+    assert 'jobs?per_page=100' in step["run"]

@@ -1831,6 +1831,42 @@ jobs:
           )"
           echo "environment_url=https://gpoint.one/#gpoint-manifest-sha256=$manifest_sha&$source_params" >> "$GITHUB_OUTPUT"
           echo "GPOINT_KAMAL_VERIFY=PASS SHA=$CANDIDATE_SHA MANIFEST_SHA=$manifest_sha" >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish release timing
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! python3 - "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, subprocess, sys
+          from datetime import datetime, timezone
+          repo, run_id = sys.argv[1], sys.argv[2]
+          def get(path):
+              return json.loads(subprocess.check_output(["gh", "api", path], text=True))
+          run = get(f"repos/{repo}/actions/runs/{run_id}")
+          jobs = get(f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100")["jobs"]
+          def dt(value):
+              return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
+          now = datetime.now(timezone.utc)
+          started = dt(run.get("run_started_at"))
+          print("**GPoint release timing**")
+          print("")
+          print("| job | seconds |")
+          print("|---|---|")
+          for job in sorted(jobs, key=lambda row: row.get("started_at") or ""):
+              begin = dt(job.get("started_at"))
+              if begin is None:
+                  continue
+              end = dt(job.get("completed_at")) or now
+              print(f"| {job['name']} | {round((end - begin).total_seconds())} |")
+          total = round((now - started).total_seconds()) if started else None
+          print(f"| total (run) | {total} |")
+          print("")
+          print(f"GPOINT_RELEASE_TIMING=REPORTED TOTAL_SECONDS={total}")
+          PY
+          then
+            echo "GPOINT_RELEASE_TIMING=UNVERIFIED" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Report recovery guidance after ordinary release
         if: always() && steps.deployment.outputs.id != '' && steps.verify.outcome != 'success'
         env:
