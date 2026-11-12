@@ -268,7 +268,15 @@ def test_legacy_success_without_component_sources_uses_one_bootstrap_build():
                         "reason": "successful_legacy_deployment_has_no_component_source_manifest"}
 
 
-def test_tooling_only_push_without_manifest_uses_verify_only_plan(tmp_path):
+def test_tooling_only_push_without_manifest_still_builds_every_component(tmp_path):
+    """A tooling-only push cannot prove production already runs the candidate.
+
+    Run 43148553035 shipped exactly this gap: Build returned an empty component
+    set for a tooling-only push while Deploy required images for the accumulated
+    production diff, so the release aborted with "fresh live component scope is
+    missing a prebuilt candidate image". Without a component source manifest the
+    plan must stay fail-closed and build.
+    """
     repo, before = repo_with_baseline(tmp_path)
     candidate = commit_file(repo, "tests/test_release_tooling.py", "assert True\n")
     deployments, statuses, runs = deployment_fixture(
@@ -281,12 +289,9 @@ def test_tooling_only_push_without_manifest_uses_verify_only_plan(tmp_path):
         repository=REPOSITORY, push_before=before,
     )
 
-    assert plan == {
-        "status": "VERIFY_ONLY",
-        "deploy_scope": "UNRESOLVED",
-        "build_components": [],
-        "reason": "verified_tooling_only_push",
-    }
+    assert plan["status"] == "BOOTSTRAP_FULL"
+    assert plan["build_components"] == MODULE.BOOTSTRAP_BUILD_COMPONENTS
+    assert plan["build_components"], "bootstrap plan must never be empty"
 
 
 @pytest.mark.parametrize("path", [

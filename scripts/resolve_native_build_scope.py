@@ -202,34 +202,6 @@ def resolve_production_component_sources(deployments: list[dict], statuses_by_id
     return {"status": "VERIFIED", "deployment_id": identifier, **baseline}
 
 
-def _is_verified_tooling_only_push(repo: Path, before: str | None, candidate: str) -> bool:
-    """Allow no-image verification only for an exact, known non-runtime push diff."""
-    if not isinstance(before, str) or not EXACT_SHA.fullmatch(before) or before == "0" * 40:
-        return False
-    ancestor = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", before, candidate], cwd=repo,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    if ancestor.returncode:
-        return False
-    raw = subprocess.check_output(
-        ["git", "diff", "--name-status", "-z", "--no-renames", f"{before}..{candidate}", "--"],
-        cwd=repo,
-    )
-    entries = raw.decode("utf8").split("\x00")
-    if not entries or entries.pop() != "" or len(entries) % 2:
-        return False
-    pairs = list(zip(entries[::2], entries[1::2]))
-    return bool(pairs) and all(
-        status in {"A", "M"}
-        and _safe_component_path(path)
-        and not path.startswith("packages/db/prisma/migrations/")
-        and path != "packages/db/prisma/production-approved-migrations.json"
-        and _known_non_runtime_path(path)
-        for status, path in pairs
-    )
-
-
 def resolve_build_plan(repo: Path, candidate_sha: str, deployments: list[dict],
                        statuses_by_id: dict, runs_by_id: dict, *, repository: str,
                        push_before: str | None = None, jobs_by_id: dict | None = None) -> dict:
@@ -245,13 +217,11 @@ def resolve_build_plan(repo: Path, candidate_sha: str, deployments: list[dict],
     baseline = resolve_production_component_sources(
         deployments, statuses_by_id, runs_by_id, repository=repository, jobs_by_id=jobs_by_id)
     if baseline["status"] == "BOOTSTRAP_FULL":
-        if _is_verified_tooling_only_push(repo, push_before, candidate_sha):
-            return {
-                "status": "VERIFY_ONLY",
-                "deploy_scope": "UNRESOLVED",
-                "build_components": [],
-                "reason": "verified_tooling_only_push",
-            }
+        # A tooling-only *push* says nothing about production: during the
+        # legacy -> native transition there is no component source manifest, so
+        # the accumulated candidate may still differ from what is installed.
+        # Build the full component set instead of silently skipping images that
+        # Deploy will then require (run 43148553035 failed exactly that way).
         return {
             "status": "BOOTSTRAP_FULL",
             "deploy_scope": "UNRESOLVED",
