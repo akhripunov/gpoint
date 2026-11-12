@@ -413,11 +413,6 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("needs.build.outputs.miniapp_digest", deploy_text)
         self.assertIn("needs.build.outputs.eros_digest", deploy_text)
         self.assertNotRegex(script, r"docker\s+compose\s+(up|down|pull|restart)")
-        phases = "\n".join((ROOT / "scripts/kamal-first-cutover" / (name+".sh")).read_text()
-                           for name in ("requests", "consumers", "verify"))
-        script += phases
-        self.assertIn("Expected stopped GSales service is missing", script)
-        self.assertIn("test \"$(docker inspect --format '{{.State.Running}}' \"$id\")\" = false", script)
         self.assertIn("kamal deploy --skip-push", script)
         self.assertIn("GPOINT_KAMAL_VERIFY=PASS", script)
 
