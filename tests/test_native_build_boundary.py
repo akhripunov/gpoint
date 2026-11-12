@@ -19,33 +19,27 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
 
     def test_pipeline_has_release_gate_and_one_isolated_rehearsal_job(self):
         jobs = self.workflow["jobs"]
-        self.assertEqual(set(jobs), {"tests", "build", "deploy", "rollback", "backup_maintenance", "migration_rehearsal", "layer7_staging"})
-        self.assertEqual(set(jobs) & {"tests", "build", "deploy"}, {"tests", "build", "deploy"})
-        rollback = jobs["rollback"]
-        self.assertIn("outputs.mode == 'ROLLBACK'", rollback["if"])
+        self.assertEqual(set(jobs), {"tests", "build", "deploy"})
+        rollback = yaml.safe_load((ROOT / ".github/workflows/gpoint-rollback.yml").read_text())["jobs"]["rollback"]
+        self.assertIn("inputs.rollback == true", rollback["if"])
         self.assertEqual(rollback["environment"], {
             "name": "production", "url": "${{ steps.verify.outputs.environment_url }}",
         })
         self.assertEqual(rollback["concurrency"], {"group": "gpoint-production-release", "cancel-in-progress": False})
-        self.assertNotIn("build", rollback["needs"])
-        self.assertEqual(jobs["migration_rehearsal"]["needs"], ["tests", "build"])
-        self.assertIn("github.event_name == 'workflow_dispatch'", jobs["migration_rehearsal"]["if"])
-        self.assertIn("github.ref == 'refs/heads/main'", jobs["migration_rehearsal"]["if"])
-        self.assertIn("inputs.migration_rehearsal == true", jobs["migration_rehearsal"]["if"])
+        self.assertNotIn("needs", rollback)
+        rehearsal = yaml.safe_load((ROOT / ".github/workflows/gpoint-migration-rehearsal.yml").read_text())["jobs"]["migration_rehearsal"]
+        self.assertNotIn("needs", rehearsal)
+        self.assertIn("github.ref == 'refs/heads/main'", rehearsal["if"])
+        self.assertIn("inputs.migration_rehearsal == true", rehearsal["if"])
         self.assertEqual(jobs["build"]["needs"], ["tests"])
         self.assertEqual(jobs["deploy"]["needs"], ["tests", "build"])
         self.assertIn("outputs.mode == 'DEPLOY'", jobs["build"]["if"])
-        self.assertIn("outputs.mode == 'REHEARSAL'", jobs["build"]["if"])
         self.assertIn("outputs.mode == 'ARTIFACT_PREPARE'", jobs["build"]["if"])
-        self.assertIn("build", jobs["deploy"]["needs"])
-        staging = jobs["layer7_staging"]
-        self.assertEqual(staging["needs"], ["tests"])
+        staging = yaml.safe_load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text())["jobs"]["layer7_staging"]
+        self.assertNotIn("needs", staging)
         self.assertEqual(staging["environment"]["name"], "layer7-staging")
-        self.assertNotIn("production", staging.get("environment", {}).values())
-        self.assertIn("github.event_name == 'workflow_dispatch'", staging["if"])
         self.assertIn("github.ref == 'refs/heads/main'", staging["if"])
         self.assertIn("inputs.approve_layer7_staging == true", staging["if"])
-        self.assertNotIn("deploy", staging["needs"])
         self.assertNotIn("GPOINT_KAMAL_HOST", staging.get("env", {}))
 
     def test_prepared_artifact_build_has_no_deploy_authority_and_deploy_reuses_exact_digests(self):
@@ -171,23 +165,26 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("pull_request", triggers)
         self.assertEqual(triggers["push"]["branches"], ["main"])
         deploy = self.workflow["jobs"]["deploy"]
-        self.assertEqual(deploy["if"], "needs.tests.outputs.deploy == 'true' && needs.build.outputs.deploy_scope != 'NONE' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true))")
+        self.assertEqual(deploy["if"], "needs.tests.outputs.deploy == 'true' && needs.build.outputs.deploy_scope != 'NONE' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')")
         self.assertIn("github.event_name == 'push'", deploy["if"])
 
     def test_operational_only_push_and_migration_rehearsal_fail_closed(self):
         gate = self.workflow["jobs"]["tests"]
         self.assertEqual(gate["outputs"]["deploy"], "${{ steps.intent.outputs.deploy }}")
         self.assertIn("scripts/native_release_intent.py", "\n".join(step.get("run", "") for step in gate["steps"]))
-        self.assertIn("--backup-maintenance", "\n".join(step.get("run", "") for step in gate["steps"]))
+        gate_text = "\n".join(step.get("run", "") for step in gate["steps"])
+        self.assertNotIn("--backup-maintenance", gate_text)
+        self.assertNotIn("--rollback", gate_text)
+        backup = yaml.safe_load((ROOT / ".github/workflows/gpoint-backup-maintenance.yml").read_text())["jobs"]["backup_maintenance"]
+        self.assertEqual(backup["environment"], {"name": "production", "deployment": False})
         intent = (ROOT / "scripts/native_release_intent.py").read_text()
         self.assertNotIn("PREP_ONLY_SCOPES", intent)
         self.assertNotIn('return "PREPARE_ONLY"', intent)
         self.assertIn('return "BLOCK"', intent)
-        self.assertEqual(self.workflow["jobs"]["backup_maintenance"]["environment"],
-                         {"name": "production", "deployment": False})
+
         deploy = self.workflow["jobs"]["deploy"]
         self.assertIn("needs.tests.outputs.deploy == 'true'", deploy["if"])
-        rehearsal = self.workflow["jobs"]["migration_rehearsal"]
+        rehearsal = yaml.safe_load((ROOT / ".github/workflows/gpoint-migration-rehearsal.yml").read_text())["jobs"]["migration_rehearsal"]
         self.assertEqual(rehearsal["environment"], {"name": "production", "deployment": False})
         self.assertNotIn("deployments", rehearsal["permissions"])
         rehearsal_run = "\n".join(step.get("run", "") for step in rehearsal["steps"])
@@ -441,8 +438,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
     def test_no_mac_runner_or_release_controller_is_used(self):
         text = WORKFLOW.read_text()
         self.assertNotIn("[self-hosted, macOS, gpoint-production]", text)
-        self.assertEqual(self.workflow["jobs"]["layer7_staging"]["runs-on"],
-                         ["self-hosted", "macOS"])
+        staging_text = (ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text()
+        self.assertIn("runs-on: [self-hosted, macOS]", staging_text)
         self.assertNotIn("release:gpoint", text)
 
     def test_native_kamal_uses_attempt_scoped_image_version_and_hook_context(self):

@@ -101,7 +101,7 @@ def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
     assert not ({"workspace", "python"} & set(jobs))
     assert jobs["build"]["needs"] == ["tests"]
     assert jobs["build"]["if"] == (
-        "needs.tests.outputs.mode == 'DEPLOY' || needs.tests.outputs.mode == 'REHEARSAL' "
+        "needs.tests.outputs.mode == 'DEPLOY' "
         "|| needs.tests.outputs.mode == 'ARTIFACT_PREPARE'"
     )
     build_steps = yaml.safe_dump(jobs["build"]["steps"])
@@ -696,7 +696,7 @@ def test_pinned_setup_go_uses_official_digest_pinned_tool_cache_seed():
 def test_native_release_runs_kamal_after_successful_main_push():
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
     deploy = workflow["jobs"]["deploy"]
-    assert deploy["if"] == "needs.tests.outputs.deploy == 'true' && needs.build.outputs.deploy_scope != 'NONE' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.migration_rehearsal != true && inputs.backup_maintenance != true))"
+    assert deploy["if"] == "needs.tests.outputs.deploy == 'true' && needs.build.outputs.deploy_scope != 'NONE' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
     assert deploy["environment"] == {
         "name": "production",
         "url": "${{ steps.verify.outputs.environment_url }}",
@@ -707,7 +707,8 @@ def test_native_release_runs_kamal_after_successful_main_push():
     assert "Resolve exact GitHub environment Deployment ID" in [step.get("name") for step in deploy["steps"]]
     assert 'repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses' not in deploy_script
 
-    rollback = workflow["jobs"]["rollback"]
+    rollback_workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-rollback.yml').read_text())
+    rollback = rollback_workflow["jobs"]["rollback"]
     assert rollback["environment"] == {
         "name": "production", "url": "${{ steps.verify.outputs.environment_url }}",
     }
@@ -863,7 +864,7 @@ def test_post_migration_head_requires_checksum_proof_when_old_runtime_lacks_revi
 
 
 def test_native_kamal_keeps_absolute_runner_ssh_config_paths_available():
-    workflow = (ROOT / '.github/workflows/gpoint-native-release.yml').read_text()
+    workflow = (ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text()
     wrappers = workflow.split('kamal() {')[1:]
     assert wrappers
     for wrapper in wrappers:
@@ -879,8 +880,9 @@ def test_native_kamal_keeps_absolute_runner_ssh_config_paths_available():
             assert '--volume "$HOME/.ssh:$HOME/.ssh:ro"' in command
     assert 'export GPOINT_SSH_KEY="$HOME/.ssh/gpoint_layer7"' in workflow
     assert 'export GPOINT_KNOWN_HOSTS_FILE="$HOME/.ssh/known_hosts"' in workflow
-    assert 'git rev-list --first-parent --max-count=64 "$CANDIDATE_SHA"' in workflow
-    assert '--read-agata-ancestor-receipt' in workflow
+    native = (ROOT / '.github/workflows/gpoint-native-release.yml').read_text()
+    assert 'git rev-list --first-parent --max-count=64 "$CANDIDATE_SHA"' in native
+    assert '--read-agata-ancestor-receipt' in native
 
 
 @pytest.mark.parametrize('name', ['pre-app-boot', 'post-app-boot'])
@@ -965,7 +967,8 @@ def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
 def test_consumer_process_checks_do_not_require_ps_inside_slim_images():
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
     deploy = "\n".join(step.get("run", "") for step in workflow["jobs"]["deploy"]["steps"])
-    rollback = "\n".join(step.get("run", "") for step in workflow["jobs"]["rollback"]["steps"])
+    rollback_workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-rollback.yml').read_text())
+    rollback = "\n".join(step.get("run", "") for step in rollback_workflow["jobs"]["rollback"]["steps"])
     for role in ['worker', 'bot']:
         assertion = f'docker top "gpoint-core-{role}-$core_version" -eo pid,args | grep -F "apps/{role}/dist/main.js"'
         assert deploy.count(assertion) == 1
@@ -986,6 +989,8 @@ def test_proxy_route_probe_drains_docker_output_under_pipefail():
 
 def test_runtime_prisma_readbacks_resolve_the_api_workspace_dependencies():
     workflow = (ROOT / '.github/workflows/gpoint-native-release.yml').read_text()
-    calls = [line for line in workflow.splitlines() if 'docker exec' in line and 'require("@prisma/client")' in line]
+    rollback_text = (ROOT / '.github/workflows/gpoint-rollback.yml').read_text()
+    calls = [line for line in (workflow + rollback_text).splitlines()
+             if 'docker exec' in line and 'require("@prisma/client")' in line]
     assert len(calls) == 3
     assert all('docker exec --workdir /app/apps/api ' in line for line in calls)

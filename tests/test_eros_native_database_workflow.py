@@ -9,9 +9,13 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
 TRIGGERS = WORKFLOW.get("on", WORKFLOW.get(True, {}))
+ROLLBACK_WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/gpoint-rollback.yml").read_text())
+ROLLBACK_TRIGGERS = ROLLBACK_WORKFLOW.get("on", ROLLBACK_WORKFLOW.get(True, {}))
 
 
 def steps_for(job):
+    if job == "rollback":
+        return ROLLBACK_WORKFLOW["jobs"]["rollback"]["steps"]
     return WORKFLOW["jobs"][job]["steps"]
 
 
@@ -205,7 +209,7 @@ def test_sqlx_helper_checks_acl_ledger_backup_restore_and_never_downgrades_live_
 
 
 def test_eros_image_rollback_is_opt_in_rehearsed_before_apply_and_verifies_database_unchanged():
-    dispatch = TRIGGERS["workflow_dispatch"]["inputs"]
+    dispatch = ROLLBACK_TRIGGERS["workflow_dispatch"]["inputs"]
     assert dispatch["rollback_eros"]["default"] is False
     rollback = steps_for("rollback")
     names = [step.get("name", "") for step in rollback]
