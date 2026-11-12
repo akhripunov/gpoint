@@ -707,7 +707,7 @@ def test_native_release_runs_kamal_after_successful_main_push():
     assert "Resolve exact GitHub environment Deployment ID" in [step.get("name") for step in deploy["steps"]]
     assert 'repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses' not in deploy_script
 
-    rollback_workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-rollback.yml').read_text())
+    rollback_workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-operations.yml').read_text())
     rollback = rollback_workflow["jobs"]["rollback"]
     assert rollback["environment"] == {
         "name": "production", "url": "${{ steps.verify.outputs.environment_url }}",
@@ -967,7 +967,7 @@ def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
 def test_consumer_process_checks_do_not_require_ps_inside_slim_images():
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
     deploy = "\n".join(step.get("run", "") for step in workflow["jobs"]["deploy"]["steps"])
-    rollback_workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-rollback.yml').read_text())
+    rollback_workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-operations.yml').read_text())
     rollback = "\n".join(step.get("run", "") for step in rollback_workflow["jobs"]["rollback"]["steps"])
     for role in ['worker', 'bot']:
         assertion = f'docker top "gpoint-core-{role}-$core_version" -eo pid,args | grep -F "apps/{role}/dist/main.js"'
@@ -989,7 +989,7 @@ def test_proxy_route_probe_drains_docker_output_under_pipefail():
 
 def test_runtime_prisma_readbacks_resolve_the_api_workspace_dependencies():
     workflow = (ROOT / '.github/workflows/gpoint-native-release.yml').read_text()
-    rollback_text = (ROOT / '.github/workflows/gpoint-rollback.yml').read_text()
+    rollback_text = (ROOT / '.github/workflows/gpoint-operations.yml').read_text()
     calls = [line for line in (workflow + rollback_text).splitlines()
              if 'docker exec' in line and 'require("@prisma/client")' in line]
     assert len(calls) == 3

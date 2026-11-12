@@ -20,14 +20,14 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
     def test_pipeline_has_release_gate_and_one_isolated_rehearsal_job(self):
         jobs = self.workflow["jobs"]
         self.assertEqual(set(jobs), {"tests", "build", "deploy"})
-        rollback = yaml.safe_load((ROOT / ".github/workflows/gpoint-rollback.yml").read_text())["jobs"]["rollback"]
+        rollback = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())["jobs"]["rollback"]
         self.assertIn("inputs.rollback == true", rollback["if"])
         self.assertEqual(rollback["environment"], {
             "name": "production", "url": "${{ steps.verify.outputs.environment_url }}",
         })
         self.assertEqual(rollback["concurrency"], {"group": "gpoint-production-release", "cancel-in-progress": False})
         self.assertNotIn("needs", rollback)
-        rehearsal = yaml.safe_load((ROOT / ".github/workflows/gpoint-migration-rehearsal.yml").read_text())["jobs"]["migration_rehearsal"]
+        rehearsal = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())["jobs"]["migration_rehearsal"]
         self.assertNotIn("needs", rehearsal)
         self.assertIn("github.ref == 'refs/heads/main'", rehearsal["if"])
         self.assertIn("inputs.migration_rehearsal == true", rehearsal["if"])
@@ -175,7 +175,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         gate_text = "\n".join(step.get("run", "") for step in gate["steps"])
         self.assertNotIn("--backup-maintenance", gate_text)
         self.assertNotIn("--rollback", gate_text)
-        backup = yaml.safe_load((ROOT / ".github/workflows/gpoint-backup-maintenance.yml").read_text())["jobs"]["backup_maintenance"]
+        backup = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())["jobs"]["backup_maintenance"]
         self.assertEqual(backup["environment"], {"name": "production", "deployment": False})
         intent = (ROOT / "scripts/native_release_intent.py").read_text()
         self.assertNotIn("PREP_ONLY_SCOPES", intent)
@@ -184,7 +184,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
 
         deploy = self.workflow["jobs"]["deploy"]
         self.assertIn("needs.tests.outputs.deploy == 'true'", deploy["if"])
-        rehearsal = yaml.safe_load((ROOT / ".github/workflows/gpoint-migration-rehearsal.yml").read_text())["jobs"]["migration_rehearsal"]
+        rehearsal = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())["jobs"]["migration_rehearsal"]
         self.assertEqual(rehearsal["environment"], {"name": "production", "deployment": False})
         self.assertNotIn("deployments", rehearsal["permissions"])
         rehearsal_run = "\n".join(step.get("run", "") for step in rehearsal["steps"])

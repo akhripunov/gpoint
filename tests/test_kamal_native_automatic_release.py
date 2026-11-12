@@ -8,9 +8,9 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/gpoint-native-release.yml"
 
-_ROLLBACK = yaml.safe_load((ROOT / ".github/workflows/gpoint-rollback.yml").read_text())
-_BACKUP = yaml.safe_load((ROOT / ".github/workflows/gpoint-backup-maintenance.yml").read_text())
-_REHEARSAL = yaml.safe_load((ROOT / ".github/workflows/gpoint-migration-rehearsal.yml").read_text())
+_ROLLBACK = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())
+_BACKUP = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())
+_REHEARSAL = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())
 _STAGING = yaml.safe_load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text())
 _SPECIAL_JOBS = {"rollback": _ROLLBACK, "backup_maintenance": _BACKUP,
                  "migration_rehearsal": _REHEARSAL, "layer7_staging": _STAGING}
@@ -37,7 +37,7 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert "outputs.mode == 'DEPLOY'" in build["if"]
     assert "outputs.mode == 'REHEARSAL'" not in build["if"]
     assert set(workflow["jobs"]) == {"tests", "build", "deploy"}
-    assert (ROOT / ".github/workflows/gpoint-migration-rehearsal.yml").exists()
+    assert (ROOT / ".github/workflows/gpoint-operations.yml").exists()
     assert "outputs.mode == 'ARTIFACT_PREPARE'" in build["if"]
     assert "environment" not in build
     assert "packages: write" in WORKFLOW.read_text(encoding="utf-8")
@@ -185,7 +185,7 @@ def test_release_event_routing_is_fail_closed_and_does_not_give_prs_prod_access(
     intent_script = next(step.get("run", "") for step in intent["steps"]
                          if step.get("id") == "intent")
     assert "--backup-maintenance" not in intent_script
-    assert (ROOT / ".github/workflows/gpoint-backup-maintenance.yml").exists()
+    assert (ROOT / ".github/workflows/gpoint-operations.yml").exists()
     assert "GPOINT_MIGRATION_REHEARSAL_PREP" not in intent_script
     assert 'return 2' in (ROOT / "scripts/native_release_intent.py").read_text()
     deploy = workflow["jobs"]["deploy"]
@@ -342,9 +342,9 @@ def test_production_mutations_share_one_non_cancelling_lock():
     native = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     expected = {"group": "gpoint-production-release", "cancel-in-progress": False}
     assert native["jobs"]["deploy"]["concurrency"] == expected
-    for workflow_name, job in (("gpoint-rollback.yml", "rollback"),
-                               ("gpoint-backup-maintenance.yml", "backup_maintenance"),
-                               ("gpoint-migration-rehearsal.yml", "migration_rehearsal")):
+    for workflow_name, job in (("gpoint-operations.yml", "rollback"),
+                               ("gpoint-operations.yml", "backup_maintenance"),
+                               ("gpoint-operations.yml", "migration_rehearsal")):
         special = yaml.safe_load((ROOT / ".github/workflows" / workflow_name).read_text())
         assert special["jobs"][job]["concurrency"] == expected
 
@@ -370,7 +370,7 @@ def test_ordinary_release_success_does_not_depend_on_scheduled_backup_freshness(
 
 
 def test_backup_maintenance_retains_timer_and_freshness_checks():
-    maintenance = (ROOT / ".github/workflows/gpoint-backup-maintenance.yml").read_text(encoding="utf-8")
+    maintenance = (ROOT / ".github/workflows/gpoint-operations.yml").read_text(encoding="utf-8")
     assert "systemctl enable --now gpoint-backup.timer" in maintenance
     assert "systemctl start gpoint-backup.service" in maintenance
     assert "gpoint-backup-policy.py" in maintenance and "freshness" in maintenance
