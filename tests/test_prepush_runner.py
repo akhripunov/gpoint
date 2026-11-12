@@ -83,3 +83,16 @@ def test_dirty_worktree_blocks(repo):
     assert code == 2
     assert report["status"] == "BLOCK"
     assert "clean" in report["reason"]
+
+
+def test_deleted_python_file_is_not_parsed(repo):
+    work, _production = repo
+    (work / "obsolete.py").write_text("x = 1\n", encoding="utf-8")
+    git(work, "add", "obsolete.py")
+    git(work, "commit", "-qm", "add obsolete")
+    production = git(work, "rev-parse", "HEAD")
+    git(work, "rm", "-q", "obsolete.py")
+    git(work, "commit", "-qm", "remove obsolete")
+    code, report = run(work, production)
+    assert code == 0
+    assert report["status"] == "READY"
