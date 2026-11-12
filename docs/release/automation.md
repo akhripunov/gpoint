@@ -7,8 +7,8 @@
 >
 > | Workflow | Jobs | Назначение |
 > |---|---|---|
-> | `gpoint-native-release.yml` | tests → build → deploy | обычный push-релиз (ровно 3 jobs) |
-> | `gpoint-operations.yml` | rollback, backup_maintenance, migration_rehearsal | защищённые dispatch-операции: свои environment, approvals и общий lock `gpoint-production-release` |
+> | `gpoint-native-release.yml` | tests → build → deploy | обычный push-релиз (ровно 3 jobs); Deploy также выполняет защищённый режим `mode=rollback` |
+> | `gpoint-operations.yml` | backup_maintenance, migration_rehearsal | dispatch-операции с `deployment: false` (не создают релизных Deployments): свои approvals и общий lock `gpoint-production-release` |
 > | `gpoint-layer7-staging.yml` | layer7_staging | изолированный staging на self-hosted macOS, environment `layer7-staging` |
 >
 > Обычный релиз не вызывает специальные workflow (`uses:` отсутствует) и не
