@@ -24,6 +24,19 @@ fetch без изменения состояния или другой объе�
 `pnpm repo:clean:start` / `pnpm repo:clean:end`. Эти проверки не заменяют
 проверку dirty исходной рабочей копии и не разрешают захватить чужие изменения.
 
+### Быстрый измеряемый gate перед push
+
+```sh
+pnpm prepush --production-sha <40-char production SHA>
+```
+
+Печатает `PREPUSH_MODE`, `SYNC_SECONDS`, `CLASSIFY_SECONDS`, `LOCAL_CHECKS_SECONDS`
+и `PREPUSH_STATUS`. Проверяет: актуальность `origin/main`, ancestry, чистоту
+worktree, полный `production → candidate` diff, `git diff --check`, синтаксис
+изменённых Python-файлов и YAML изменённых workflow. Тяжёлые проверки
+(pytest/pnpm/Playwright/Docker/migration rehearsal) остаются в hosted CI и
+локально не дублируются.
+
 ### 2. Подтвердить разрешение и полный состав кандидата
 
 Перед выбором FAST или FULL установить:

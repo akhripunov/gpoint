@@ -13,7 +13,8 @@
     "repo:clean:end": "node scripts/repo-clean-gate.mjs end",
     "test:release": "node --test scripts/eros-pilot-deployment.test.mjs scripts/gpoint-vps-runner.test.mjs",
     "db:migrate": "pnpm --filter @gpoint/db exec prisma migrate dev",
-    "db:seed": "pnpm --filter @gpoint/db exec tsx prisma/seed.ts"
+    "db:seed": "pnpm --filter @gpoint/db exec tsx prisma/seed.ts",
+    "prepush": "python3 scripts/prepush.py"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",

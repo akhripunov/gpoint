@@ -377,6 +377,7 @@ jobs:
           tests/test_layer7_staging_env.py
           tests/test_native_build_boundary.py
           tests/test_native_build_scope.py
+          tests/test_prepush_runner.py
           tests/test_native_release_intent.py
           tests/test_native_prepared_run.py
           tests/test_release_pre_push_mode.py
