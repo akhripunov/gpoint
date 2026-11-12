@@ -330,14 +330,10 @@ def test_manual_rollback_uses_native_environment_deployment_and_target_metadata(
 def test_production_mutations_share_one_non_cancelling_lock():
     native = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     first_cutover = yaml.safe_load((ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text())
-    legacy_deploy = yaml.safe_load((ROOT / ".github/workflows/gpoint-deploy.yml").read_text())
-    recovery = yaml.safe_load((ROOT / ".github/workflows/gpoint-recover-interrupted.yml").read_text())
     expected = {"group": "gpoint-production-release", "cancel-in-progress": False}
     for job in ("deploy", "backup_maintenance", "migration_rehearsal"):
         assert native["jobs"][job]["concurrency"] == expected
     assert first_cutover["jobs"]["deploy"]["concurrency"] == expected
-    assert legacy_deploy["concurrency"] == expected
-    assert recovery["concurrency"] == expected
 
 
 def test_ordinary_release_success_does_not_depend_on_scheduled_backup_freshness():

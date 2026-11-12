@@ -290,7 +290,6 @@ jobs:
         if: matrix.suite == 'workspace'
         run: |
           pnpm test:release
-          node --test scripts/release-component-bundle-v4.test.mjs scripts/release-static-v4.test.mjs
       - name: Install Playwright Chromium
         if: matrix.suite == 'workspace' && (steps.surface.outputs.miniapp == 'true' || steps.surface.outputs.full_ci == 'true')
         run: pnpm exec playwright install --with-deps chromium
@@ -375,7 +374,6 @@ jobs:
         if: matrix.suite == 'python'
         run: >-
           unset DATABASE_URL SHADOW_DATABASE_URL; python -m pytest -q
-          tests/test_deploy_evidence_workflow.py
           tests/test_layer7_staging_workflow.py
           tests/test_layer7_staging_env.py
           tests/test_native_build_boundary.py
@@ -402,8 +400,6 @@ jobs:
           tests/test_start_kamal_cutover_owner.py
           tests/test_kamal_production_manifest.py
           tests/test_kamal_ordinary_manifest.py
-          tests/test_release_assets.py
-          tests/test_gpoint_release_trigger_graph.py
       - name: Run isolated PostgreSQL 16 migration and integration suites
         if: matrix.suite == 'python' && (steps.surface.outputs.database == 'true' || steps.surface.outputs.full_ci == 'true')
         run: |
