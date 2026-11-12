@@ -113,3 +113,24 @@ def test_production_eros_api_publishes_only_a_loopback_worker_endpoint():
     assert publish != staging["servers"]["api"]["options"]["publish"]
     # The public route keeps using kamal-proxy.
     assert config["servers"]["api"]["proxy"]["path_prefixes"] == ["/api"]
+
+
+def test_latest_merge_has_no_unmapped_component_paths():
+    """A release merge must not be blocked by a path the scope map forgot."""
+    import subprocess
+    import native_release_intent as intent
+
+    root = Path(__file__).resolve().parents[1]
+    try:
+        changed = subprocess.check_output(
+            ["git", "-C", str(root), "diff", "--name-only", "HEAD~1", "HEAD"],
+            text=True, stderr=subprocess.DEVNULL).split()
+    except subprocess.CalledProcessError:
+        import pytest
+        pytest.skip("single-commit checkout")
+    if not changed:
+        import pytest
+        pytest.skip("no parent diff")
+    unmapped = [p for p in changed
+                if not intent._component_paths(p) and not intent._known_non_runtime_path(p)]
+    assert not unmapped, f"unmapped component paths would block the release: {unmapped}"
