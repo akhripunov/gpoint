@@ -483,4 +483,3 @@ class FirstCutoverWorkflowTests(unittest.TestCase):
     def load_cutover(self):
         self.assertTrue(CUTOVER_WORKFLOW.exists(), "first-cutover workflow must remain available")
         return yaml.safe_load(CUTOVER_WORKFLOW.read_text())
-

@@ -54,8 +54,13 @@ def local_checks(repo: Path, base: str, head: str) -> tuple[list[str], list[str]
     """Return (failures, checks_run) for the changed surface only."""
     failures: list[str] = []
     ran: list[str] = []
-    subprocess.run(["git", "diff", "--check", f"{base}..{head}"], cwd=repo,
-                   check=True, stdout=subprocess.DEVNULL)
+    diff_check = subprocess.run(["git", "diff", "--check", f"{base}..{head}"], cwd=repo,
+                                text=True, capture_output=True)
+    if diff_check.returncode != 0:
+        failures.extend(line for line in diff_check.stdout.splitlines() if line.strip()
+                        or line.startswith("+"))
+        if not failures:
+            failures.append(f"git diff --check exited {diff_check.returncode}")
     ran.append("git-diff-check")
 
     changed = [line for line in _git(repo, "diff", "--name-only", f"{base}..{head}").splitlines() if line]
