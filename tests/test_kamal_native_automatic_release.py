@@ -342,8 +342,7 @@ def test_production_mutations_share_one_non_cancelling_lock():
     native = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     expected = {"group": "gpoint-production-release", "cancel-in-progress": False}
     assert native["jobs"]["deploy"]["concurrency"] == expected
-    for workflow_name, job in (("gpoint-operations.yml", "backup_maintenance"),
-                               ("gpoint-operations.yml", "migration_rehearsal")):
+    for workflow_name, job in (("gpoint-operations.yml", "migration_rehearsal"),):
         special = yaml.safe_load((ROOT / ".github/workflows" / workflow_name).read_text())
         assert special["jobs"][job]["concurrency"] == expected
 
@@ -369,29 +368,30 @@ def test_ordinary_release_success_does_not_depend_on_scheduled_backup_freshness(
 
 
 def test_backup_maintenance_retains_timer_and_freshness_checks():
-    maintenance = (ROOT / ".github/workflows/gpoint-operations.yml").read_text(encoding="utf-8")
-    assert "systemctl enable --now gpoint-backup.timer" in maintenance
-    assert "systemctl start gpoint-backup.service" in maintenance
-    assert "gpoint-backup-policy.py" in maintenance and "freshness" in maintenance
+    procedure = (ROOT / "scripts/gpoint-backup-install.sh").read_text(encoding="utf-8")
+    assert "systemctl enable --now gpoint-backup.timer" in procedure
+    assert "systemctl start gpoint-backup.service" in procedure
+    assert "gpoint-backup-policy.py" in procedure and "freshness" in procedure
+    assert "#!/usr/bin/env bash" in procedure
 
 
 def test_backup_timer_setup_is_a_separate_exact_sha_owner_authorized_operation():
-    workflow = _BACKUP
-    events = workflow.get("on", workflow.get(True))
-    inputs = events["workflow_dispatch"]["inputs"]
-    assert inputs["backup_maintenance"]["type"] == "boolean"
-    job = _BACKUP["jobs"]["backup_maintenance"]
-    assert "refs/heads/main" in job["if"]
-    assert "inputs.backup_maintenance == true" in job["if"]
-    assert "inputs.approve_production == true" in job["if"]
-    assert job["environment"] == {"name": "production", "deployment": False}
-    assert job["permissions"] == {"contents": "read"}
-    body = "\n".join(step.get("run", "") for step in job["steps"])
-    assert "systemctl enable --now gpoint-backup.timer" in body
-    assert "systemctl start gpoint-backup.service" in body
-    assert "APPROVE_PRODUCTION" in body
-    assert "GITHUB_SHA" in body
-    assert "repos/$GITHUB_REPOSITORY/deployments" not in body
+    """Backups stay independent of the release workflow (MaxiBot reference).
+
+    Daily backups are a VPS systemd timer. Installing or updating that release is
+    a protected one-shot procedure outside GitHub Releases, not an extra job.
+    """
+    procedure = (ROOT / "scripts/gpoint-backup-install.sh").read_text(encoding="utf-8")
+    assert 'APPROVE_PRODUCTION' in procedure
+    assert 'CANDIDATE_SHA' in procedure
+    assert 'git ls-remote origin refs/heads/main' in procedure
+    assert 'git status --porcelain' in procedure
+    assert 'sha256sum "$stage/payload.tar.gz"' in procedure
+    assert 'gpoint-backup-policy.py freshness' in procedure
+    assert 'GPOINT_BACKUP_INSTALL=PASS' in procedure
+    assert 'repos/$GITHUB_REPOSITORY/deployments' not in procedure
+    operations = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())
+    assert "backup_maintenance" not in operations["jobs"]
 
 
 def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_kamal():

@@ -8,11 +8,31 @@
 > | Workflow | Jobs | Назначение |
 > |---|---|---|
 > | `gpoint-native-release.yml` | tests → build → deploy | обычный push-релиз (ровно 3 jobs); Deploy также выполняет защищённый режим `mode=rollback` |
-> | `gpoint-operations.yml` | backup_maintenance, migration_rehearsal | dispatch-операции с `deployment: false` (не создают релизных Deployments): свои approvals и общий lock `gpoint-production-release` |
+> | `gpoint-operations.yml` | migration_rehearsal | dispatch-операция с `deployment: false`: свои approvals и общий lock `gpoint-production-release` |
 > | `gpoint-layer7-staging.yml` | layer7_staging | изолированный staging на self-hosted macOS, environment `layer7-staging` |
 >
 > Обычный релиз не вызывает специальные workflow (`uses:` отсутствует) и не
 > зависит от них.
+
+### Резервное копирование (не является релизным job)
+
+Ежедневные копии выполняет systemd-таймер на VPS (`gpoint-backup.timer` →
+`gpoint-scheduled-backup.py`): шифрование age, Bunny S3 `gpoint-backups`,
+read-back и isolated restore. GitHub не управляет расписанием и не зависит от
+релизов. Установка/обновление релиза backup-скриптов — отдельная защищённая
+процедура, а не job:
+
+```sh
+APPROVE_PRODUCTION=true \
+CANDIDATE_SHA=<40-char origin/main SHA> \
+GPOINT_PRODUCTION_HOST=<host> \
+bash scripts/gpoint-backup-install.sh
+```
+
+Процедура fail-closed: требует чистый checkout ровно на этом SHA, свежий
+`origin/main`, явное `APPROVE_PRODUCTION=true`, сверяет sha256 payload, ставит
+versioned release, включает таймер, запускает первый backup и проверяет
+доказательства (policy `freshness`, isolated restore из первого снимка).
 
 ## FAST/FULL: подготовка кандидата до push
 

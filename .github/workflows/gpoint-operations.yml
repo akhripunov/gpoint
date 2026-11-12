@@ -12,11 +12,6 @@ on:
         required: true
         type: boolean
         default: false
-      backup_maintenance:
-        description: Install or update the scheduled VPS backup service only
-        required: true
-        type: boolean
-        default: false
       migration_rehearsal:
         description: Restore the existing verified VPS backup and rehearse pending migrations in an isolated database only
         required: true
@@ -35,118 +30,6 @@ permissions:
   contents: read
 
 jobs:
-  backup_maintenance:
-    name: Install or update scheduled VPS backups
-    if: github.ref == 'refs/heads/main' && inputs.backup_maintenance == true && inputs.approve_production == true
-    runs-on: ubuntu-latest
-    environment:
-      name: production
-      deployment: false
-    concurrency:
-      group: gpoint-production-release
-      cancel-in-progress: false
-    timeout-minutes: 360
-    permissions:
-      contents: read
-    env:
-      CANDIDATE_SHA: ${{ github.sha }}
-      GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: Require exact current main and explicit owner authorization
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-          APPROVE_PRODUCTION: ${{ inputs.approve_production }}
-          OWNER_ACTOR: ${{ github.actor }}
-          OWNER_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
-          REPOSITORY_OWNER: ${{ github.repository_owner }}
-        run: |
-          set -euo pipefail
-          test "$GITHUB_EVENT_NAME" = workflow_dispatch
-          test "$GITHUB_REF" = refs/heads/main
-          test "$CANDIDATE_SHA" = "$GITHUB_SHA"
-          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          test "$APPROVE_PRODUCTION" = true
-          test "$OWNER_ACTOR" = "$REPOSITORY_OWNER"
-          test "$OWNER_TRIGGERING_ACTOR" = "$REPOSITORY_OWNER"
-          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
-          test "$main_sha" = "$GITHUB_SHA"
-      - name: Install verified VPS SSH credentials
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.GPOINT_KAMAL_SSH_PRIVATE_KEY }}
-          VERIFIED_KNOWN_HOSTS: ${{ secrets.GPOINT_KAMAL_KNOWN_HOSTS }}
-        run: |
-          set -euo pipefail
-          test -n "$SSH_PRIVATE_KEY" && test -n "$VERIFIED_KNOWN_HOSTS"
-          [[ "$GPOINT_PRODUCTION_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
-          install -d -m 700 "$HOME/.ssh"
-          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
-          printf '%s\n' "$VERIFIED_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          ssh-keygen -F "$GPOINT_PRODUCTION_HOST" -f "$HOME/.ssh/known_hosts" >/dev/null
-          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
-          cat > "$HOME/.ssh/config" <<EOF
-          Host ${GPOINT_PRODUCTION_HOST}
-            User root
-            IdentityFile $HOME/.ssh/id_ed25519
-            IdentitiesOnly yes
-            BatchMode yes
-            StrictHostKeyChecking yes
-            UserKnownHostsFile $HOME/.ssh/known_hosts
-          EOF
-          chmod 600 "$HOME/.ssh/config"
-      - name: Install and enable scheduled VPS backups
-        run: |
-          set -euo pipefail
-          release="/opt/gpoint/backup-releases/$CANDIDATE_SHA"
-          stage="/run/gpoint-backup-install-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$stage" "$release" <<'REMOTE_SETUP'
-          set -euo pipefail
-          [[ "$1" =~ ^/run/gpoint-backup-install-[0-9]+-[0-9]+$ ]]
-          [[ "$2" =~ ^/opt/gpoint/backup-releases/[0-9a-f]{40}$ ]]
-          test ! -e "$1"
-          install -d -o root -g root -m 0700 "$1"
-          REMOTE_SETUP
-          tar -czf "$RUNNER_TEMP/gpoint-vps-backup.tar.gz" scripts/gpoint-scheduled-backup.py scripts/gpoint-backup-policy.py scripts/gpoint-media-tree.py scripts/agata-production-migration.py scripts/verify-gpoint-scheduled-backup-restore.sh systemd/gpoint-backup.service systemd/gpoint-backup.timer
-          scp -p "$RUNNER_TEMP/gpoint-vps-backup.tar.gz" "root@${GPOINT_PRODUCTION_HOST}:$stage/payload.tar.gz"
-          archive_sha="$(sha256sum "$RUNNER_TEMP/gpoint-vps-backup.tar.gz" | awk '{print $1}')"
-          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$stage" "$release" "$archive_sha" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" <<'REMOTE_INSTALL'
-          set -euo pipefail
-          stage="$1"; release="$2"; expected_sha="$3"; run_id="$4"; attempt="$5"
-          [[ "$stage" == "/run/gpoint-backup-install-${run_id}-${attempt}" ]]
-          [[ "$release" =~ ^/opt/gpoint/backup-releases/[0-9a-f]{40}$ ]]
-          [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]]
-          test "$(sha256sum "$stage/payload.tar.gz" | awk '{print $1}')" = "$expected_sha"
-          test -f /opt/gpoint/env/gpoint-backup.agekey && test ! -L /opt/gpoint/env/gpoint-backup.agekey
-          test "$(stat -c '%a:%u' /opt/gpoint/env/gpoint-backup.agekey)" = 600:0
-          test ! -e "$release"
-          install -d -o root -g root -m 0700 "$release"
-          tar -xzf "$stage/payload.tar.gz" -C "$release" --no-same-owner
-          find "$release" -type d -exec chmod 0755 {} +
-          chmod 0755 "$release/scripts/gpoint-scheduled-backup.py" "$release/scripts/gpoint-backup-policy.py" "$release/scripts/gpoint-media-tree.py" "$release/scripts/agata-production-migration.py" "$release/scripts/verify-gpoint-scheduled-backup-restore.sh"
-          ln -s "$release" "/opt/gpoint/.backup-current-${run_id}-${attempt}"
-          mv -Tf "/opt/gpoint/.backup-current-${run_id}-${attempt}" /opt/gpoint/gpoint-backup-current
-          install -m 0644 "$release/systemd/gpoint-backup.service" /etc/systemd/system/gpoint-backup.service
-          install -m 0644 "$release/systemd/gpoint-backup.timer" /etc/systemd/system/gpoint-backup.timer
-          systemctl daemon-reload
-          systemctl enable --now gpoint-backup.timer
-          systemctl start gpoint-backup.service
-          for _ in $(seq 1 10800); do
-            state="$(systemctl show gpoint-backup.service --property=ActiveState --value)"
-            [[ "$state" == inactive ]] && break
-            [[ "$state" == failed ]] && { journalctl -u gpoint-backup.service -n 30 --no-pager; exit 1; }
-            sleep 10
-          done
-          test "$(systemctl is-enabled gpoint-backup.timer)" = enabled
-          systemctl is-active --quiet gpoint-backup.timer
-          python3 /opt/gpoint/gpoint-backup-current/scripts/gpoint-backup-policy.py freshness --manifest /opt/gpoint/backups/scheduled/latest.json --max-age-hours 26
-          echo GPOINT_VPS_BACKUP_TIMER=PASS
-          rm -rf -- "$stage"
-          REMOTE_INSTALL
-          echo GPOINT_VPS_BACKUP_INSTALL=PASS >> "$GITHUB_STEP_SUMMARY"
   migration_rehearsal:
     name: Isolated existing-backup migration rehearsal
     if: github.ref == 'refs/heads/main' && inputs.migration_rehearsal == true && inputs.approve_production == true

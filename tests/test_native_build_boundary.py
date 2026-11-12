@@ -175,8 +175,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         gate_text = "\n".join(step.get("run", "") for step in gate["steps"])
         self.assertNotIn("--backup-maintenance", gate_text)
         self.assertIn('[[ "$MODE" == rollback ]] && args+=(--rollback)', gate_text)
-        backup = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())["jobs"]["backup_maintenance"]
-        self.assertEqual(backup["environment"], {"name": "production", "deployment": False})
+        self.assertNotIn("backup_maintenance", yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())["jobs"])
+        self.assertTrue((ROOT / "scripts/gpoint-backup-install.sh").is_file())
         intent = (ROOT / "scripts/native_release_intent.py").read_text()
         self.assertNotIn("PREP_ONLY_SCOPES", intent)
         self.assertNotIn('return "PREPARE_ONLY"', intent)
