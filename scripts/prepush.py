@@ -64,7 +64,7 @@ def local_checks(repo: Path, base: str, head: str) -> tuple[list[str], list[str]
     ran.append("git-diff-check")
 
     changed = [line for line in _git(repo, "diff", "--name-only", f"{base}..{head}").splitlines() if line]
-    python_files = [path for path in changed if path.endswith(".py")]
+    python_files = [path for path in changed if path.endswith(".py") and (repo / path).is_file()]
     for path in python_files:
         source = (repo / path).read_text(encoding="utf-8", errors="ignore")
         try:
@@ -74,7 +74,9 @@ def local_checks(repo: Path, base: str, head: str) -> tuple[list[str], list[str]
     if python_files:
         ran.append(f"python-syntax({len(python_files)})")
 
-    yaml_files = [path for path in changed if path.startswith(".github/workflows/") and path.endswith(".yml")]
+    yaml_files = [path for path in changed
+                  if path.startswith(".github/workflows/") and path.endswith(".yml")
+                  and (repo / path).is_file()]
     if yaml_files:
         try:
             import yaml  # noqa: PLC0415
