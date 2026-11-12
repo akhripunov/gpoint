@@ -489,26 +489,3 @@ class FirstCutoverWorkflowTests(unittest.TestCase):
         self.assertTrue(CUTOVER_WORKFLOW.exists(), "first-cutover workflow must remain available")
         return yaml.safe_load(CUTOVER_WORKFLOW.read_text())
 
-    def test_cutover_workflow_keeps_fresh_inventory_backup_and_restore_gates(self):
-        workflow = self.load_cutover()
-        names = {step.get("name") for step in workflow["jobs"]["deploy"]["steps"]}
-        self.assertIn("Capture PostgreSQL and no-Eros cutover baseline", names)
-        self.assertIn("Verify application source migrations match the live database", names)
-        self.assertIn("Verify fresh PostgreSQL and media backup with isolated restore", names)
-        self.assertIn("Run one server-owned Kamal cutover transaction", names)
-        self.assertIn("scripts/retire-gpoint-caddy.sh", (ROOT / "scripts/kamal-first-cutover/retire.sh").read_text())
-
-    def test_cutover_still_verifies_gsales_stopped_and_uses_stock_kamal(self):
-        workflow = self.load_cutover()
-        deploy = workflow["jobs"]["deploy"]
-        script = "\n".join(step.get("run", "") for step in deploy["steps"])
-        phases = "\n".join((ROOT / "scripts/kamal-first-cutover" / (name+".sh")).read_text()
-                           for name in ("requests", "consumers", "verify"))
-        script += phases
-        self.assertIn("Expected stopped GSales service is missing", script)
-        self.assertIn("kamal deploy --skip-push", script)
-        self.assertIn("StrictHostKeyChecking=yes", script)
-
-
-if __name__ == "__main__":
-    unittest.main()

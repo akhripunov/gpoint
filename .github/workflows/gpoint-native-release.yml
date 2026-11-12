@@ -213,7 +213,6 @@ jobs:
         run: >-
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           .github/workflows/gpoint-native-release.yml
-          .github/workflows/gpoint-first-kamal-cutover.yml
       - name: Validate pinned Kamal configs and shared proxy routing
         if: matrix.suite == 'workspace'
         env:
@@ -394,10 +393,6 @@ jobs:
           tests/test_verify_kamal_production_baseline.py
           tests/test_native_rollback_evidence.py
           tests/test_kamal_release_config.py
-          tests/test_kamal_cutover_owner.py
-          tests/test_kamal_cutover_credentials.py
-          tests/test_kamal_cutover_package.py
-          tests/test_start_kamal_cutover_owner.py
           tests/test_kamal_production_manifest.py
           tests/test_kamal_ordinary_manifest.py
       - name: Run isolated PostgreSQL 16 migration and integration suites

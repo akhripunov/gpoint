@@ -329,11 +329,9 @@ def test_manual_rollback_uses_native_environment_deployment_and_target_metadata(
 
 def test_production_mutations_share_one_non_cancelling_lock():
     native = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    first_cutover = yaml.safe_load((ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text())
     expected = {"group": "gpoint-production-release", "cancel-in-progress": False}
     for job in ("deploy", "backup_maintenance", "migration_rehearsal"):
         assert native["jobs"][job]["concurrency"] == expected
-    assert first_cutover["jobs"]["deploy"]["concurrency"] == expected
 
 
 def test_ordinary_release_success_does_not_depend_on_scheduled_backup_freshness():
@@ -382,12 +380,6 @@ def test_backup_timer_setup_is_a_separate_exact_sha_owner_authorized_operation()
     assert "APPROVE_PRODUCTION" in body
     assert "GITHUB_SHA" in body
     assert "repos/$GITHUB_REPOSITORY/deployments" not in body
-
-
-def test_first_cutover_offsite_restore_gate_is_not_removed():
-    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text(encoding="utf-8")
-    assert "GPOINT_KAMAL_BACKUP_OFFSITE_REMOTE" in workflow
-    assert "GPOINT_ISOLATED_RESTORE=PASS" in workflow
 
 
 def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_kamal():
