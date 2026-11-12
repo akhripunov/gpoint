@@ -28,10 +28,6 @@ class GPointReleaseTriggerGraphTests(unittest.TestCase):
         deploy_source = (WORKFLOWS / "gpoint-deploy.yml").read_text()
         self.assertNotIn("trusted automatic controller", deploy_source)
         self.assertNotIn("Automatic release controller run", deploy_source)
-        self.assertIn(
-            "GPoint — Prepare",
-            events(load_workflow("gpoint-linear-reconcile.yml"))["workflow_run"]["workflows"],
-        )
         for name in (
             "gpoint-prepare.yml",
             "gpoint-native-release.yml",
@@ -83,7 +79,7 @@ class GPointReleaseTriggerGraphTests(unittest.TestCase):
             self.assertNotIn("scripts/release-orchestrator.mjs", source)
             self.assertNotIn("gh workflow run gpoint-deploy", source)
             self.assertNotIn("actions/workflows/gpoint-deploy.yml/dispatches", source)
-        self.assertEqual(prepare_workflow_run_listeners, {"gpoint-linear-reconcile.yml"})
+        self.assertEqual(prepare_workflow_run_listeners, set())
         self.assertIn("gpoint-native-release.yml", main_push_workflows)
 
         agents_sync = all_workflows["sync-agents-to-linear.yml"]
@@ -95,18 +91,3 @@ class GPointReleaseTriggerGraphTests(unittest.TestCase):
         self.assertIn("tests/test_eros_native_database_workflow.py", gate_command)
         self.assertIn("tests/test_layer7_ollama_verifier.py", gate_command)
 
-    def test_legacy_prepare_reconciliation_is_read_only(self):
-        reconcile = load_workflow("gpoint-linear-reconcile.yml")
-        workflow_run = events(reconcile)["workflow_run"]
-        self.assertIn("GPoint — Prepare", workflow_run["workflows"])
-        self.assertEqual(workflow_run["types"], ["completed"])
-        job = reconcile["jobs"]["reconcile"]
-        self.assertEqual(job["steps"][-1]["env"]["STATE_SYNC_ONLY"], "true")
-        source = (WORKFLOWS / "gpoint-linear-reconcile.yml").read_text()
-        self.assertNotIn("actions: write", source)
-        self.assertNotIn("packages: write", source)
-        self.assertNotIn("scripts/release-orchestrator.mjs", source)
-
-
-if __name__ == "__main__":
-    unittest.main()
