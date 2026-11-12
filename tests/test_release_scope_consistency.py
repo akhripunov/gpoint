@@ -76,3 +76,31 @@ def test_unknown_roots_stay_fail_closed():
     # The planner must keep rejecting a path it cannot classify.
     assert intent._component_paths("somewhere/else.txt") == set()
     assert intent._known_non_runtime_path("somewhere/else.txt") is False
+
+
+def test_accumulated_candidate_always_requires_candidate_images():
+    """Regression for run 43148553035.
+
+    Production (7d7d614b) is behind `main` by application code. A build plan that
+    reports "no images" can never satisfy Deploy's fresh live scope, so Build must
+    derive its plan from the production -> candidate diff and never from the push
+    diff. Any runtime change on that accumulated diff must select its component.
+    """
+    try:
+        subprocess.check_output(
+            ["git", "-C", str(ROOT), "cat-file", "-e", f"{PRODUCTION_BASELINE}^{{commit}}"],
+            stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        pytest.skip("production baseline is not in this checkout")
+    head = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+    baseline_sources = {component: PRODUCTION_BASELINE
+                        for component in ("CORE", "AGATA", "MINIAPP", "EROS")}
+
+    plan = intent.classify_component_build_plan(ROOT, head, baseline_sources)
+
+    assert plan["build_components"], (
+        "production is behind the candidate by runtime code; an empty build plan "
+        "would fail Deploy with a missing prebuilt candidate image")
+    assert "CORE" in plan["build_components"]
+    assert plan["deploy_scope"] != "NONE"
