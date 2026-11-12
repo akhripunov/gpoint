@@ -564,3 +564,20 @@ def test_deploy_publishes_release_timing_even_when_the_release_fails():
     assert "GPOINT_RELEASE_TIMING=REPORTED" in step["run"]
     assert "GPOINT_RELEASE_TIMING=UNVERIFIED" in step["run"]
     assert 'jobs?per_page=100' in step["run"]
+
+
+def test_no_runtime_change_skips_the_whole_deploy_job():
+    """A docs-only candidate must not enter Deploy at all (criterion 4).
+
+    With a proven production baseline and no runtime change the build plan is
+    NONE; the workflow then skips the protected Deploy job instead of running an
+    empty Kamal transition. That is what keeps a UI/docs-only release short.
+    """
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    condition = workflow["jobs"]["deploy"]["if"]
+    assert "needs.build.outputs.deploy_scope != 'NONE'" in condition
+    build_scope = next(
+        step for step in workflow["jobs"]["build"]["steps"]
+        if step.get("id") == "build_scope")
+    assert '"VERIFIED"' in build_scope["run"]
+    assert '"BOOTSTRAP_FULL"' in build_scope["run"]
