@@ -44,6 +44,35 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert deploy["needs"] == ["tests", "build"]
 
 
+def test_eros_builds_share_layers_without_publishing_the_test_image():
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    test_steps = jobs["tests"]["steps"]
+    test_build = next(step for step in test_steps if step.get("id") == "eros_test_image")
+    verification = next(step for step in test_steps if "run-local-e2e.sh" in step.get("run", ""))
+    release_build = next(step for step in jobs["build"]["steps"] if step.get("id") == "eros")
+
+    test_inputs = test_build["with"]
+    release_inputs = release_build["with"]
+    assert test_build["if"] == verification["if"]
+    assert test_steps.index(test_build) < test_steps.index(verification)
+    assert test_inputs["context"] == release_inputs["context"]
+    assert test_inputs["file"] == release_inputs["file"]
+    assert test_inputs["platforms"] == release_inputs["platforms"] == "linux/amd64"
+    assert test_inputs["load"] is True
+    assert test_inputs["push"] is False
+    assert "github.ref == 'refs/heads/main'" in test_inputs["cache-to"]
+    assert "github.event_name != 'pull_request'" in test_inputs["cache-to"]
+    assert "scope=gpoint-eros-test" in test_inputs["cache-from"]
+    assert "scope=gpoint-eros-test" in test_inputs["cache-to"]
+    assert "scope=gpoint-eros-test" in release_inputs["cache-from"]
+    assert "scope=gpoint-eros-release" in release_inputs["cache-from"]
+    assert "scope=gpoint-eros-release" in release_inputs["cache-to"]
+    assert "scope=gpoint-eros-test" not in release_inputs["cache-to"]
+    assert release_inputs["push"] is True
+    assert release_inputs["sbom"] is True
+    assert release_inputs["provenance"] == "mode=max"
+
+
 def test_build_never_claims_a_noop_release_from_the_push_diff_alone():
     """Build scope must come from the production baseline, not the pushed diff.
 
