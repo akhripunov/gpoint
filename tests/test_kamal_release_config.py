@@ -97,13 +97,12 @@ def test_kamal_agata_and_miniapp_are_separate_services():
 def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
     jobs = workflow["jobs"]
-    assert {"tests", "build", "deploy"}.issubset(jobs)
+    assert {"tests", "build", "deploy", "layer7_scope", "layer7_deploy"}.issubset(jobs)
     assert not ({"workspace", "python"} & set(jobs))
-    assert jobs["build"]["needs"] == ["tests"]
-    assert jobs["build"]["if"] == (
-        "needs.tests.outputs.mode == 'DEPLOY' "
-        "|| needs.tests.outputs.mode == 'ARTIFACT_PREPARE'"
-    )
+    assert jobs["build"]["needs"] == ["tests", "layer7_scope"]
+    assert "needs.tests.result == 'success'" in jobs["build"]["if"]
+    assert "needs.layer7_scope.result == 'success'" in jobs["build"]["if"]
+    assert "needs.tests.outputs.mode == 'ARTIFACT_PREPARE'" in jobs["build"]["if"]
     build_steps = yaml.safe_dump(jobs["build"]["steps"])
     assert "cache-to: type=gha,scope=gpoint-runtime,mode=max" in build_steps
     assert "sbom: true" in build_steps

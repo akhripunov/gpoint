@@ -7,12 +7,39 @@
 >
 > | Workflow | Jobs | Назначение |
 > |---|---|---|
-> | `gpoint-native-release.yml` | tests → build → deploy | обычный push-релиз (ровно 3 jobs); Deploy также выполняет защищённый режим `mode=rollback` |
+> | `gpoint-native-release.yml` | Tests → Build → Deploy | обычный push-релиз, защищённый rollback и выборочная выкладка API на Layer7 |
 > | `gpoint-operations.yml` | migration_rehearsal | dispatch-операция с `deployment: false`: свои approvals и общий lock `gpoint-production-release` |
 > | `gpoint-layer7-staging.yml` | layer7_staging | изолированный staging на self-hosted macOS, environment `layer7-staging` |
 >
-> Обычный релиз не вызывает специальные workflow (`uses:` отсутствует) и не
-> зависит от них.
+> Выборочная выкладка API использует защищённый job Layer7 после Build.
+
+### Layer7 API prompt release
+
+Use the owner-authorized main commit marker `GPOINT-LAYER7-API` for changes to
+the Eros response prompt and its tests. GitHub Tests run first. A trusted Mac
+runner reads the current Layer7 role versions, image identities and migration
+ledgers. The Build job publishes the Core image when the running API's prompt
+differs. The same workflow then waits for the `layer7-staging` environment
+approval. The Deploy job rechecks main and the exact live snapshot before
+switching the API with Kamal. Runtime Verify checks the API and Eros route,
+and compares the identities of untouched roles and both database ledgers.
+
+The marker blocks a mixed push. If the cumulative diff, database history or
+live baseline cannot be verified, the scoped run stops before deployment.
+Use the existing protected full Layer7 procedure for broader changes and
+migration work. Keep the previous API version for recovery if Kamal fails
+during the switch. If Kamal fails and no API is running, the job attempts to
+start the verified previous container and checks its loopback health. The
+release still fails. If the job reports `LAYER7_API_RECOVERY_REQUIRED`, inspect
+the currently running API and retained versions on Layer7. If the candidate
+is absent, the old container still has the verified image ID/digest, the
+database ledgers are unchanged and the inference queue is empty, restore the
+previous API through stock Kamal `app start --version <previous-version>
+--roles api --config-file config/deploy.layer7-staging.eros-api.yml` under the
+existing Layer7 release lock and approval. Recheck the loopback health and
+API-to-Eros route. If either version or queue state is ambiguous, stop for
+recovery review.
+
 
 ### Резервное копирование (не является релизным job)
 

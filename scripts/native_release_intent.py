@@ -208,6 +208,7 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "scripts/gpoint-backup-policy.py",
     "scripts/gpoint-scheduled-backup.py",
     "scripts/layer7-transport.sh",
+    "scripts/layer7_release_scope.py",
     "scripts/layer7_staging_database.py",
     "scripts/layer7_staging_env.py",
     "scripts/native_change_surface.py",
@@ -264,6 +265,13 @@ EXACT_SHA = re.compile(r"^[0-9a-f]{40}$")
 EXACT_VERSION = re.compile(r"^[0-9a-f]{40}-[0-9]+-[0-9]+$")
 EXACT_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 ARTIFACT_PREPARE_MARKER = "GPOINT-ARTIFACT-PREPARE"
+LAYER7_API_MARKER = "GPOINT-LAYER7-API"
+LAYER7_API_PATHS = frozenset({
+    "apps/api/src/eros-response-prompt.js",
+    "apps/api/test/build-output.test.mjs",
+    "apps/api/test/eros-adapter.test.ts",
+    "services/eros-engine/eros-language-contract.test.mjs",
+})
 
 
 def _path_kind(path: str) -> str:
@@ -302,7 +310,12 @@ def classify_push(*, event_name: str, ref: str,
     kinds = {_path_kind(path) for path in changed_paths}
     if "schema" in kinds or "unknown" in kinds:
         return "BLOCK"
-    if re.search(rf"(?m)^{re.escape(ARTIFACT_PREPARE_MARKER)}$", commit_message):
+    markers = set(commit_message.splitlines())
+    if LAYER7_API_MARKER in markers:
+        if ARTIFACT_PREPARE_MARKER in markers or not changed_paths <= LAYER7_API_PATHS:
+            return "BLOCK"
+        return "LAYER7_API"
+    if ARTIFACT_PREPARE_MARKER in markers:
         return "ARTIFACT_PREPARE"
     # Prisma schema changes must reach hosted Tests, which compare the full
     # migration history with schema.prisma before Build. Production Apply still

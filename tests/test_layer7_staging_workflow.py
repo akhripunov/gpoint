@@ -203,7 +203,7 @@ def test_private_gateway_stop_shell_preserves_first_install_and_race_recovery(tm
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
     deploy = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
     section = deploy[deploy.index('check_queue_empty() {'):]
-    section = section[:section.index('GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST"')]
+    section = section[:section.index('if ! GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST"')]
     log = tmp_path / 'kamal.log'
     calls_file = tmp_path / 'queue-calls'
     bin_dir = tmp_path / 'bin'
@@ -365,7 +365,7 @@ def test_layer7_staging_is_separate_from_build_and_production_deploy_jobs():
     workflow = yaml.load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text(), Loader=yaml.BaseLoader)
     native = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
     staging = workflow["jobs"]["layer7_staging"]
-    assert set(native["jobs"]) == {"tests", "build", "deploy"}
+    assert set(native["jobs"]) == {"tests", "build", "deploy", "layer7_scope", "layer7_deploy"}
     assert set(workflow["jobs"]) == {"layer7_staging"}
     assert staging["env"]["KAMAL_REGISTRY_PASSWORD"] == "${{ secrets.GITHUB_TOKEN }}"
     assert staging["permissions"]["packages"] == "read"
