@@ -186,6 +186,8 @@ KNOWN_RETIRED_NON_RUNTIME_FILES = frozenset({
     "tests/test_release_static_publication_v4.py",
     "tests/test_start_kamal_cutover_owner.py",
     "tests/test_unified_release_v1.py",
+    "scripts/network_retry.py",
+    "scripts/verify-release-worker-compatibility.py",
 })
 KNOWN_NON_RUNTIME_FILES = frozenset({
     ".github/actionlint.yaml",
