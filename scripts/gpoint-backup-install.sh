@@ -45,43 +45,12 @@ REMOTE_SETUP
 tar -czf "$TMP/gpoint-vps-backup.tar.gz" scripts/gpoint-scheduled-backup.py scripts/gpoint-backup-policy.py scripts/gpoint-media-tree.py scripts/agata-production-migration.py scripts/verify-gpoint-scheduled-backup-restore.sh systemd/gpoint-backup.service systemd/gpoint-backup.timer
 scp -p "$TMP/gpoint-vps-backup.tar.gz" "root@${GPOINT_PRODUCTION_HOST}:$stage/payload.tar.gz"
 archive_sha="$(sha256 "$TMP/gpoint-vps-backup.tar.gz")"
-ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$stage" "$release" "$archive_sha" "$RUN_ID" "$ATTEMPT" <<'REMOTE_INSTALL'
-set -euo pipefail
-stage="$1"; release="$2"; expected_sha="$3"; run_id="$4"; attempt="$5"
-[[ "$stage" == "/run/gpoint-backup-install-${run_id}-${attempt}" ]]
-[[ "$release" =~ ^/opt/gpoint/backup-releases/[0-9a-f]{40}$ ]]
-[[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]]
-test "$(sha256sum "$stage/payload.tar.gz" | awk '{print $1}')" = "$expected_sha"
-test -f /opt/gpoint/env/gpoint-backup.agekey && test ! -L /opt/gpoint/env/gpoint-backup.agekey
-test "$(stat -c '%a:%u' /opt/gpoint/env/gpoint-backup.agekey)" = 600:0
-test ! -e "$release"
-install -d -o root -g root -m 0700 "$release"
-tar -xzf "$stage/payload.tar.gz" -C "$release" --no-same-owner
-find "$release" -type d -exec chmod 0755 {} +
-chmod 0755 "$release/scripts/gpoint-scheduled-backup.py" "$release/scripts/gpoint-backup-policy.py" "$release/scripts/gpoint-media-tree.py" "$release/scripts/agata-production-migration.py" "$release/scripts/verify-gpoint-scheduled-backup-restore.sh"
-ln -s "$release" "/opt/gpoint/.backup-current-${run_id}-${attempt}"
-mv -Tf "/opt/gpoint/.backup-current-${run_id}-${attempt}" /opt/gpoint/gpoint-backup-current
-install -m 0644 "$release/systemd/gpoint-backup.service" /etc/systemd/system/gpoint-backup.service
-install -m 0644 "$release/systemd/gpoint-backup.timer" /etc/systemd/system/gpoint-backup.timer
-systemctl daemon-reload
-systemctl enable --now gpoint-backup.timer
-systemctl start gpoint-backup.service
-for _ in $(seq 1 10800); do
-  state="$(systemctl show gpoint-backup.service --property=ActiveState --value)"
-  [[ "$state" == inactive ]] && break
-  [[ "$state" == failed ]] && { journalctl -u gpoint-backup.service -n 30 --no-pager; exit 1; }
-  sleep 10
-done
-test "$(systemctl is-enabled gpoint-backup.timer)" = enabled
-systemctl is-active --quiet gpoint-backup.timer
-test /opt/gpoint/backups/scheduled/latest.json -nt "$stage"
-test /opt/gpoint/backups/scheduled/latest.json -nt /opt/gpoint/gpoint-backup-current
-python3 /opt/gpoint/gpoint-backup-current/scripts/gpoint-backup-policy.py freshness --manifest /opt/gpoint/backups/scheduled/latest.json --max-age-hours 26
-echo GPOINT_VPS_BACKUP_TIMER=PASS
-rm -rf -- "$stage"
-REMOTE_INSTALL
+ssh -T "root@${GPOINT_PRODUCTION_HOST}" \
+  env ROOT= SYSTEMCTL=systemctl STAGE="$stage" RELEASE="$release" \
+      ARCHIVE_SHA="$archive_sha" RUN_ID="$RUN_ID" ATTEMPT="$ATTEMPT" \
+  bash -s < scripts/gpoint-backup-install-remote.sh
+
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" && -w "${GITHUB_STEP_SUMMARY}" ]]; then
   echo GPOINT_VPS_BACKUP_INSTALL=PASS >> "$GITHUB_STEP_SUMMARY"
 fi
-
 echo "GPOINT_BACKUP_INSTALL=PASS SHA=$CANDIDATE_SHA"

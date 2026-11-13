@@ -1,11 +1,13 @@
 # GPoint scheduled VPS backups
 
 The Native Release workflow does not install or update the backup runner. A
-separate `backup_maintenance` dispatch installs the versioned runner and systemd
-units, enables `gpoint-backup.timer`, and performs one initial full backup plus
-isolated restore. It requires the exact current main SHA and explicit OWNER
-approval, uses the existing protected production environment, and creates no
-GitHub Deployment. Regular application releases do not depend on scheduled
+standalone protected procedure, `scripts/gpoint-backup-install.sh`, installs the
+versioned runner and systemd units, enables `gpoint-backup.timer`, and performs
+one initial full backup plus isolated restore. It runs from the operator
+workstation, requires the exact current main SHA and explicit OWNER approval
+(`APPROVE_PRODUCTION=true`), refuses a dirty or mismatched checkout, and creates
+no GitHub Deployment. A retry reconciles an already installed release by content
+hash; a different payload never overwrites a working version. Regular application releases do not depend on scheduled
 backup freshness. They do not reinstall the timer or force a backup run. Backup
 freshness and run failures must be monitored independently of application
 releases.

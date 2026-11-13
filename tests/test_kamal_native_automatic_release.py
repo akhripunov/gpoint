@@ -369,9 +369,10 @@ def test_ordinary_release_success_does_not_depend_on_scheduled_backup_freshness(
 
 def test_backup_maintenance_retains_timer_and_freshness_checks():
     procedure = (ROOT / "scripts/gpoint-backup-install.sh").read_text(encoding="utf-8")
-    assert "systemctl enable --now gpoint-backup.timer" in procedure
-    assert "systemctl start gpoint-backup.service" in procedure
-    assert "gpoint-backup-policy.py" in procedure and "freshness" in procedure
+    remote = (ROOT / "scripts/gpoint-backup-install-remote.sh").read_text(encoding="utf-8")
+    assert "enable --now gpoint-backup.timer" in remote
+    assert "start gpoint-backup.service" in remote
+    assert "gpoint-backup-policy.py" in remote and "freshness" in remote
     assert "#!/usr/bin/env bash" in procedure
 
 
@@ -382,12 +383,13 @@ def test_backup_timer_setup_is_a_separate_exact_sha_owner_authorized_operation()
     a protected one-shot procedure outside GitHub Releases, not an extra job.
     """
     procedure = (ROOT / "scripts/gpoint-backup-install.sh").read_text(encoding="utf-8")
+    remote = (ROOT / "scripts/gpoint-backup-install-remote.sh").read_text(encoding="utf-8")
     assert 'APPROVE_PRODUCTION' in procedure
     assert 'CANDIDATE_SHA' in procedure
     assert 'git ls-remote origin refs/heads/main' in procedure
     assert 'git status --porcelain' in procedure
-    assert 'sha256sum "$stage/payload.tar.gz"' in procedure
-    assert 'gpoint-backup-policy.py freshness' in procedure
+    assert 'test "$(sha256 "$STAGE/payload.tar.gz")" = "$ARCHIVE_SHA"' in remote
+    assert 'freshness' in remote and 'gpoint-backup-policy.py' in remote
     assert 'GPOINT_BACKUP_INSTALL=PASS' in procedure
     assert 'repos/$GITHUB_REPOSITORY/deployments' not in procedure
     operations = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())

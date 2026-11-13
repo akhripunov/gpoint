@@ -444,8 +444,9 @@ GHCR immutable digests и provenance, retained target containers, совмест
 цель отсутствует и workflow должен отказать до изменения runtime. Состояние и свежесть
 scheduled backup не являются условием обычного релиза и должны контролироваться
 отдельным мониторингом ([ME-56](https://linear.app/bestuzhev/issue/ME-56/gpoint-independent-scheduled-backup-failure-and-freshness-alert)).
-Установка/обновление timer и один первичный backup выполняются отдельно через
-`backup_maintenance` с точным main SHA и явным OWNER approval. Обязательные
+Установка/обновление timer и один первичный backup выполняются отдельной
+защищённой процедурой `scripts/gpoint-backup-install.sh` с точным main SHA и
+явным OWNER approval (`APPROVE_PRODUCTION=true`). Обязательные
 backup/restore проверки перед миграциями и опасными
 инфраструктурными операциями, offsite gate первого cutover и прочие действующие
 backup/offsite требования не меняются. Удалять recovery/legacy путь можно

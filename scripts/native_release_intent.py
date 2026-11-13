@@ -230,6 +230,7 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "services/gsales/tests/test_shared_worker_http.py",
     "systemd/gpoint-backup.service",
     "scripts/gpoint-backup-install.sh",
+    "scripts/gpoint-backup-install-remote.sh",
 })
 COMPONENT_ROLES = {
     "CORE": ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot"),
