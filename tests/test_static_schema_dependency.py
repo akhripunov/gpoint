@@ -53,7 +53,7 @@ def test_pending_migration_dependency_blocks_before_build(tmp_path):
     result = _run(repo, baseline, candidate)
     assert result.returncode == 1, result.stdout + result.stderr
     assert "GPOINT_KAMAL_SCHEMA_DEPENDENCY=BLOCKED" in result.stderr
-    assert f"PENDING_SCHEMA_DEPENDENCY:{MIGRATION}" in result.stderr
+    assert f"UNSAFE_SCHEMA_DEPENDENCY:{MIGRATION}" in result.stderr
 
 
 def test_pending_migration_without_code_dependency_passes(tmp_path):
@@ -100,7 +100,7 @@ def test_accumulated_pending_migration_is_detected_from_an_older_base(tmp_path):
     repo, base, head = _repo_accumulated(tmp_path)
     result = _run(repo, base, head)
     assert result.returncode == 1, result.stdout + result.stderr
-    assert f"PENDING_SCHEMA_DEPENDENCY:{MIGRATION}" in result.stderr
+    assert f"UNSAFE_SCHEMA_DEPENDENCY:{MIGRATION}" in result.stderr
 
 
 def test_diff_only_base_misses_the_accumulated_migration(tmp_path):
