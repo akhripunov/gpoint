@@ -455,7 +455,7 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
         capture_output=True, text=True,
     )
     assert field_blocked.returncode != 0
-    assert "PENDING_SCHEMA_DEPENDENCY:20261022110000_eros_worker_queue:error_code" in field_blocked.stderr
+    assert "UNSAFE_SCHEMA_DEPENDENCY:20261022110000_eros_worker_queue:error_code" in field_blocked.stderr
     app_file.write_text("export const state = 'engine.eros_inference_jobs.status';\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "app depends on pending common status field"], check=True)
@@ -471,7 +471,7 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
         capture_output=True, text=True,
     )
     assert status_blocked.returncode != 0
-    assert "PENDING_SCHEMA_DEPENDENCY:20261022110000_eros_worker_queue:" in status_blocked.stderr
+    assert "UNSAFE_SCHEMA_DEPENDENCY:20261022110000_eros_worker_queue:" in status_blocked.stderr
     assert "apps/api/src/health.ts" in status_blocked.stderr
     app_file.write_text("export const code = 'normalized_code';\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
@@ -488,7 +488,7 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
         capture_output=True, text=True,
     )
     assert renamed_field_blocked.returncode != 0
-    assert "PENDING_SCHEMA_DEPENDENCY:20261022110000_eros_worker_queue:normalized_code" in renamed_field_blocked.stderr
+    assert "UNSAFE_SCHEMA_DEPENDENCY:20261022110000_eros_worker_queue:normalized_code" in renamed_field_blocked.stderr
     checksum_drift = subprocess.run(
         ["python3", str(ROOT / "scripts/verify-kamal-migration-parity.py"),
          "--policy", "compatible", "--repo-root", str(repo),
@@ -540,7 +540,7 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
         capture_output=True, text=True,
     )
     assert agata_blocked.returncode != 0
-    assert "PENDING_SCHEMA_DEPENDENCY:agata0012:" in agata_blocked.stderr
+    assert "UNSAFE_SCHEMA_DEPENDENCY:agata0012:" in agata_blocked.stderr
     assert "services/agata/app/compliance/policy.py" in agata_blocked.stderr
 
     agata_app_file.write_text("policy_state = RegionalPolicyProfile.status\n", encoding="utf-8")
@@ -558,7 +558,7 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
         capture_output=True, text=True,
     )
     assert agata_state_blocked.returncode != 0
-    assert "PENDING_SCHEMA_DEPENDENCY:agata0012:" in agata_state_blocked.stderr
+    assert "UNSAFE_SCHEMA_DEPENDENCY:agata0012:" in agata_state_blocked.stderr
     assert "services/agata/app/compliance/policy.py" in agata_state_blocked.stderr
 
     agata_app_file.write_text("policy_check = True\n", encoding="utf-8")
@@ -579,7 +579,7 @@ def test_kamal_schema_compatibility_allows_unrelated_code_with_pending_migration
         capture_output=True, text=True,
     )
     assert blocked.returncode != 0
-    assert "PENDING_SCHEMA_DEPENDENCY" in blocked.stderr
+    assert "UNSAFE_SCHEMA_DEPENDENCY" in blocked.stderr
 
 
 def test_kamal_schema_compatibility_accepts_divergent_live_source_only_when_tree_changes_are_preserved(tmp_path):

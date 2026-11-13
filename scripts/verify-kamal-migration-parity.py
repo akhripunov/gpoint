@@ -15,10 +15,54 @@ from alembic.script.revision import RevisionError
 from alembic.util.exc import CommandError
 
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
+APPROVED_ALLOWLIST_SCHEMA = "gpoint-prisma-production-apply/v1"
+
+
+def load_approved_migrations(path):
+    """Load the OWNER-approved Prisma apply allowlist (fail-closed)."""
+    raw = Path(path)
+    if not raw.is_file():
+        return {}
+    try:
+        data = json.loads(raw.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise ValueError("approved migration allowlist is unavailable or invalid") from None
+    migrations = data.get("migrations") if isinstance(data, dict) else None
+    if (not isinstance(data, dict) or data.get("schema") != APPROVED_ALLOWLIST_SCHEMA
+            or not isinstance(migrations, dict)):
+        raise ValueError("approved migration allowlist schema is unsupported")
+    approved = {}
+    for name, digest in migrations.items():
+        if (not isinstance(name, str) or not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", name)
+                or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            raise ValueError("approved migration allowlist entry is malformed")
+        approved[name] = digest
+    return approved
+
+
+def migration_file_digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def approved_pending_migration(migration, path, approved):
+    """True when this pending migration is approved with the exact checksum."""
+    recorded = approved.get(migration)
+    if recorded is None:
+        return False
+    if migration_file_digest(path) != recorded:
+        raise ValueError(f"APPROVED_MIGRATION_CHECKSUM_MISMATCH:{migration}")
+    return True
+
+
 COMMON_SCHEMA_FIELDS = {
     "id", "userId", "creatorId", "tenant_id", "session_id", "instance_id",
     "created_at", "updated_at", "createdAt", "updatedAt", "status", "version",
     "effective_from", "effective_to", "rules", "jurisdiction", "market",
+    # Generic column names that unrelated APIs use for their own payloads
+    # (Eros `body.purpose`, `role`). A bare line match is not evidence of a
+    # schema dependency; they still count when the migration table is named on
+    # the same line, exactly like the other common fields above.
+    "purpose", "role",
 }
 
 
@@ -392,8 +436,16 @@ def verify_compatible(args, live_prisma, recorded):
     pending = [(name, Path(args.prisma_directory) / name / "migration.sql") for name in pending_prisma]
     pending.extend((name, revision_files[name]) for name in pending_agata)
     changed = list(changed_application_lines(repo_root, baseline, candidate))
+    approved_migrations = load_approved_migrations(
+        getattr(args, "approved_migrations", "") or
+        (Path(args.prisma_directory) / ".." / "production-approved-migrations.json").resolve())
     for migration, path in pending:
         identifiers = migration_identifiers(path, prisma_directory=args.prisma_directory, repo_root=repo_root)
+        approved_dependency = False
+        if migration in approved_migrations:
+            if migration_file_digest(path) != approved_migrations[migration]:
+                raise ValueError(f"APPROVED_MIGRATION_CHECKSUM_MISMATCH:{migration}")
+            approved_dependency = True
         if not identifiers:
             if is_explicit_noop_migration(path):
                 continue
@@ -408,7 +460,12 @@ def verify_compatible(args, live_prisma, recorded):
                                for anchor in anchors):
                         continue
                 if re.search(rf"(?<![A-Za-z0-9_]){re.escape(identifier)}(?![A-Za-z0-9_])", line, re.IGNORECASE):
-                    raise ValueError(f"PENDING_SCHEMA_DEPENDENCY:{migration}:{identifier}:{source_path}")
+                    if approved_dependency:
+                        print(f"APPROVED_PENDING_DEPENDENCY:{migration}:{identifier}:{source_path}",
+                              file=sys.stderr)
+                        continue
+                    raise ValueError(
+                        f"UNSAFE_SCHEMA_DEPENDENCY:{migration}:{identifier}:{source_path}")
     if set(recorded) != set(live_prisma):
         raise ValueError("live Prisma checksum inventory does not cover exactly applied migrations")
     return live_prisma[-1], args.agata_current_head, bool(pending)
@@ -439,9 +496,17 @@ def verify_static_pending(args):
         elif raw.startswith("services/agata/migrations/versions/") and path.suffix == ".py":
             pending.append((path.stem, path))
     changed = list(changed_application_lines(repo_root, baseline, candidate))
+    approved_migrations = load_approved_migrations(
+        getattr(args, "approved_migrations", "") or
+        (Path(args.prisma_directory) / ".." / "production-approved-migrations.json").resolve())
     for migration, path in pending:
         identifiers = migration_identifiers(
             path, prisma_directory=args.prisma_directory, repo_root=repo_root)
+        approved_dependency = False
+        if migration in approved_migrations:
+            if migration_file_digest(path) != approved_migrations[migration]:
+                raise ValueError(f"APPROVED_MIGRATION_CHECKSUM_MISMATCH:{migration}")
+            approved_dependency = True
         if not identifiers:
             if is_explicit_noop_migration(path):
                 continue
@@ -457,7 +522,12 @@ def verify_static_pending(args):
                                for anchor in anchors):
                         continue
                 if re.search(rf"(?<![A-Za-z0-9_]){re.escape(identifier)}(?![A-Za-z0-9_])", line, re.IGNORECASE):
-                    raise ValueError(f"PENDING_SCHEMA_DEPENDENCY:{migration}:{identifier}:{source_path}")
+                    if approved_dependency:
+                        print(f"APPROVED_PENDING_DEPENDENCY:{migration}:{identifier}:{source_path}",
+                              file=sys.stderr)
+                        continue
+                    raise ValueError(
+                        f"UNSAFE_SCHEMA_DEPENDENCY:{migration}:{identifier}:{source_path}")
     return pending
 
 
@@ -507,6 +577,7 @@ def main():
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--baseline-source-sha")
     parser.add_argument("--candidate-source-sha")
+    parser.add_argument("--approved-migrations", default="")
     parser.add_argument("--prisma-directory", required=True)
     parser.add_argument("--prisma-current-migrations", default="")
     parser.add_argument("--prisma-current-checksums", default="")

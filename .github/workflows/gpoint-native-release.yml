@@ -342,6 +342,7 @@ jobs:
           tests/test_release_routing_matrix.py
           tests/test_backup_install_script.py
           tests/test_native_release_intent.py
+          tests/test_kamal_migration_parity_dependencies.py
           tests/test_native_prepared_run.py
           tests/test_release_pre_push_mode.py
           tests/test_native_environment_deployment.py
