@@ -21,6 +21,11 @@ test "${APPROVE_PRODUCTION:-}" = true
 test -z "$(git status --porcelain)"
 test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
 test "$(git ls-remote origin refs/heads/main | awk '{print $1}')" = "$CANDIDATE_SHA"
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%d%H%M%S)}"
 ATTEMPT="${ATTEMPT:-1}"
 [[ "$RUN_ID" =~ ^[0-9]+$ && "$ATTEMPT" =~ ^[0-9]+$ ]]
@@ -29,7 +34,7 @@ trap 'rm -rf "$TMP"' EXIT
 echo "GPOINT_BACKUP_INSTALL=START SHA=$CANDIDATE_SHA"
 set -euo pipefail
 release="/opt/gpoint/backup-releases/$CANDIDATE_SHA"
-stage="/run/gpoint-backup-install-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+stage="/run/gpoint-backup-install-${RUN_ID}-${ATTEMPT}"
 ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$stage" "$release" <<'REMOTE_SETUP'
 set -euo pipefail
 [[ "$1" =~ ^/run/gpoint-backup-install-[0-9]+-[0-9]+$ ]]
@@ -39,7 +44,7 @@ install -d -o root -g root -m 0700 "$1"
 REMOTE_SETUP
 tar -czf "$TMP/gpoint-vps-backup.tar.gz" scripts/gpoint-scheduled-backup.py scripts/gpoint-backup-policy.py scripts/gpoint-media-tree.py scripts/agata-production-migration.py scripts/verify-gpoint-scheduled-backup-restore.sh systemd/gpoint-backup.service systemd/gpoint-backup.timer
 scp -p "$TMP/gpoint-vps-backup.tar.gz" "root@${GPOINT_PRODUCTION_HOST}:$stage/payload.tar.gz"
-archive_sha="$(sha256sum "$TMP/gpoint-vps-backup.tar.gz" | awk '{print $1}')"
+archive_sha="$(sha256 "$TMP/gpoint-vps-backup.tar.gz")"
 ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$stage" "$release" "$archive_sha" "$RUN_ID" "$ATTEMPT" <<'REMOTE_INSTALL'
 set -euo pipefail
 stage="$1"; release="$2"; expected_sha="$3"; run_id="$4"; attempt="$5"
@@ -69,10 +74,14 @@ for _ in $(seq 1 10800); do
 done
 test "$(systemctl is-enabled gpoint-backup.timer)" = enabled
 systemctl is-active --quiet gpoint-backup.timer
+test /opt/gpoint/backups/scheduled/latest.json -nt "$stage"
+test /opt/gpoint/backups/scheduled/latest.json -nt /opt/gpoint/gpoint-backup-current
 python3 /opt/gpoint/gpoint-backup-current/scripts/gpoint-backup-policy.py freshness --manifest /opt/gpoint/backups/scheduled/latest.json --max-age-hours 26
 echo GPOINT_VPS_BACKUP_TIMER=PASS
 rm -rf -- "$stage"
 REMOTE_INSTALL
-echo GPOINT_VPS_BACKUP_INSTALL=PASS >> "$GITHUB_STEP_SUMMARY"
+if [[ -n "${GITHUB_STEP_SUMMARY:-}" && -w "${GITHUB_STEP_SUMMARY}" ]]; then
+  echo GPOINT_VPS_BACKUP_INSTALL=PASS >> "$GITHUB_STEP_SUMMARY"
+fi
 
 echo "GPOINT_BACKUP_INSTALL=PASS SHA=$CANDIDATE_SHA"

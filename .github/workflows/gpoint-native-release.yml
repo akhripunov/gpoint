@@ -340,6 +340,7 @@ jobs:
           tests/test_prepush_runner.py
           tests/test_release_scope_consistency.py
           tests/test_release_routing_matrix.py
+          tests/test_backup_install_script.py
           tests/test_native_release_intent.py
           tests/test_native_prepared_run.py
           tests/test_release_pre_push_mode.py
