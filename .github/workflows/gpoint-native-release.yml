@@ -88,7 +88,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [workspace, python]
+        suite: [workspace, python, release-tooling, eros]
     services:
       postgres:
         image: pgvector/pgvector:0.8.6-pg16
@@ -147,7 +147,7 @@ jobs:
           [[ "$USE_PREPARED_IMAGES" == true ]] && args+=(--use-prepared-images)
           python3 scripts/native_release_intent.py "${args[@]}" >> "$GITHUB_OUTPUT"
       - name: Seed pinned Go 1.25.3 in Actions tool cache
-        if: matrix.suite == 'workspace'
+        if: matrix.suite == 'release-tooling'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -165,16 +165,16 @@ jobs:
           test "$("$RUNNER_TOOL_CACHE/go/1.25.3/x64/bin/go" version)" = 'go version go1.25.3 linux/amd64'
           touch "$RUNNER_TOOL_CACHE/go/1.25.3/x64.complete"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        if: matrix.suite == 'workspace'
+        if: matrix.suite == 'release-tooling'
         with:
           go-version: '1.25.3'
       - name: Validate GitHub Actions workflow
-        if: matrix.suite == 'workspace'
+        if: matrix.suite == 'release-tooling'
         run: >-
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           .github/workflows/gpoint-native-release.yml
       - name: Validate pinned Kamal configs and shared proxy routing
-        if: matrix.suite == 'workspace'
+        if: matrix.suite == 'release-tooling'
         env:
           KAMAL_IMAGE: ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625
         run: |
@@ -182,25 +182,36 @@ jobs:
           ./scripts/check-kamal-configs.sh
           ./scripts/test-kamal-proxy-integration.sh
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-        if: matrix.suite == 'workspace'
+        if: matrix.suite == 'eros' && (steps.surface.outputs.eros == 'true' || steps.surface.outputs.full_ci == 'true')
         with:
           platforms: linux/amd64
-      - name: Build stock Eros and run isolated SQLx and synthetic conversation E2E
-        if: matrix.suite == 'workspace' && (steps.surface.outputs.eros == 'true' || steps.surface.outputs.full_ci == 'true')
+      - name: Build stock Eros test image
+        id: eros_test_image
+        if: matrix.suite == 'eros' && (steps.surface.outputs.eros == 'true' || steps.surface.outputs.full_ci == 'true')
+        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
+        with:
+          context: https://github.com/etherfunlab/eros-engine.git#d1a140083321687212fb7b17c09cc0c3c9639f5e
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: gpoint-eros:stock-d1a140083321687212fb7b17c09cc0c3c9639f5e
+          labels: |
+            org.opencontainers.image.source=https://github.com/etherfunlab/eros-engine
+            org.opencontainers.image.revision=d1a140083321687212fb7b17c09cc0c3c9639f5e
+            com.gpoint.eros.upstream-revision=d1a140083321687212fb7b17c09cc0c3c9639f5e
+            com.gpoint.source.revision=${{ github.sha }}
+            com.gpoint.eros.patch-set.sha256=none
+          cache-from: type=gha,scope=gpoint-eros-test,timeout=30s
+          # PRs may read main's cache. Only runs on main export layers for releases.
+          cache-to: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && 'type=gha,scope=gpoint-eros-test,mode=max,timeout=45s,ignore-error=true' || '' }}
+      - name: Run stock Eros SQLx and synthetic conversation E2E
+        if: matrix.suite == 'eros' && (steps.surface.outputs.eros == 'true' || steps.surface.outputs.full_ci == 'true')
         env:
           EROS_UPSTREAM_SHA: d1a140083321687212fb7b17c09cc0c3c9639f5e
         run: |
           set -euo pipefail
           image="gpoint-eros:stock-$EROS_UPSTREAM_SHA"
-          docker buildx build --platform linux/amd64 --load \
-            --file docker/Dockerfile \
-            --label org.opencontainers.image.source=https://github.com/etherfunlab/eros-engine \
-            --label "org.opencontainers.image.revision=$EROS_UPSTREAM_SHA" \
-            --label "com.gpoint.eros.upstream-revision=$EROS_UPSTREAM_SHA" \
-            --label "com.gpoint.source.revision=$GITHUB_SHA" \
-            --label com.gpoint.eros.patch-set.sha256=none \
-            --tag "$image" \
-            "https://github.com/etherfunlab/eros-engine.git#$EROS_UPSTREAM_SHA"
           test "$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
           test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$EROS_UPSTREAM_SHA"
           bash services/eros-engine/run-local-e2e.sh "$image"
@@ -620,6 +631,10 @@ jobs:
             com.gpoint.eros.upstream-revision=d1a140083321687212fb7b17c09cc0c3c9639f5e
             com.gpoint.eros.patch-set.sha256=none
             service=gpoint-eros-pilot
+          cache-from: |
+            type=gha,scope=gpoint-eros-test,timeout=30s
+            type=gha,scope=gpoint-eros-release,timeout=30s
+          cache-to: type=gha,scope=gpoint-eros-release,mode=max,timeout=45s,ignore-error=true
           sbom: true
           provenance: mode=max
       - name: Validate immutable image identity and expose digests

@@ -137,7 +137,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
 
     def test_tests_matrix_preserves_parallel_suites_and_shared_fail_closed_outputs(self):
         tests = self.workflow["jobs"]["tests"]
-        self.assertEqual(tests["strategy"]["matrix"]["suite"], ["workspace", "python"])
+        self.assertEqual(tests["strategy"]["matrix"]["suite"], ["workspace", "python", "release-tooling", "eros"])
         intent = next(step for step in tests["steps"] if step.get("id") == "intent")
         self.assertNotIn("if", intent)
         self.assertEqual(tests["outputs"], {
@@ -145,8 +145,14 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             "deploy": "${{ steps.intent.outputs.deploy }}",
         })
         workspace_steps = [step for step in tests["steps"]
-                           if step.get("name") in {"Validate pinned Kamal configs and shared proxy routing",
-                                                    "Generate Prisma client and apply test migrations"}]
+                           if step.get("name") in {"Generate Prisma client and apply test migrations",
+                                                    "Build and typecheck workspace"}]
+        tooling = next(step for step in tests["steps"]
+                       if step.get("name") == "Validate pinned Kamal configs and shared proxy routing")
+        eros = next(step for step in tests["steps"] if step.get("id") == "eros_test_image")
+        self.assertEqual(tooling["if"], "matrix.suite == 'release-tooling'")
+        self.assertTrue(eros["if"].startswith("matrix.suite == 'eros' &&"))
+        self.assertIn("steps.surface.outputs.full_ci == 'true'", eros["if"])
         python_steps = [step for step in tests["steps"]
                         if step.get("name") in {"Run workflow, Native First and Kamal boundary tests",
                                                  "Run isolated PostgreSQL 16 migration and integration suites"}]
