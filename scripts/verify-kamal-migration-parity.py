@@ -19,6 +19,11 @@ COMMON_SCHEMA_FIELDS = {
     "id", "userId", "creatorId", "tenant_id", "session_id", "instance_id",
     "created_at", "updated_at", "createdAt", "updatedAt", "status", "version",
     "effective_from", "effective_to", "rules", "jurisdiction", "market",
+    # Generic column names that unrelated APIs use for their own payloads
+    # (Eros `body.purpose`, `role`). A bare line match is not evidence of a
+    # schema dependency; they still count when the migration table is named on
+    # the same line, exactly like the other common fields above.
+    "purpose", "role",
 }
 
 
