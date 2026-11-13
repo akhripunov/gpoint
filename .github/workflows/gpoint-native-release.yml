@@ -88,7 +88,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [workspace, python]
+        suite: [workspace, python, release-tooling, eros]
     services:
       postgres:
         image: pgvector/pgvector:0.8.6-pg16
@@ -147,7 +147,7 @@ jobs:
           [[ "$USE_PREPARED_IMAGES" == true ]] && args+=(--use-prepared-images)
           python3 scripts/native_release_intent.py "${args[@]}" >> "$GITHUB_OUTPUT"
       - name: Seed pinned Go 1.25.3 in Actions tool cache
-        if: matrix.suite == 'workspace'
+        if: matrix.suite == 'release-tooling'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -165,16 +165,16 @@ jobs:
           test "$("$RUNNER_TOOL_CACHE/go/1.25.3/x64/bin/go" version)" = 'go version go1.25.3 linux/amd64'
           touch "$RUNNER_TOOL_CACHE/go/1.25.3/x64.complete"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        if: matrix.suite == 'workspace'
+        if: matrix.suite == 'release-tooling'
         with:
           go-version: '1.25.3'
       - name: Validate GitHub Actions workflow
-        if: matrix.suite == 'workspace'
+        if: matrix.suite == 'release-tooling'
         run: >-
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           .github/workflows/gpoint-native-release.yml
       - name: Validate pinned Kamal configs and shared proxy routing
-        if: matrix.suite == 'workspace'
+        if: matrix.suite == 'release-tooling'
         env:
           KAMAL_IMAGE: ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625
         run: |
@@ -182,12 +182,12 @@ jobs:
           ./scripts/check-kamal-configs.sh
           ./scripts/test-kamal-proxy-integration.sh
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-        if: matrix.suite == 'workspace'
+        if: matrix.suite == 'eros' && (steps.surface.outputs.eros == 'true' || steps.surface.outputs.full_ci == 'true')
         with:
           platforms: linux/amd64
       - name: Build stock Eros test image
         id: eros_test_image
-        if: matrix.suite == 'workspace' && (steps.surface.outputs.eros == 'true' || steps.surface.outputs.full_ci == 'true')
+        if: matrix.suite == 'eros' && (steps.surface.outputs.eros == 'true' || steps.surface.outputs.full_ci == 'true')
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
           context: https://github.com/etherfunlab/eros-engine.git#d1a140083321687212fb7b17c09cc0c3c9639f5e
@@ -206,7 +206,7 @@ jobs:
           # PRs may read main's cache. Only runs on main export layers for releases.
           cache-to: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && 'type=gha,scope=gpoint-eros-test,mode=max,timeout=45s,ignore-error=true' || '' }}
       - name: Run stock Eros SQLx and synthetic conversation E2E
-        if: matrix.suite == 'workspace' && (steps.surface.outputs.eros == 'true' || steps.surface.outputs.full_ci == 'true')
+        if: matrix.suite == 'eros' && (steps.surface.outputs.eros == 'true' || steps.surface.outputs.full_ci == 'true')
         env:
           EROS_UPSTREAM_SHA: d1a140083321687212fb7b17c09cc0c3c9639f5e
         run: |
