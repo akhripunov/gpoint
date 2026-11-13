@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 def test_staging_ssh_keeps_silent_transfers_alive_without_weakening_host_keys():
-    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
     text = '\n'.join(s.get('run', '') for s in workflow['jobs']['layer7_staging']['steps'])
     # Every staging transport call goes through one bounded-retry wrapper, so the
     # host-key, identity and keepalive policy cannot drift between call sites.
@@ -92,10 +92,11 @@ def test_layer7_transport_replays_stdin_after_a_transport_retry(tmp_path):
 
 
 def test_staging_preserves_legacy_and_builds_kamal_compatible_eros_image():
-    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
-    build = next(s for s in workflow['jobs']['build']['steps'] if s.get('id') == 'eros')
+    native = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
+    build = next(s for s in native['jobs']['build']['steps'] if s.get('id') == 'eros')
     assert 'service=gpoint-eros-pilot' in build['with']['labels'].splitlines()
-    readback = next(s['run'] for s in workflow['jobs']['build']['steps'] if s.get('name') == 'Read back exact published images and verify candidate identity')
+    readback = next(s['run'] for s in native['jobs']['build']['steps'] if s.get('name') == 'Read back exact published images and verify candidate identity')
     assert 'expected_service=gpoint-eros-pilot' in readback
     assert "{{index .Config.Labels \"service\"}}" in readback
     assert '\"$expected_service\"' in readback
@@ -122,7 +123,7 @@ def test_host_relay_uses_stock_kamal_accessory_with_one_network():
     assert relay['image'].startswith('ghcr.io/akhripunov/gpoint-runtime@')
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST' in text
     assert relay['options']['memory'] == '64m'
-    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
     deploy = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
     assert 'kamal accessory boot relay' in deploy
     assert "--filter 'name=^/gpoint-eros-relay-relay$' --filter label=service=gpoint-eros-relay-relay" in deploy
@@ -142,7 +143,7 @@ def test_host_relay_uses_stock_kamal_accessory_with_one_network():
     ('unexpected-relay', 1, ''),
 ])
 def test_relay_accessory_lifecycle_is_exact_and_stock_kamal(tmp_path, existing, expected, action):
-    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
     deploy = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
     code = deploy[deploy.index('relay_container="$('):deploy.index('# Accessory prepare creates the stock kamal bridge')]
     log = tmp_path / 'actions'
@@ -159,7 +160,7 @@ def test_relay_accessory_lifecycle_is_exact_and_stock_kamal(tmp_path, existing, 
 
 
 def test_staging_label_lookup_templates_use_valid_string_literals():
-    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
     commands = '\n'.join(s.get('run', '') for s in workflow['jobs']['layer7_staging']['steps'])
     args = re.findall(r"\{\{index \.Config\.Labels (.*?)\}\}", commands)
     assert len(args) >= 4
@@ -167,7 +168,7 @@ def test_staging_label_lookup_templates_use_valid_string_literals():
 
 
 def test_staging_route_probe_receives_stdin_and_uses_generated_eros_host():
-    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
     verify = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Verify runtime roles, health, Eros embeddings, and API-to-engine route')
     assert 'docker exec -i "$api" node --input-type=module -' in verify
     writer = (ROOT / 'scripts/eros-production-secrets.py').read_text()
@@ -178,7 +179,7 @@ def test_staging_route_probe_receives_stdin_and_uses_generated_eros_host():
 
 @pytest.mark.parametrize('leak', ['', 'core_on_data', 'alias_on_shared'])
 def test_staging_network_isolation_probe_uses_actual_topology(tmp_path, leak):
-    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
     verify = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Verify runtime roles, health, Eros embeddings, and API-to-engine route')
     code = re.search(r"<<'PY_CORE_DB'\n(.*?)\nPY_CORE_DB", verify, re.S).group(1)
     api = {'gpoint_eros_api': {}, 'shared_internal': {}}
@@ -199,7 +200,7 @@ def test_staging_network_isolation_probe_uses_actual_topology(tmp_path, leak):
     ('unexpected-container', 'false', 1, []),
 ])
 def test_private_gateway_stop_shell_preserves_first_install_and_race_recovery(tmp_path, previous, raced, expected, actions):
-    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
     deploy = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
     section = deploy[deploy.index('check_queue_empty() {'):]
     section = section[:section.index('GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST"')]
@@ -236,7 +237,7 @@ def test_staging_api_keeps_the_existing_private_worker_forward_port():
 
 
 def test_staging_stops_only_managed_api_after_proving_queue_empty():
-    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
     steps = workflow['jobs']['layer7_staging']['steps']
     deploy = next(x['run'] for x in steps if x.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
     queue = deploy.index('LAYER7_GPOINT_QUEUE_EMPTY=PASS')
@@ -256,7 +257,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_layer7_staging_is_owner_dispatched_on_trusted_runner_with_read_only_packages():
-    workflow = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
+    workflow = yaml.load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text(), Loader=yaml.BaseLoader)
     job = workflow["jobs"]["layer7_staging"]
     actionlint = yaml.safe_load((ROOT / ".github/actionlint.yaml").read_text())
 
@@ -274,7 +275,7 @@ def test_layer7_staging_is_owner_dispatched_on_trusted_runner_with_read_only_pac
 
 
 def test_layer7_staging_runs_pinned_kamal_without_a_local_docker_engine():
-    workflow = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
+    workflow = yaml.load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text(), Loader=yaml.BaseLoader)
     job = workflow["jobs"]["layer7_staging"]
     ruby = next(step for step in job["steps"] if step.get("uses", "").startswith("ruby/setup-ruby@"))
     assert ruby["uses"] == "ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f"
@@ -292,7 +293,7 @@ def test_layer7_staging_runs_pinned_kamal_without_a_local_docker_engine():
 
 
 def test_layer7_staging_requires_exact_successful_prepare_and_explicit_staging_intent():
-    workflow = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
+    workflow = yaml.load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text(), Loader=yaml.BaseLoader)
     inputs = workflow["on"]["workflow_dispatch"]["inputs"]
     assert inputs["deploy_layer7_staging"]["type"] == "boolean"
     assert inputs["deploy_layer7_staging"]["default"] == "false"
@@ -301,8 +302,9 @@ def test_layer7_staging_requires_exact_successful_prepare_and_explicit_staging_i
     assert inputs["staging_image_sha"]["required"] == "false"
 
     job = workflow["jobs"]["layer7_staging"]
-    assert job["needs"] == ["tests"]
+    assert "needs" not in job
     assert "inputs.deploy_layer7_staging == true" in job["if"]
+    assert "inputs.approve_layer7_staging == true" in job["if"]
     assert "inputs.staging_image_sha != ''" in job["if"]
     step_text = yaml.safe_dump(job["steps"])
     assert "verify_native_prepared_run.py" in step_text
@@ -322,7 +324,7 @@ def test_layer7_staging_requires_exact_successful_prepare_and_explicit_staging_i
     assert "docker logout ghcr.io" in step_text
     assert "no_existing_credentials=true" in step_text
     assert "CORE_API_EROS_ROUTE=PASS EROS_DATABASE_NETWORK_ISOLATION=PASS" in (
-        ROOT / ".github/workflows/gpoint-native-release.yml"
+        ROOT / ".github/workflows/gpoint-layer7-staging.yml"
     ).read_text()
 
 
@@ -350,7 +352,7 @@ def test_staging_kamal_configs_are_separate_from_public_production_routes():
 
 
 def test_layer7_staging_never_uses_production_environment_or_production_host():
-    workflow = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
+    workflow = yaml.load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text(), Loader=yaml.BaseLoader)
     staging = workflow["jobs"]["layer7_staging"]
     serialized = yaml.safe_dump(staging)
     assert "secrets.GPOINT_KAMAL_HOST" not in serialized
@@ -360,11 +362,11 @@ def test_layer7_staging_never_uses_production_environment_or_production_host():
 
 
 def test_layer7_staging_is_separate_from_build_and_production_deploy_jobs():
-    workflow = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
+    workflow = yaml.load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text(), Loader=yaml.BaseLoader)
+    native = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
     staging = workflow["jobs"]["layer7_staging"]
-    assert "LAYER7_STAGING" not in workflow["jobs"]["build"]["if"]
-    assert "LAYER7_STAGING" not in workflow["jobs"]["deploy"]["if"]
-    assert "needs.tests.outputs.deploy == 'true'" in workflow["jobs"]["deploy"]["if"]
+    assert set(native["jobs"]) == {"tests", "build", "deploy"}
+    assert set(workflow["jobs"]) == {"layer7_staging"}
     assert staging["env"]["KAMAL_REGISTRY_PASSWORD"] == "${{ secrets.GITHUB_TOKEN }}"
     assert staging["permissions"]["packages"] == "read"
     assert staging["permissions"].get("contents") == "read"
@@ -389,7 +391,7 @@ def test_layer7_staging_is_separate_from_build_and_production_deploy_jobs():
 
 
 def test_layer7_staging_can_run_core_and_eros_without_a_staging_telegram_bot():
-    workflow = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
+    workflow = yaml.load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text(), Loader=yaml.BaseLoader)
     staging = workflow["jobs"]["layer7_staging"]
     steps = staging["steps"]
     validation = next(step for step in steps if step.get("id") == "staging_env")

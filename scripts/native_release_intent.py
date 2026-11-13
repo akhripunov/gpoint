@@ -48,50 +48,191 @@ PRISMA_MIGRATION = re.compile(
 # ME-36 OWNER-approved removal of the parallel Mac installer and stale shared
 # Worker test. This is an exact path exception; all other deletions still block.
 KNOWN_RETIRED_NON_RUNTIME_FILES = frozenset({
+    ".github/workflows/gpoint-deploy.yml",
+    ".github/workflows/gpoint-first-kamal-cutover.yml",
+    ".github/workflows/gpoint-linear-reconcile.yml",
+    ".github/workflows/gpoint-prepare.yml",
+    ".github/workflows/gpoint-recover-interrupted.yml",
+    "scripts/automated-eros-pilot-release.mjs",
+    "scripts/automated-release.mjs",
+    "scripts/check-release-rehearsal.py",
+    "scripts/collect_kamal_eros_state.py",
+    "scripts/deployment-execution.mjs",
+    "scripts/deployment-execution.test.mjs",
+    "scripts/deployment-run-state.mjs",
+    "scripts/deployment-run-state.test.mjs",
+    "scripts/eros-postgres-acl-deploy.mjs",
+    "scripts/eros-postgres-acl-deploy.test.mjs",
+    "scripts/eros-production-deployment.mjs",
+    "scripts/eros-production-deployment.test.mjs",
+    "scripts/ghcr-receipt.mjs",
+    "scripts/ghcr-receipt.test.mjs",
+    "scripts/github-deployments.mjs",
+    "scripts/github-deployments.test.mjs",
+    "scripts/github_api_preflight.py",
+    "scripts/gpoint-miniapp-static-manifest.py",
+    "scripts/kamal-first-cutover/consumers.sh",
+    "scripts/kamal-first-cutover/pause.sh",
+    "scripts/kamal-first-cutover/recover-post.sh",
+    "scripts/kamal-first-cutover/recover-pre.sh",
+    "scripts/kamal-first-cutover/requests.sh",
+    "scripts/kamal-first-cutover/retire.sh",
+    "scripts/kamal-first-cutover/routes.sh",
+    "scripts/kamal-first-cutover/verify.sh",
+    "scripts/kamal_cutover_credentials.py",
+    "scripts/kamal_cutover_owner.py",
+    "scripts/kamal_eros_state.py",
+    "scripts/kamal_pause_recovery_policy.py",
+    "scripts/package-kamal-cutover.py",
+    "scripts/pause-legacy-gpoint.sh",
+    "scripts/prepare-release.py",
+    "scripts/prepare_coalescing.py",
+    "scripts/prepared_artifact_cache.py",
+    "scripts/publish-release-linear.py",
+    "scripts/publish_ghcr_images.py",
+    "scripts/reconcile-deployment.mjs",
+    "scripts/reconcile-deployment.test.mjs",
+    "scripts/recover-interrupted-apply.mjs",
+    "scripts/recover-interrupted-apply.test.mjs",
+    "scripts/recover-kamal-cutover.py",
+    "scripts/rehearse-release-bundle.mjs",
+    "scripts/release-authorization.mjs",
+    "scripts/release-authorization.test.mjs",
+    "scripts/release-bundle.mjs",
+    "scripts/release-bundle.test.mjs",
+    "scripts/release-component-bundle-v4.mjs",
+    "scripts/release-component-bundle-v4.test.mjs",
+    "scripts/release-component-vps-proof-v4.mjs",
+    "scripts/release-component-vps-proof-v4.test.mjs",
+    "scripts/release-evidence.mjs",
+    "scripts/release-evidence.test.mjs",
+    "scripts/release-gpoint-vps-adapter.mjs",
+    "scripts/release-gpoint.mjs",
+    "scripts/release-gpoint.test.mjs",
+    "scripts/release-gsales-provision.mjs",
+    "scripts/release-gsales.mjs",
+    "scripts/release-gsales.test.mjs",
+    "scripts/release-lock.mjs",
+    "scripts/release-migrations.mjs",
+    "scripts/release-network-read.mjs",
+    "scripts/release-network-read.test.mjs",
+    "scripts/release-oci.mjs",
+    "scripts/release-oci.test.mjs",
+    "scripts/release-orchestrator.mjs",
+    "scripts/release-orchestrator.test.mjs",
+    "scripts/release-preflight-benchmark.py",
+    "scripts/release-readiness.test.mjs",
+    "scripts/release-runner-readiness.mjs",
+    "scripts/release-runner-readiness.test.mjs",
+    "scripts/release-static-baseline-v4.test.mjs",
+    "scripts/release-static-publish-v4.test.mjs",
+    "scripts/release-static-transfer-v4.mjs",
+    "scripts/release-static-transfer-v4.test.mjs",
+    "scripts/release-static-v4.mjs",
+    "scripts/release-static-v4.test.mjs",
+    "scripts/release-telemetry.py",
+    "scripts/release_assets.py",
+    "scripts/release_component_impact_v4.py",
+    "scripts/release_component_manifest_v4.py",
+    "scripts/release_impact_v3.py",
+    "scripts/release_static_exchange_v4.py",
+    "scripts/release_static_executor_v4.py",
+    "scripts/release_static_migrations_v4.py",
+    "scripts/release_static_prepare_v4.py",
+    "scripts/release_ui_artifact_v4.py",
+    "scripts/release_ui_switch_v4.py",
+    "scripts/retire-gpoint-caddy.sh",
+    "scripts/run-kamal-cutover-owner.sh",
+    "scripts/sanitize-kamal-inventory.py",
+    "scripts/sanitize-kamal-resources.py",
+    "scripts/select-release-run.py",
+    "scripts/select-release-run.test.py",
+    "scripts/smoke_bot_image.py",
+    "scripts/start_kamal_cutover_owner.py",
+    "scripts/test_prepare_coalescing.py",
+    "scripts/test_release_preflight_benchmark.py",
+    "scripts/validate-task-authorization.mjs",
+    "scripts/verify-gpoint-backup-restore.sh",
+    "scripts/verify-interrupted-recovery-proof.mjs",
+    "scripts/verify-loaded-images.py",
+    "scripts/worker-runtime-guard.mjs",
+    "scripts/worker-runtime-guard.test.mjs",
     "services/agata/worker/install_launch_agent.py",
     "services/gsales/tests/test_shared_worker_http.py",
+    "tests/test_collect_kamal_eros_state.py",
+    "tests/test_deploy_evidence_workflow.py",
+    "tests/test_eros_pilot_artifact.py",
+    "tests/test_eros_postgres_acl_workflow.py",
+    "tests/test_gpoint_docker_cache_v3.py",
+    "tests/test_gpoint_miniapp_static_manifest.py",
+    "tests/test_gpoint_release_trigger_graph.py",
+    "tests/test_interrupted_recovery_workflow.py",
+    "tests/test_kamal_cutover_credentials.py",
+    "tests/test_kamal_cutover_owner.py",
+    "tests/test_kamal_cutover_package.py",
+    "tests/test_kamal_eros_state.py",
+    "tests/test_kamal_pause_recovery_policy.py",
+    "tests/test_me38_recovery_immutable_rehearsal.py",
+    "tests/test_prepare_release_migration_inventory.py",
+    "tests/test_prepare_workflow_summary.py",
+    "tests/test_prepared_artifact_cache.py",
+    "tests/test_publish_ghcr_images.py",
+    "tests/test_publish_ghcr_receipt.py",
+    "tests/test_recover_kamal_cutover.py",
+    "tests/test_release_assets.py",
+    "tests/test_release_component_impact_v4.py",
+    "tests/test_release_impact_v3.py",
+    "tests/test_release_linear.py",
+    "tests/test_release_static_publication_v4.py",
+    "tests/test_start_kamal_cutover_owner.py",
+    "tests/test_unified_release_v1.py",
+    "scripts/network_retry.py",
+    "scripts/verify-release-worker-compatibility.py",
 })
 KNOWN_NON_RUNTIME_FILES = frozenset({
     ".github/actionlint.yaml",
     ".kamal/hooks/post-app-boot",
     ".kamal/hooks/pre-app-boot",
     "AGENTS.md",
-    "packages/db/prisma/production-approved-migrations.json",
-    "config/deploy.layer7-staging.yml",
-    "config/deploy.layer7-staging.miniapp.yml",
     "config/deploy.layer7-staging.eros-api.yml",
-    "config/deploy.layer7-staging.eros.yml",
     "config/deploy.layer7-staging.eros-relay.yml",
+    "config/deploy.layer7-staging.eros.yml",
+    "config/deploy.layer7-staging.miniapp.yml",
+    "config/deploy.layer7-staging.yml",
     "infra/staging/layer7_known_hosts",
-    "scripts/classify-release-prepush.py",
-    "scripts/native_change_surface.py",
+    "packages/db/prisma/production-approved-migrations.json",
     "scripts/check-kamal-configs.sh",
+    "scripts/classify-release-prepush.py",
     "scripts/eros-native-database.py",
     "scripts/eros-production-secrets.py",
     "scripts/gpoint-backup-policy.py",
     "scripts/gpoint-scheduled-backup.py",
-    "scripts/native_release_intent.py",
-    "scripts/transition-agata-worker-v3.py",
-    "services/gsales/tests/test_shared_worker_http.py",
     "scripts/layer7-transport.sh",
     "scripts/layer7_staging_database.py",
     "scripts/layer7_staging_env.py",
-    "scripts/write_layer7_staging_env.py",
-    "scripts/write_layer7_staging_eros_api_env.py",
+    "scripts/native_change_surface.py",
+    "scripts/native_release_intent.py",
+    "scripts/prepush.py",
     "scripts/prisma_migration_release_plan.py",
-    "scripts/resolve_native_environment_deployment.py",
     "scripts/resolve_native_build_scope.py",
+    "scripts/resolve_native_environment_deployment.py",
+    "scripts/transition-agata-worker-v3.py",
     "scripts/verify-eros-runtime-labels.py",
     "scripts/verify-gpoint-scheduled-backup-restore.sh",
-    "scripts/verify-kamal-role.sh",
     "scripts/verify-kamal-migration-parity.py",
-    "scripts/verify-layer7-ollama.py",
     "scripts/verify-kamal-production-baseline.py",
+    "scripts/verify-kamal-role.sh",
+    "scripts/verify-layer7-ollama.py",
     "scripts/verify_native_eros_image.py",
     "scripts/verify_native_prepared_run.py",
     "scripts/verify_native_rollback_evidence.py",
     "scripts/write-kamal-production-manifest.py",
+    "scripts/write_layer7_staging_env.py",
+    "scripts/write_layer7_staging_eros_api_env.py",
+    "services/gsales/tests/test_shared_worker_http.py",
     "systemd/gpoint-backup.service",
+    "scripts/gpoint-backup-install.sh",
+    "scripts/gpoint-backup-install-remote.sh",
 })
 COMPONENT_ROLES = {
     "CORE": ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot"),
@@ -192,44 +333,27 @@ def validate_prepared_image_digests(build_components: list[str],
 def classify_dispatch(*, ref: str, candidate_sha: str, github_sha: str, actor: str,
                       repository_owner: str, migration_rehearsal: bool,
                       approve_production: bool,
-                      backup_maintenance: bool = False,
                       rollback: bool = False,
                       rollback_eros: bool = False,
-                      use_prepared_images: bool = False,
-                      layer7_staging: bool = False,
-                      approve_layer7_staging: bool = False) -> tuple[str, bool]:
-    if approve_layer7_staging and not layer7_staging:
-        return "INVALID_LAYER7_STAGING", False
-    if layer7_staging:
-        exact = bool(re.fullmatch(r"[0-9a-f]{40}", candidate_sha)) and candidate_sha == github_sha
-        owner = bool(repository_owner) and actor.lower() == repository_owner.lower()
-        if (ref == "refs/heads/main" and exact and owner and approve_layer7_staging
-                and use_prepared_images and not approve_production and not migration_rehearsal
-                and not backup_maintenance and not rollback and not rollback_eros):
-            return "LAYER7_STAGING", False
-        return "INVALID_LAYER7_STAGING", False
+                      use_prepared_images: bool = False) -> tuple[str, bool]:
     if rollback_eros and not rollback:
         return "INVALID_ROLLBACK", False
     exact = bool(re.fullmatch(r"[0-9a-f]{40}", candidate_sha)) and candidate_sha == github_sha
     owner = bool(repository_owner) and actor.lower() == repository_owner.lower()
-    if rollback and (migration_rehearsal or backup_maintenance or use_prepared_images):
+    if rollback and (migration_rehearsal or use_prepared_images):
         return "INVALID_ROLLBACK", False
-    if migration_rehearsal and (backup_maintenance or use_prepared_images):
+    if migration_rehearsal and use_prepared_images:
         return "INVALID_REHEARSAL", False
-    if backup_maintenance and use_prepared_images:
-        return "INVALID_BACKUP_MAINTENANCE", False
     if rollback:
         if ref == "refs/heads/main" and exact and owner and approve_production:
-            return "ROLLBACK", False
+            # A rollback runs inside the protected Deploy job as a mode, so the
+            # release pipeline must admit it exactly like a forward deploy.
+            return "ROLLBACK", True
         return "INVALID_ROLLBACK", False
     if migration_rehearsal:
         if (ref == "refs/heads/main" and exact and owner and not approve_production):
             return "REHEARSAL", False
         return "INVALID_REHEARSAL", False
-    if backup_maintenance:
-        if (ref == "refs/heads/main" and exact and owner and approve_production):
-            return "BACKUP_MAINTENANCE", False
-        return "INVALID_BACKUP_MAINTENANCE", False
     if ref == "refs/heads/main" and exact and owner and approve_production:
         return "DEPLOY", True
     if ref == "refs/heads/main":
@@ -515,13 +639,10 @@ def main() -> int:
     parser.add_argument("--triggering-actor", default="")
     parser.add_argument("--repository-owner", default="")
     parser.add_argument("--migration-rehearsal", action="store_true")
-    parser.add_argument("--backup-maintenance", action="store_true")
     parser.add_argument("--rollback", action="store_true")
     parser.add_argument("--rollback-eros", action="store_true")
     parser.add_argument("--use-prepared-images", action="store_true")
     parser.add_argument("--approve-production", action="store_true")
-    parser.add_argument("--layer7-staging", action="store_true")
-    parser.add_argument("--approve-layer7-staging", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -544,12 +665,9 @@ def main() -> int:
                 actor=args.actor, repository_owner=args.repository_owner,
                 migration_rehearsal=args.migration_rehearsal,
                 approve_production=args.approve_production,
-                backup_maintenance=args.backup_maintenance,
                 rollback=args.rollback,
                 rollback_eros=args.rollback_eros,
                 use_prepared_images=args.use_prepared_images,
-                layer7_staging=args.layer7_staging,
-                approve_layer7_staging=args.approve_layer7_staging,
             )
         else:
             mode, deploy = "NO_DEPLOY", False

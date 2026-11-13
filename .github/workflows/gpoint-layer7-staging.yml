@@ -1,0 +1,555 @@
+name: GPoint — Protected Layer7 staging deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact 40-character candidate SHA
+        required: true
+        type: string
+      deploy_layer7_staging:
+        description: Deploy only to the fixed, isolated Layer7 staging VPS
+        required: true
+        type: boolean
+        default: false
+      approve_layer7_staging:
+        description: I authorize this exact candidate SHA on the isolated Layer7 staging VPS
+        required: true
+        type: boolean
+        default: false
+      staging_image_sha:
+        description: Exact source SHA represented by the prepared images
+        required: false
+        type: string
+      prepared_run_id:
+        description: Run ID of the successful Build run for this exact SHA
+        required: false
+        type: string
+      prepared_app_digest:
+        description: Prepared GHCR digest for CORE
+        required: false
+        type: string
+      prepared_agata_digest:
+        description: Prepared GHCR digest for AGATA
+        required: false
+        type: string
+      prepared_miniapp_digest:
+        description: Prepared GHCR digest for MINIAPP
+        required: false
+        type: string
+      prepared_eros_digest:
+        description: Prepared GHCR digest for EROS
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  layer7_staging:
+    name: Protected Layer7 staging Kamal deploy and verify
+    if: github.ref == 'refs/heads/main' && inputs.deploy_layer7_staging == true && inputs.approve_layer7_staging == true && inputs.staging_image_sha != ''
+    runs-on: [self-hosted, macOS]
+    environment:
+      name: layer7-staging
+    concurrency:
+      group: gpoint-layer7-staging
+      cancel-in-progress: false
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      packages: read
+      actions: read
+      deployments: write
+    env:
+      CANDIDATE_SHA: ${{ inputs.staging_image_sha }}
+      GPOINT_COMMIT_SHA: ${{ inputs.staging_image_sha }}
+      GPOINT_APP_SOURCE_SHA: ${{ inputs.staging_image_sha }}
+      GPOINT_LAYER7_STAGING_HOST: 95.133.236.59
+      GPOINT_KAMAL_TARGET_HOST: 95.133.236.59
+      GPOINT_SSH_KEY: /root/.ssh/gpoint_layer7
+      GPOINT_KNOWN_HOSTS_FILE: /root/.ssh/known_hosts
+      KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      STAGING_ENV_BUNDLE: ${{ secrets.GPOINT_LAYER7_STAGING_APP_ENV }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
+        with:
+          ruby-version: 3.3.6
+          self-hosted: true
+      - name: Install pinned Kamal 2.12.0
+        run: |
+          set -euo pipefail
+          gem_root="$RUNNER_TEMP/kamal-gems"
+          mkdir -p "$gem_root"
+          GEM_HOME="$gem_root" GEM_PATH="$gem_root" gem install kamal --version 2.12.0 --no-document --install-dir "$gem_root"
+          echo "GEM_HOME=$gem_root" >> "$GITHUB_ENV"
+          echo "GEM_PATH=$gem_root" >> "$GITHUB_ENV"
+          echo "$gem_root/bin" >> "$GITHUB_PATH"
+          GEM_HOME="$gem_root" GEM_PATH="$gem_root" ruby -e 'abort unless Gem::Specification.find_by_name("kamal").version.to_s == "2.12.0"'
+          GEM_HOME="$gem_root" GEM_PATH="$gem_root" "$gem_root/bin/kamal" help >/dev/null
+      - name: Recheck owner dispatch, current main, and prepared image ancestry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_ACTOR: ${{ github.actor }}
+          OWNER_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          REQUESTED_SHA: ${{ inputs.candidate_sha }}
+          STAGING_IMAGE_SHA: ${{ inputs.staging_image_sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REF" = refs/heads/main
+          test "$OWNER_ACTOR" = "$REPOSITORY_OWNER"
+          test "$OWNER_TRIGGERING_ACTOR" = "$REPOSITORY_OWNER"
+          [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$REQUESTED_SHA" = "$WORKFLOW_SHA"
+          [[ "$STAGING_IMAGE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          current_main="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/heads/main" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')"
+          test "$current_main" = "$WORKFLOW_SHA"
+          comparison="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/compare/$STAGING_IMAGE_SHA...$WORKFLOW_SHA")"
+          python3 -c 'import json,sys; source=sys.argv[1]; value=json.load(sys.stdin); status=value.get("status"); merge_base=value.get("merge_base_commit",{}).get("sha"); sys.exit(0 if status in {"ahead","identical"} and merge_base == source else "prepared image SHA is not an ancestor of current main")' \
+            "$STAGING_IMAGE_SHA" <<< "$comparison"
+      - name: Verify exact successful Build run and immutable component digests
+        id: prepared
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREPARED_RUN_ID: ${{ inputs.prepared_run_id }}
+          PREPARED_APP_DIGEST: ${{ inputs.prepared_app_digest }}
+          PREPARED_AGATA_DIGEST: ${{ inputs.prepared_agata_digest }}
+          PREPARED_MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
+          PREPARED_EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
+        run: |
+          set -euo pipefail
+          [[ "$PREPARED_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PREPARED_APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$PREPARED_MINIAPP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$PREPARED_EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          digests="$(python3 - <<'PY'
+          import json, os
+          values = {
+              "CORE": os.environ["PREPARED_APP_DIGEST"],
+              "MINIAPP": os.environ["PREPARED_MINIAPP_DIGEST"],
+              "EROS": os.environ["PREPARED_EROS_DIGEST"],
+          }
+          if os.environ.get("PREPARED_AGATA_DIGEST"):
+              values["AGATA"] = os.environ["PREPARED_AGATA_DIGEST"]
+          print(json.dumps(values, separators=(",", ":")))
+          PY
+          )"
+          run_json="$RUNNER_TEMP/layer7-staging-run.json"
+          jobs_json="$RUNNER_TEMP/layer7-staging-jobs.json"
+          commit_json="$RUNNER_TEMP/layer7-staging-commit.json"
+          log_headers="$RUNNER_TEMP/layer7-staging-log-headers.txt"
+          log_file="$RUNNER_TEMP/layer7-staging-build.log"
+          curl --fail --silent --show-error -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$PREPARED_RUN_ID" -o "$run_json"
+          curl --fail --silent --show-error -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$PREPARED_RUN_ID/jobs?per_page=100" -o "$jobs_json"
+          curl --fail --silent --show-error -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/commits/$CANDIDATE_SHA" -o "$commit_json"
+          build_job_id="$(python3 - "$jobs_json" <<'PY'
+          import json,sys
+          jobs=json.load(open(sys.argv[1],encoding="utf-8")).get("jobs")
+          found=[row["id"] for row in jobs or [] if row.get("name")=="Build and publish immutable images"]
+          if len(found)!=1: raise SystemExit("prepared Build job identity is ambiguous")
+          print(found[0])
+          PY
+          )"
+          status="$(curl --silent --show-error -D "$log_headers" -o "$log_file" -w '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/jobs/$build_job_id/logs")"
+          if [[ "$status" == 302 ]]; then
+            log_url="$(python3 - "$log_headers" <<'PY'
+          import sys
+          from urllib.parse import urlsplit
+          headers=open(sys.argv[1],encoding="latin-1").read().splitlines()
+          locations=[line.split(":",1)[1].strip() for line in headers if line.lower().startswith("location:")]
+          if len(locations)!=1: raise SystemExit("GitHub Build log redirect is missing or ambiguous")
+          parts=urlsplit(locations[0])
+          if parts.scheme!="https" or not parts.hostname or parts.username or parts.password:
+              raise SystemExit("GitHub Build log redirect is not a safe HTTPS URL")
+          print(locations[0])
+          PY
+            )"
+            curl --fail --silent --show-error --proto '=https' "$log_url" -o "$log_file"
+          elif [[ "$status" != 200 ]]; then
+            echo "Unexpected GitHub job log HTTP status: $status" >&2
+            exit 1
+          fi
+          python3 scripts/verify_native_prepared_run.py \
+            --run "$run_json" --jobs "$jobs_json" --commit "$commit_json" --logs "$log_file" \
+            --candidate-sha "$CANDIDATE_SHA" --run-id "$PREPARED_RUN_ID" --digests "$digests" \
+            --output "$GITHUB_OUTPUT"
+          rm -f "$run_json" "$jobs_json" "$commit_json" "$log_headers" "$log_file"
+      - name: Verify pinned Layer7 host key and existing SSH access
+        run: |
+          set -euo pipefail
+          key="$HOME/.ssh/gpoint_layer7"
+          test -f "$key" && test ! -L "$key"
+          test "$(stat -f '%Lp' "$key")" = 600
+          test "$(ssh-keygen -lf infra/staging/layer7_known_hosts | awk '{print $2}')" = \
+            SHA256:kFA7rNcjar68J6lmq25teS0uV6DVCmTx+t7I0xTof/U
+          ssh-keygen -F "$GPOINT_LAYER7_STAGING_HOST" -f infra/staging/layer7_known_hosts >/dev/null
+          # The single-quoted check expands on the remote host, not locally.
+          # shellcheck disable=SC2016
+          LAYER7_SSH_KEY="$key" "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" 'test "$(id -u)" = 0'
+      - name: Validate staging-only application environment without logging values
+        id: staging_env
+        env:
+          STAGING_ENV_BUNDLE: ${{ secrets.GPOINT_LAYER7_STAGING_APP_ENV }}
+        run: |
+          set -euo pipefail
+          test -n "$STAGING_ENV_BUNDLE" || {
+            echo 'Missing protected layer7-staging environment secret GPOINT_LAYER7_STAGING_APP_ENV.' >&2
+            exit 1
+          }
+          printf '%s' "$STAGING_ENV_BUNDLE" | python3 -c '
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, "scripts")
+          from layer7_staging_env import parse_staging_env
+          _, digest, bot_enabled = parse_staging_env(sys.stdin.read(48_001))
+          print("LAYER7_STAGING_ENV_VALID=PASS SHA256=" + digest)
+          with open(__import__("os").environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("bot_enabled=" + str(bot_enabled).lower() + "\n")
+          '
+      - name: Install staging secrets and provision only the empty GPoint staging database
+        env:
+          STAGING_ENV_BUNDLE: ${{ secrets.GPOINT_LAYER7_STAGING_APP_ENV }}
+        run: |
+          set -euo pipefail
+          install_id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          remote_script="/run/gpoint-layer7-staging-env-$install_id.py"
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" scp \
+            scripts/layer7_staging_env.py scripts/write_layer7_staging_env.py \
+            "root@$GPOINT_LAYER7_STAGING_HOST:/run/"
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" install -m 0600 \
+            /run/write_layer7_staging_env.py "$remote_script"
+          trap '"$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh "root@$GPOINT_LAYER7_STAGING_HOST" rm -f "$remote_script" /run/layer7_staging_env.py /run/layer7_staging_database.py /run/eros-production-secrets.py /run/write_layer7_staging_eros_api_env.py' EXIT
+          printf '%s' "$STAGING_ENV_BUNDLE" | "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" python3 "$remote_script" \
+            --run-id "$install_id" --sha256 "$(printf '%s' "$STAGING_ENV_BUNDLE" | python3 -c 'import sys; from pathlib import Path; sys.path.insert(0,"scripts"); from layer7_staging_env import parse_staging_env; print(parse_staging_env(sys.stdin.read(48001))[1])')"
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" scp \
+            scripts/layer7_staging_database.py "root@$GPOINT_LAYER7_STAGING_HOST:/run/layer7_staging_database.py"
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" python3 /run/layer7_staging_database.py
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" scp \
+            scripts/eros-production-secrets.py scripts/write_layer7_staging_eros_api_env.py \
+            "root@$GPOINT_LAYER7_STAGING_HOST:/run/"
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" chmod 0600 /run/write_layer7_staging_eros_api_env.py
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" python3 /run/write_layer7_staging_eros_api_env.py \
+            --eros-env /opt/gpoint/env/eros.env --source-env /opt/gpoint/env/staging.env \
+            --output /opt/gpoint/env/layer7-staging-eros-api.env
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" rm -f /run/eros-production-secrets.py
+      - name: Layer7 staging preflight and isolated GPoint schema bootstrap
+        id: staging_preflight
+        env:
+          CORE_DIGEST: ${{ inputs.prepared_app_digest }}
+          IMAGE_VERSION: ${{ steps.prepared.outputs.image_version }}
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" bash -s -- \
+            "$CANDIDATE_SHA" "$IMAGE_VERSION" "$CORE_DIGEST" <<'REMOTE'
+          set -euo pipefail
+          candidate="$1" version="$2" digest="$3"
+          [[ "$candidate" =~ ^[0-9a-f]{40}$ && "$version" == "$candidate-"* ]]
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$(docker inspect --format '{{.State.Running}}' shared_postgres_1)" = true
+          test "$(docker inspect --format '{{.State.Running}}' shared_redis_1)" = true
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          config = Path('/root/.docker/config.json')
+          if config.exists():
+              try:
+                  value = json.loads(config.read_text())
+              except (OSError, ValueError):
+                  raise SystemExit('existing Docker registry configuration is unreadable')
+              if (value.get('credsStore') or 'ghcr.io' in value.get('credHelpers', {})
+                      or 'ghcr.io' in value.get('auths', {})):
+                  raise SystemExit('Layer7 already has Docker registry credentials; refusing to replace them')
+          print('LAYER7_STAGING_GHCR_AUTH_PRECHECK=PASS no_existing_credentials=true')
+          PY
+          for network in shared_internal gpoint_eros_data; do docker network inspect "$network" >/dev/null; done
+          docker network inspect gpoint_eros_api >/dev/null 2>&1 || \
+            docker network create --driver bridge gpoint_eros_api >/dev/null
+          docker network inspect gpoint_app >/dev/null 2>&1 || docker network create --driver bridge gpoint_app >/dev/null
+          postgres_user="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shared_postgres_1 | sed -n 's/^POSTGRES_USER=//p')"
+          test -n "$postgres_user"
+          database_owner="$(docker exec shared_postgres_1 psql -XqAt -U "$postgres_user" -d postgres \
+            -c "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = 'gpoint_staging'")"
+          test "$database_owner" = gpoint_staging_runtime
+          REMOTE
+      - name: Pull and verify exact private images with the read-only job token
+        env:
+          CORE_DIGEST: ${{ inputs.prepared_app_digest }}
+          MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
+          EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
+          IMAGE_VERSION: ${{ steps.prepared.outputs.image_version }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$CORE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ && "$MINIAPP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ && "$EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          cleanup_registry() {
+            "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+              "root@$GPOINT_LAYER7_STAGING_HOST" rm -rf "/run/gpoint-ghcr-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          }
+          trap cleanup_registry EXIT
+          remote_docker_config="/run/gpoint-ghcr-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" install -d -o root -g root -m 0700 "$remote_docker_config"
+          printf '%s' "$GHCR_TOKEN" | "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" \
+            "DOCKER_CONFIG='$remote_docker_config' docker login ghcr.io --username '$GITHUB_ACTOR' --password-stdin" >/dev/null
+          for spec in "ghcr.io/akhripunov/gpoint-runtime|$CORE_DIGEST" \
+                      "ghcr.io/akhripunov/gpoint-miniapp|$MINIAPP_DIGEST" \
+                      "ghcr.io/akhripunov/gpoint-eros|$EROS_DIGEST"; do
+            image="${spec%%|*}" digest="${spec#*|}"
+            "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+              "root@$GPOINT_LAYER7_STAGING_HOST" env DOCKER_CONFIG="$remote_docker_config" \
+              docker pull --platform linux/amd64 "$image:$IMAGE_VERSION" >/dev/null
+            "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+              "root@$GPOINT_LAYER7_STAGING_HOST" bash -s -- "$image" "$digest" "$IMAGE_VERSION" "$CANDIDATE_SHA" <<'REMOTE'
+          set -euo pipefail
+          image="$1" digest="$2" version="$3" sha="$4"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ && "$version" == "$sha-"* ]]
+          ref="$image@$digest"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image:$version")" = linux/amd64
+          docker image inspect --format '{{json .RepoDigests}}' "$image:$version" | grep -Fq "$ref"
+          case "$image" in
+            */gpoint-eros) test "$(docker image inspect --format '{{index .Config.Labels "com.gpoint.source.revision"}}' "$image:$version")" = "$sha" ;;
+            *) test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image:$version")" = "$sha" ;;
+          esac
+          REMOTE
+          done
+          echo 'LAYER7_STAGING_PRIVATE_GHCR_PULL=PASS packages_read=true immutable_digests=true'
+      - name: Apply isolated Prisma and SQLx migrations with recovery gates
+        env:
+          CORE_DIGEST: ${{ inputs.prepared_app_digest }}
+          EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
+          IMAGE_VERSION: ${{ steps.prepared.outputs.image_version }}
+        run: |
+          set -euo pipefail
+          remote_docker_config="/run/gpoint-ghcr-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" env DOCKER_CONFIG="$remote_docker_config" \
+            docker run --rm --network shared_internal --env-file /opt/gpoint/env/staging.env \
+            --workdir /app/packages/db "ghcr.io/akhripunov/gpoint-runtime:$IMAGE_VERSION" \
+            pnpm exec prisma migrate deploy
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" python3 - --mode prepare \
+            --candidate "$CANDIDATE_SHA" --image "ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST" \
+            --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" < scripts/eros-native-database.py
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" python3 - --mode apply \
+            --candidate "$CANDIDATE_SHA" --image "ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST" \
+            --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" < scripts/eros-native-database.py
+      - name: Deploy exact immutable images with stock Kamal 2 to Layer7 staging
+        env:
+          IMAGE_VERSION: ${{ steps.prepared.outputs.image_version }}
+          CORE_DIGEST: ${{ inputs.prepared_app_digest }}
+          MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
+          EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
+          STAGING_BOT_ENABLED: ${{ steps.staging_env.outputs.bot_enabled }}
+        run: |
+          set -euo pipefail
+          export GPOINT_SSH_KEY="$HOME/.ssh/gpoint_layer7"
+          export GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST"
+          export GPOINT_KNOWN_HOSTS_FILE="$HOME/.ssh/known_hosts"
+          kamal() { command kamal "$@"; }
+          eros_model_digest="$(python3 -c 'import json; print(json.load(open("services/eros-engine/ollama-model.lock.json"))["digest"])')"
+          [[ "$eros_model_digest" =~ ^[0-9a-f]{64}$ ]]
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" docker inspect gpoint-eros-relay-ollama >/dev/null 2>&1 || {
+              GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay kamal accessory boot ollama --hosts "$GPOINT_LAYER7_STAGING_HOST" --config-file config/deploy.layer7-staging.eros-relay.yml
+              GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay kamal accessory exec ollama ollama pull qwen3-embedding:0.6b --reuse --hosts "$GPOINT_LAYER7_STAGING_HOST" --config-file config/deploy.layer7-staging.eros-relay.yml
+            }
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" python3 - "$eros_model_digest" gpoint-eros-relay-ollama \
+            < scripts/verify-layer7-ollama.py
+          # App#run always adds --network kamal; host networking is supported
+          # by stock Accessory#run instead. Reuse the exact verified OCI digest.
+          relay_container="$("$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" "docker ps -a --filter 'name=^/gpoint-eros-relay-relay$' --filter label=service=gpoint-eros-relay-relay --format '{{.Names}}'")"
+          case "$relay_container" in
+            '') relay_action=boot ;;
+            gpoint-eros-relay-relay) relay_action=reboot ;;
+            *) echo 'staging relay accessory identity is ambiguous' >&2; exit 1 ;;
+          esac
+          if [[ "$relay_action" == boot ]]; then
+            GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-relay \
+              kamal accessory boot relay --hosts "$GPOINT_LAYER7_STAGING_HOST" --config-file config/deploy.layer7-staging.eros-relay.yml
+          else
+            GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-relay \
+              kamal accessory reboot relay --hosts "$GPOINT_LAYER7_STAGING_HOST" --config-file config/deploy.layer7-staging.eros-relay.yml
+          fi
+          # Accessory prepare creates the stock kamal bridge; redeploy skips prune.
+          GPOINT_KAMAL_EXPECTED_DIGEST="$EROS_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
+            kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles engine --config-file config/deploy.layer7-staging.eros.yml
+          # The permanent Mac SSH forward targets this private fixed port.
+          # Drain its managed API before replacing the loopback listener.
+          check_queue_empty() {
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" bash -s <<'REMOTE_QUEUE'
+          set -euo pipefail
+          postgres_user="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' shared_postgres_1 | sed -n 's/^POSTGRES_USER=//p')"
+          test -n "$postgres_user"
+          queue_jobs="$(docker exec shared_postgres_1 psql -XqAt -U "$postgres_user" -d gpoint_staging \
+            -c "SELECT count(*) FROM engine.eros_inference_jobs WHERE status IN ('PENDING','RUNNING')")"
+          test "$queue_jobs" = 0
+          echo 'LAYER7_GPOINT_QUEUE_EMPTY=PASS'
+          REMOTE_QUEUE
+          }
+          check_queue_empty
+          previous_api="$("$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" "docker ps --filter label=service=gpoint-core --filter label=role=api --filter label=destination= --format '{{.Names}}'")"
+          if [[ -n "$previous_api" ]]; then
+            [[ "$previous_api" =~ ^gpoint-core-api-[0-9a-f]{40}-[0-9]+-[0-9]+$ ]] || {
+              echo 'managed staging API identity is ambiguous or non-native' >&2
+              exit 1
+            }
+            GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
+              kamal app stop --roles api --config-file config/deploy.layer7-staging.eros-api.yml
+          fi
+          if ! check_queue_empty; then
+            if [[ -n "$previous_api" ]]; then
+              previous_version="${previous_api#gpoint-core-api-}"
+              GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
+                kamal app start --version "$previous_version" --roles api --config-file config/deploy.layer7-staging.eros-api.yml
+            fi
+            exit 1
+          fi
+          GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
+            kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file config/deploy.layer7-staging.eros-api.yml
+          for role in worker bot; do
+            if [[ "$role" == bot && "$STAGING_BOT_ENABLED" != true ]]; then
+              echo 'LAYER7_STAGING_BOT=SKIPPED no_staging_bot_token=true'
+              continue
+            fi
+            GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES="$role" \
+              kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles "$role" --config-file config/deploy.layer7-staging.yml
+          done
+          GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
+            kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.layer7-staging.miniapp.yml
+      - name: Verify runtime roles, health, Eros embeddings, and API-to-engine route
+        env:
+          IMAGE_VERSION: ${{ steps.prepared.outputs.image_version }}
+          CORE_DIGEST: ${{ inputs.prepared_app_digest }}
+          MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
+          EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
+          STAGING_BOT_ENABLED: ${{ steps.staging_env.outputs.bot_enabled }}
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" \
+            "$CORE_DIGEST" "$MINIAPP_DIGEST" "$EROS_DIGEST" "$STAGING_BOT_ENABLED" <<'REMOTE'
+          set -euo pipefail
+          sha="$1" version="$2" core_digest="$3" miniapp_digest="$4" eros_digest="$5" bot_enabled="$6"
+          [[ "$bot_enabled" == true || "$bot_enabled" == false ]]
+          for spec in "gpoint-core-api|ghcr.io/akhripunov/gpoint-runtime|$core_digest" \
+                      "gpoint-core-worker|ghcr.io/akhripunov/gpoint-runtime|$core_digest" \
+                      "gpoint-core-bot|ghcr.io/akhripunov/gpoint-runtime|$core_digest" \
+                      "gpoint-miniapp-web|ghcr.io/akhripunov/gpoint-miniapp|$miniapp_digest" \
+                      "gpoint-eros-pilot-engine|ghcr.io/akhripunov/gpoint-eros|$eros_digest" \
+                      "gpoint-eros-relay-relay|ghcr.io/akhripunov/gpoint-runtime|$core_digest"; do
+            if [[ "$bot_enabled" == false && "$spec" == gpoint-core-bot\|* ]]; then continue; fi
+            IFS='|' read -r role image digest <<< "$spec"
+            container="$role-$version"
+            if [[ "$role" == gpoint-eros-relay-relay ]]; then
+              container=gpoint-eros-relay-relay
+              test "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$container")" = host
+            fi
+            test "$(docker inspect --format '{{.State.Running}}' "$container")" = true
+            image_id="$(docker image inspect --format '{{.Id}}' "$image:$version")"
+            test "$(docker inspect --format '{{.Image}}' "$container")" = "$image_id"
+            docker image inspect --format '{{json .RepoDigests}}' "$image:$version" | grep -Fq "$image@$digest"
+            if [[ "$image" == ghcr.io/akhripunov/gpoint-eros ]]; then
+              test "$(docker inspect --format '{{index .Config.Labels "com.gpoint.source.revision"}}' "$container")" = "$sha"
+            else
+              test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$container")" = "$sha"
+            fi
+          done
+          api="gpoint-core-api-$version" engine="gpoint-eros-pilot-engine-$version"
+          curl --fail --silent --show-error --max-time 5 http://127.0.0.1:13001/health/live >/dev/null
+          python3 - "$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$api")" <<'PY'
+          import json, sys
+          bindings = json.loads(sys.argv[1])
+          if bindings.get('3000/tcp') != [{'HostIp': '127.0.0.1', 'HostPort': '13001'}]:
+              raise SystemExit('staging Worker gateway is not bound exclusively to the expected loopback port')
+          print('LAYER7_PRIVATE_WORKER_GATEWAY=PASS')
+          PY
+          docker exec "$api" node -e 'fetch("http://127.0.0.1:3000/health/live").then(r=>{if(!r.ok)process.exit(1);console.log("CORE_API_HEALTH=PASS")}).catch(()=>process.exit(1))'
+          docker exec -i "$api" node --input-type=module - <<'JS'
+          const endpoint = new URL('/healthz', process.env.EROS_SERVICE_URL ?? '');
+          if (endpoint.hostname !== 'gpoint-eros') throw new Error('Core API Eros endpoint is not staging-local');
+          const response = await fetch(endpoint, { signal: AbortSignal.timeout(5000) });
+          if (!response.ok) throw new Error('Core API cannot reach the Eros engine health endpoint');
+          console.log('CORE_API_EROS_ROUTE=PASS');
+          JS
+          python3 - "$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$api")" \
+            "$(docker inspect --format '{{json .NetworkSettings.Networks}}' shared_postgres_1)" <<'PY_CORE_DB'
+          import json, sys
+          api_networks, db_networks = map(json.loads, sys.argv[1:])
+          data = 'gpoint_eros_data'
+          alias = 'gpoint-eros-db'
+          if data in api_networks or alias not in (db_networks.get(data, {}).get('Aliases') or []):
+              raise SystemExit('Core API / Eros database network identity mismatch')
+          for network in api_networks.keys() & db_networks.keys():
+              if alias in (db_networks[network].get('Aliases') or []):
+                  raise SystemExit('Eros database alias is exposed on a Core API network')
+          print('CORE_API_EROS_ROUTE=PASS EROS_DATABASE_NETWORK_ISOLATION=PASS')
+          PY_CORE_DB
+          docker exec "$engine" curl --fail --silent --show-error http://127.0.0.1:8080/healthz >/dev/null
+          docker exec "$engine" curl --fail --silent --show-error -H 'Content-Type: application/json' \
+            -d '{"model":"qwen3-embedding:0.6b","input":"Layer7 staging memory isolation probe","dimensions":512}' \
+            http://172.31.254.1:11434/api/embed | python3 -c 'import json,sys; x=json.load(sys.stdin)["embeddings"]; assert len(x)==1 and len(x[0])==512'
+          docker exec "gpoint-miniapp-web-$version" wget --spider -q http://127.0.0.1/
+          if [[ "$bot_enabled" == true ]]; then role_count=6; else role_count=5; fi
+          echo "LAYER7_STAGING_RUNTIME_VERIFY=PASS roles=$role_count bot_enabled=$bot_enabled public_proxy=false"
+          REMOTE
+          echo "LAYER7_STAGING_DEPLOY=PASS SHA=$CANDIDATE_SHA IMAGE_VERSION=$IMAGE_VERSION" >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove temporary Kamal GHCR authorization from Layer7
+        if: always() && steps.staging_preflight.outcome == 'success'
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
+            "root@$GPOINT_LAYER7_STAGING_HOST" bash -s <<'REMOTE'
+          set -euo pipefail
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          config = Path('/root/.docker/config.json')
+          if not config.exists():
+              raise SystemExit(0)
+          try:
+              value = json.loads(config.read_text())
+          except (OSError, ValueError):
+              raise SystemExit('Docker registry config became unreadable during cleanup')
+          if 'ghcr.io' in value.get('auths', {}):
+              raise SystemExit('temporary GHCR authorization remains on Layer7')
+          print('LAYER7_STAGING_GHCR_AUTH_CLEANUP=PASS')
+          PY
+          REMOTE

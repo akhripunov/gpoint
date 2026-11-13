@@ -19,8 +19,10 @@
 
 ## Historical design (superseded; do not run)
 
-`scripts/release-gpoint.mjs` is the canonical release gate. It accepts only a
-40-character candidate commit SHA and is fail-closed by default.
+`scripts/release-gpoint.mjs` was the legacy release gate. It was **removed on
+2026-11-12** together with the legacy Prepare/Deploy workflows; the ordinary
+release path is `gpoint-native-release.yml` (Tests → Build → protected Kamal 2
+Deploy → Runtime Verify). The commands below are shown only as history.
 
 ```sh
 pnpm release:gpoint --dry-run --candidate <remote-verified-sha>
@@ -51,4 +53,3 @@ rollback are separate decisions; migrations are not automatically reversed.
 `docs/release/state/production.json` is the current adoption/release pointer.
 `docs/release/manifests/` is append-only release history. A future release must
 read the actual live runtime and DB head and block on drift from this state.
-

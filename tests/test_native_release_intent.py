@@ -196,47 +196,6 @@ def test_prepared_images_can_only_be_reused_by_exact_owner_approved_deploy():
         assert MODULE.classify_dispatch(**args) == (expected, False)
 
 
-def test_layer7_staging_is_a_separate_owner_approved_exact_sha_mode():
-    sha = "a" * 40
-    assert MODULE.classify_dispatch(
-        ref="refs/heads/main", candidate_sha=sha, github_sha=sha,
-        actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
-        approve_production=False, use_prepared_images=True, layer7_staging=True,
-        approve_layer7_staging=True,
-    ) == ("LAYER7_STAGING", False)
-
-
-def test_layer7_staging_fails_closed_for_wrong_sha_actor_or_conflicting_operation():
-    sha = "a" * 40
-    base = dict(
-        ref="refs/heads/main", candidate_sha=sha, github_sha=sha,
-        actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
-        approve_production=False, use_prepared_images=True, layer7_staging=True,
-        approve_layer7_staging=True,
-    )
-    for changes in (
-        {"candidate_sha": "b" * 40},
-        {"actor": "collaborator"},
-        {"ref": "refs/heads/feature"},
-        {"approve_layer7_staging": False},
-        {"use_prepared_images": False},
-        {"approve_production": True},
-        {"migration_rehearsal": True},
-        {"backup_maintenance": True},
-        {"rollback": True},
-    ):
-        event = {**base, **changes}
-        assert MODULE.classify_dispatch(**event) == ("INVALID_LAYER7_STAGING", False)
-
-
-def test_staging_approval_without_staging_mode_is_rejected():
-    sha = "a" * 40
-    assert MODULE.classify_dispatch(
-        ref="refs/heads/main", candidate_sha=sha, github_sha=sha,
-        actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
-        approve_production=False, use_prepared_images=True,
-        approve_layer7_staging=True,
-    ) == ("INVALID_LAYER7_STAGING", False)
 def test_agata_migration_and_unknown_schema_paths_remain_blocked_from_prisma_apply():
     for path in (
         "services/agata/migrations/versions/0013_new.py",
@@ -354,29 +313,6 @@ def test_invalid_rehearsal_dispatch_fails_closed():
         assert MODULE.classify_dispatch(**event) == ("INVALID_REHEARSAL", False)
 
 
-def test_backup_maintenance_dispatch_is_separate_exact_and_explicitly_authorized():
-    valid = MODULE.classify_dispatch(
-        ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
-        actor="akhripunov", repository_owner="akhripunov",
-        migration_rehearsal=False, backup_maintenance=True, approve_production=True,
-    )
-    assert valid == ("BACKUP_MAINTENANCE", False)
-    for changes, expected in (
-        ({"ref": "refs/heads/feature"}, "INVALID_BACKUP_MAINTENANCE"),
-        ({"candidate_sha": "b" * 40}, "INVALID_BACKUP_MAINTENANCE"),
-        ({"actor": "other"}, "INVALID_BACKUP_MAINTENANCE"),
-        ({"approve_production": False}, "INVALID_BACKUP_MAINTENANCE"),
-        ({"migration_rehearsal": True}, "INVALID_REHEARSAL"),
-    ):
-        args = dict(
-            ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
-            actor="akhripunov", repository_owner="akhripunov",
-            migration_rehearsal=False, backup_maintenance=True, approve_production=True,
-        )
-        args.update(changes)
-        assert MODULE.classify_dispatch(**args) == (expected, False)
-
-
 def test_ordinary_main_push_and_exact_sha_dispatch_remain_enabled():
     assert MODULE.classify_push(
         event_name="push", ref="refs/heads/main", changed_paths={"apps/api/src/main.ts"}
@@ -403,7 +339,7 @@ def test_eros_image_rollback_is_opt_in_only_with_the_protected_rollback_operatio
         actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
         approve_production=True, rollback=True, rollback_eros=True,
     )
-    assert valid == ("ROLLBACK", False)
+    assert valid == ("ROLLBACK", True)
     invalid = MODULE.classify_dispatch(
         ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
         actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
@@ -981,17 +917,16 @@ def test_rollback_dispatch_requires_main_exact_owner_explicit_approval_and_no_ot
     args = dict(
         ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
         actor="akhripunov", repository_owner="akhripunov",
-        migration_rehearsal=False, backup_maintenance=False,
+        migration_rehearsal=False,
         rollback=True, approve_production=True,
     )
-    assert MODULE.classify_dispatch(**args) == ("ROLLBACK", False)
+    assert MODULE.classify_dispatch(**args) == ("ROLLBACK", True)
     for changes in (
         {"ref": "refs/heads/feature"},
         {"candidate_sha": "b" * 40},
         {"actor": "other"},
         {"approve_production": False},
         {"migration_rehearsal": True},
-        {"backup_maintenance": True},
     ):
         invalid = dict(args)
         invalid.update(changes)

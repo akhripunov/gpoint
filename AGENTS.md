@@ -20,7 +20,7 @@
 ## Safety & Release Invariants
 
 - **Выбор pre-push FAST/FULL:** перед любым production-triggering push следуй FAST/FULL в `docs/release/automation.md` и запускай `scripts/classify-release-prepush.py` с проверенными production SHA, свежим `origin/main` SHA и exact candidate SHA. Классификатор блокирует недействительные SHA/ancestry; FAST-кандидат возможен только для cumulative diff, меняющего один `README.md`. Содержимое, production baseline, полный scope и разрешение OWNER всё равно проверяются отдельно. Код, тесты, инструкции (`AGENTS.md` включительно), CI/infra, миграции, security/Worker/AGATA/Eros и неизвестный или смешанный scope требуют FULL. FAST сокращает только необязательную локальную работу и никогда не пропускает release gates. Обычный push в `main` запускает production release, поэтому без достаточного разрешения push запрещён.
-- Use only the canonical release flow, exact verified SHA, applicable `EXACT_SHA` or `TASK_SCOPED_AUTO` authorization, and all fail-closed gates. A push or Prepare alone is never production authorization.
+- Use only the canonical release flow, exact verified SHA, applicable `EXACT_SHA` or `TASK_SCOPED_AUTO` authorization, and all fail-closed gates. A push or a prepared artifact alone is never production authorization.
 - Never release a dirty checkout, branch name, unverified `HEAD`, mutable image tag, or artifact without exact immutable provenance. Resolve and verify the OCI artifact digest, receipt and provenance before Apply; pin images by digest. GHCR outage, incomplete publication, tampering, or digest/label/config mismatch blocks before Apply. Never fall back to arbitrary VPS images or build replacement images on the VPS. Preserve approved rollback images and all approval, locks, backup/migration, compatibility, identity/parity, recovery, health, and other canonical gates.
 - Before an Actions dispatch, check for an existing run and do not create a duplicate. Do not cancel/rerun an active release without authority. Use only the supported CLI/API with exact workflow/SHA and supported status/log interfaces. Never use Computer Use or browser UI to manage Actions or production; if the supported path is unavailable, stop and report it.
 - The VPS is a runtime target and read-only source of installed-state evidence, not a source-editing workspace or build-artifact store. Never copy VPS source edits back. Under GPoint work, never touch MAXIBOT files, containers, database, domain, or release state.
@@ -44,13 +44,14 @@ The root is role-neutral. Initialize exactly one role with `ROLE=DEV`, `ROLE=LAB
 ## Instruction Changes — LOCAL-FIRST
 
 Keep approved instruction changes local with the code changes they govern. Publish
-them only during an explicitly authorized release preparation, before Prepare,
-or under a separate explicit OWNER authorization covering publication and any
+them only during an explicitly authorized release preparation, before the release
+push, or under a separate explicit OWNER authorization covering publication and any
 possible CI cost. Never push, open/publish a PR, merge, or dispatch/rerun Actions
 under this section alone. Preserve concurrent work, exact SHA evidence, branch
 protection, CODEOWNERS, required checks, release authorization and production
-gates. Linear mirrors are updated only through an authorized release/reporting
-flow; a local instruction edit never implies publication or Deploy permission.
+gates. The Linear AGENTS mirror is updated only by the authorized
+`sync-agents-to-linear` workflow; a local instruction edit never implies
+publication or Deploy permission.
 
 ## Task Completion
 

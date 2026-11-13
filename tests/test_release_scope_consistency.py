@@ -46,7 +46,8 @@ def candidate_paths():
 def test_every_candidate_path_is_mapped_or_explicitly_non_runtime(candidate_paths):
     unmapped = [path for path in candidate_paths
                 if not intent._component_paths(path)
-                and not intent._known_non_runtime_path(path)]
+                and not intent._known_non_runtime_path(path)
+                and path not in intent.KNOWN_RETIRED_NON_RUNTIME_FILES]
     assert not unmapped, (
         "the deploy scope planner would abort the release on these paths: "
         f"{unmapped}")
@@ -104,3 +105,79 @@ def test_accumulated_candidate_always_requires_candidate_images():
         "would fail Deploy with a missing prebuilt candidate image")
     assert "CORE" in plan["build_components"]
     assert plan["deploy_scope"] != "NONE"
+
+
+def _git(repo, *args):
+    return subprocess.check_output(
+        ["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid", *args],
+        cwd=repo, text=True).strip()
+
+
+def _scope_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "apps/api/src").mkdir(parents=True)
+    (repo / "apps/api/src/main.ts").write_text("export const v = 1;\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "baseline")
+    baseline = _git(repo, "rev-parse", "HEAD")
+    for path in ("apps/api/src/main.ts", "apps/miniapp/src/main.tsx",
+                 "services/agata/app.py", "services/eros-engine/app.py"):
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("changed\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "candidate")
+    candidate = _git(repo, "rev-parse", "HEAD")
+    repositories = {
+        "gpoint-core-api": "ghcr.io/akhripunov/gpoint-runtime",
+        "gpoint-core-worker": "ghcr.io/akhripunov/gpoint-runtime",
+        "gpoint-core-bot": "ghcr.io/akhripunov/gpoint-runtime",
+        "gpoint-agata-api": "ghcr.io/akhripunov/gpoint-agata-runtime",
+        "gpoint-agata-memory-worker": "ghcr.io/akhripunov/gpoint-agata-runtime",
+        "gpoint-miniapp-web": "ghcr.io/akhripunov/gpoint-miniapp",
+    }
+    identity = {}
+    for index, image_repo in enumerate(dict.fromkeys(repositories.values()), 1):
+        image_id = "sha256:" + str(index) * 64
+        identity[image_repo] = (image_id, image_repo + "@sha256:" + str(index) * 64)
+    inventory = {"roles": {}}
+    for role, image_repo in repositories.items():
+        version = f"{baseline}-100-1"
+        image_id, repo_digest = identity[image_repo]
+        inventory["roles"][role] = {
+            "name": f"{role}-{version}", "version": version, "source_sha": baseline,
+            "image_id": image_id, "repo_digest": repo_digest,
+        }
+    return repo, baseline, candidate, inventory
+
+
+def test_build_plan_and_live_scope_agree_on_the_same_production_baseline(tmp_path):
+    """The regression behind run 43148553035: Build and Deploy must agree.
+
+    Build derives its plan from the production component baseline, Deploy from
+    the fresh live inventory. For the same sources both must select the same
+    components, and every component Deploy will update must already be built.
+    """
+    repo, baseline, candidate, inventory = _scope_repo(tmp_path)
+    sources = {"CORE": baseline, "AGATA": baseline, "MINIAPP": baseline, "EROS": baseline}
+
+    plan = intent.classify_component_build_plan(repo, candidate, sources)
+    scope = intent.classify_component_scope(repo, candidate, inventory)
+
+    assert scope["scope"] == plan["deploy_scope"]
+    live_components = set(scope["scope"].split("+")) - {"NONE"}
+    assert live_components <= set(plan["build_components"]), (
+        "Deploy would require an image Build never produced")
+
+
+def test_bootstrap_plan_covers_any_live_scope(tmp_path):
+    repo, baseline, candidate, inventory = _scope_repo(tmp_path)
+    sources = {"CORE": baseline, "AGATA": baseline, "MINIAPP": baseline, "EROS": baseline}
+    scope = intent.classify_component_scope(repo, candidate, inventory)
+    live_components = set(scope["scope"].split("+")) - {"NONE"}
+
+    bootstrap = set(intent.classify_component_build_plan(repo, candidate, sources)["build_components"])
+    # A bootstrap build is the whole image set, so any live scope is covered.
+    assert live_components <= bootstrap

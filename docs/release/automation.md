@@ -1,5 +1,39 @@
 # Как выпускать GPoint
 
+> **2026-11-12:** обычный релиз — только `gpoint-native-release.yml`.
+> Legacy Prepare/Deploy, first-Kamal-cutover, interrupted recovery и публикация
+> релизных фактов в Linear удалены. Всё, что ниже описывает эти механизмы, —
+> исторический контекст, а не действующая процедура.
+>
+> | Workflow | Jobs | Назначение |
+> |---|---|---|
+> | `gpoint-native-release.yml` | tests → build → deploy | обычный push-релиз (ровно 3 jobs); Deploy также выполняет защищённый режим `mode=rollback` |
+> | `gpoint-operations.yml` | migration_rehearsal | dispatch-операция с `deployment: false`: свои approvals и общий lock `gpoint-production-release` |
+> | `gpoint-layer7-staging.yml` | layer7_staging | изолированный staging на self-hosted macOS, environment `layer7-staging` |
+>
+> Обычный релиз не вызывает специальные workflow (`uses:` отсутствует) и не
+> зависит от них.
+
+### Резервное копирование (не является релизным job)
+
+Ежедневные копии выполняет systemd-таймер на VPS (`gpoint-backup.timer` →
+`gpoint-scheduled-backup.py`): шифрование age, Bunny S3 `gpoint-backups`,
+read-back и isolated restore. GitHub не управляет расписанием и не зависит от
+релизов. Установка/обновление релиза backup-скриптов — отдельная защищённая
+процедура, а не job:
+
+```sh
+APPROVE_PRODUCTION=true \
+CANDIDATE_SHA=<40-char origin/main SHA> \
+GPOINT_PRODUCTION_HOST=<host> \
+bash scripts/gpoint-backup-install.sh
+```
+
+Процедура fail-closed: требует чистый checkout ровно на этом SHA, свежий
+`origin/main`, явное `APPROVE_PRODUCTION=true`, сверяет sha256 payload, ставит
+versioned release, включает таймер, запускает первый backup и проверяет
+доказательства (policy `freshness`, isolated restore из первого снимка).
+
 ## FAST/FULL: подготовка кандидата до push
 
 Этот порядок сокращает локальную подготовку, не меняя Native Release, его CI,
@@ -23,6 +57,19 @@ fetch без изменения состояния или другой объе�
 Перед началом и в конце использовать обязательные
 `pnpm repo:clean:start` / `pnpm repo:clean:end`. Эти проверки не заменяют
 проверку dirty исходной рабочей копии и не разрешают захватить чужие изменения.
+
+### Быстрый измеряемый gate перед push
+
+```sh
+pnpm prepush --production-sha <40-char production SHA>
+```
+
+Печатает `PREPUSH_MODE`, `SYNC_SECONDS`, `CLASSIFY_SECONDS`, `LOCAL_CHECKS_SECONDS`
+и `PREPUSH_STATUS`. Проверяет: актуальность `origin/main`, ancestry, чистоту
+worktree, полный `production → candidate` diff, `git diff --check`, синтаксис
+изменённых Python-файлов и YAML изменённых workflow. Тяжёлые проверки
+(pytest/pnpm/Playwright/Docker/migration rehearsal) остаются в hosted CI и
+локально не дублируются.
 
 ### 2. Подтвердить разрешение и полный состав кандидата
 
@@ -397,8 +444,9 @@ GHCR immutable digests и provenance, retained target containers, совмест
 цель отсутствует и workflow должен отказать до изменения runtime. Состояние и свежесть
 scheduled backup не являются условием обычного релиза и должны контролироваться
 отдельным мониторингом ([ME-56](https://linear.app/bestuzhev/issue/ME-56/gpoint-independent-scheduled-backup-failure-and-freshness-alert)).
-Установка/обновление timer и один первичный backup выполняются отдельно через
-`backup_maintenance` с точным main SHA и явным OWNER approval. Обязательные
+Установка/обновление timer и один первичный backup выполняются отдельной
+защищённой процедурой `scripts/gpoint-backup-install.sh` с точным main SHA и
+явным OWNER approval (`APPROVE_PRODUCTION=true`). Обязательные
 backup/restore проверки перед миграциями и опасными
 инфраструктурными операциями, offsite gate первого cutover и прочие действующие
 backup/offsite требования не меняются. Удалять recovery/legacy путь можно
@@ -414,10 +462,10 @@ recovery/transition paths. Отсутствие автоматического �
 | Путь | Статус | Замена / назначение | Test evidence | Условие безопасного удаления |
 |---|---|---|---|---|
 | `.github/workflows/gpoint-native-release.yml` | ACTIVE | Канонический Tests → Build/GHCR → protected Kamal Deploy → Runtime Verify; штатный GitHub Deployment для обычного Deploy. | `tests/test_kamal_native_automatic_release.py`, `tests/test_kamal_release_config.py`, `tests/test_native_environment_deployment.py`, `tests/test_deploy_evidence_workflow.py`. | Не удалять; заменять только отдельным OWNER-approved workflow с равными или более строгими gates и доказанной миграцией активных callers. |
-| `.github/workflows/gpoint-deploy.yml` | REQUIRED FOR EROS TRANSITION / RECOVERY | Eros Pilot, ACL, authorization reconciliation и task-scoped operations. Не является обычным Native release-путём. | `scripts/test_prepare_coalescing.py`, `scripts/release-authorization.test.mjs`, `tests/test_eros_postgres_acl_workflow.py`. | После закрытия Eros transition и перевода каждого caller на проверенную замену; сохранить recovery evidence и per-task authorization. |
-| `.github/workflows/gpoint-prepare.yml`, `.github/workflows/gpoint-recover-interrupted.yml` | REQUIRED FOR RECOVERY | Legacy exact-SHA Prepare/coalescing и metadata-only recovery без повторного Apply. | `scripts/test_prepare_coalescing.py`, `tests/test_interrupted_recovery_workflow.py`, `tests/test_native_release_intent.py`. | После подтверждения production/runtime SHA и отсутствия открытых legacy attempts; эквивалентный recovery путь должен пройти exact-SHA regression и operational acceptance. |
-| `.github/workflows/gpoint-first-kamal-cutover.yml` | REQUIRED FOR RECOVERY | Первый Compose-to-Kamal cutover и recovery. | `tests/test_kamal_cutover_owner.py`, `tests/test_recover_kamal_cutover.py`, `tests/test_kamal_native_automatic_release.py`. | Только после закрытого cutover, проверенной native runtime evidence и отсутствия активных recovery callers. |
-| `.github/workflows/gpoint-linear-reconcile.yml` | ACTIVE | Read-only reconciliation и публикация фактов после Prepare/Deploy/recovery. | `scripts/reconcile-deployment.test.mjs`, `tests/test_interrupted_recovery_workflow.py`. | Не удалять, пока Linear release queue использует этот reconciliation; замена должна сохранять проверку точных run/SHA/runtime facts. |
+| `.github/workflows/gpoint-deploy.yml` | **REMOVED 2026-11-12** | Legacy Deploy заменён `gpoint-native-release.yml`. Незавершённых legacy-попыток не осталось (все runs завершены; 5 записей `inactive` от 18–19.10 — история). | — | — |
+| `.github/workflows/gpoint-prepare.yml`, `.github/workflows/gpoint-recover-interrupted.yml` | **REMOVED 2026-11-12** | Recovery больше не требуется: Native First выполняет forward-resume повторным dispatch точного SHA (pending-миграции считаются по live-БД, Kamal сходится), а `rollback` job восстанавливает предыдущий совместимый релиз без downgrade БД. | `tests/test_native_release_intent.py`, `tests/test_native_rollback_evidence.py`, `tests/test_prisma_migration_release_plan.py`. | Новый механизм не добавлялся: существующих достаточно. |
+| `.github/workflows/gpoint-first-kamal-cutover.yml` | **REMOVED 2026-11-12** | Первый Kamal-cutover завершён (10 успешных прогонов); production с 04.11 работает на Kamal-сервисах, замена — `gpoint-native-release.yml`. | — | — |
+| `.github/workflows/gpoint-linear-reconcile.yml` | **REMOVED 2026-11-12** | Публикация релизных фактов в Linear дублировала канонический журнал. По «Правилам релизов» (стр. 101) технический журнал — GitHub Deployments; Linear хранит задачи и решения. | — | Журнал релизов больше не обновляется автоматически; статусы задач Linear ведутся вручную. |
 | `scripts/release-gpoint-vps-adapter.mjs`, `scripts/release-gpoint.mjs`, `scripts/automated-release.mjs`, `scripts/prepare-release.py` | LEGACY / REQUIRED FOR RECOVERY / UNKNOWN BY ENTRYPOINT | Старый Compose release/apply и orchestration; отдельные функции остаются в старых workflows, cutover, static exchange или recovery. Обычный выпуск заменён `gpoint-native-release.yml` + stock Kamal. | `scripts/release-gpoint.test.mjs`, `scripts/release-orchestrator.test.mjs`, `scripts/test_prepare_coalescing.py`, `tests/test_prepare_release_migration_inventory.py`. | Не удалять по названию. Сначала доказать отсутствие workflow/package/manual callers, перечислить каждую оставшуюся функцию и перевести её caller с regression и recovery acceptance. |
 | `infra/production/docker-compose*.yml`, `infra/shared/docker-compose.yml`, `infra/docker/docker-compose.yml` | LEGACY / TRANSITION / ACTIVE FOR SCOPED SERVICES | Compose-конфигурация нужна для оставшихся cutover, Eros/GSales, shared services или recovery; штатный Native app lifecycle выполняет Kamal. | `tests/test_eros_permanent_compose.py`, `tests/test_eros_vps_pilot_compose.py`, `tests/test_kamal_release_config.py`. | Удалять пофайлово после отсутствия production/manual callers, закрытого соответствующего transition и доказательства сохранения shared DB/cache, volumes, network, health и rollback. |
 | `scripts/verify-gpoint-backup-restore.sh` | REQUIRED FOR RECOVERY / CUTOVER | Защищённое одноразовое восстановление и cutover evidence; routine Bunny backup использует `gpoint-scheduled-backup.py` и `verify-gpoint-scheduled-backup-restore.sh`. | `tests/test_kamal_release_config.py`, `tests/test_gpoint_media_tree.py`, `tests/test_recover_kamal_cutover.py`. | Только после успешной production restore rehearsal через принятую замену и подтверждения, что ни один recovery workflow/caller не использует этот путь. |
