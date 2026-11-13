@@ -50,7 +50,16 @@ media_restore_dir=""
 media_backup_work=""
 restore_name="gpoint-restore-${candidate:0:12}-${run_id}-${attempt}"
 restore_container_id=""
+restore_diagnostics() {
+  [[ -n "$restore_container_id" ]] || return 0
+  echo "GPOINT_RESTORE_DIAGNOSTIC_STATE=$(docker inspect --format '{{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}' "$restore_container_id" 2>/dev/null || echo unavailable)" >&2
+  echo 'GPOINT_RESTORE_DIAGNOSTIC_LOGS_BEGIN' >&2
+  docker logs --tail 40 "$restore_container_id" 1>&2 2>&1 || true
+  echo 'GPOINT_RESTORE_DIAGNOSTIC_LOGS_END' >&2
+}
 cleanup() {
+  local status=$?
+  if [[ "$status" -ne 0 ]]; then restore_diagnostics || true; fi
   if [[ -n "$restore_container_id" ]]; then docker rm -f "$restore_container_id" >/dev/null 2>&1 || true; fi
   if [[ -n "$restore_dir" ]]; then rm -rf -- "$restore_dir"; fi
   if [[ -n "$media_restore_dir" ]]; then rm -rf -- "$media_restore_dir"; fi
@@ -60,6 +69,7 @@ cleanup() {
   if [[ -n "${plaintext_dir:-}" ]]; then rm -rf -- "$plaintext_dir"; fi
   rm -f -- "$backup_helper" "$media_tree_helper" "$backup_policy" "${BASH_SOURCE[0]}"
   rmdir "$(dirname "$backup_helper")" 2>/dev/null || true
+  exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -573,12 +583,24 @@ restore_container_id="$(docker run -d --name "$restore_name" --label "gpoint.kam
 [[ "$restore_container_id" =~ ^[0-9a-f]{64}$ ]]
 [[ "$(docker inspect --format '{{.Id}} {{.Image}} {{.HostConfig.NetworkMode}}' "$restore_container_id")" == "$restore_container_id $restore_image_id none" ]]
 
-ready=0
-for _ in $(seq 1 60); do
-  if docker exec "$restore_container_id" pg_isready -q -U postgres -d gpoint; then ready=1; break; fi
-  sleep 2
-done
-test "$ready" = 1
+# The disposable container runs the stock PostgreSQL entrypoint: initdb starts a
+# temporary server first and the final server is exec'd as PID 1 afterwards. A
+# single pg_isready can observe a server that is not the final one, so readiness
+# requires PID 1 to be postgres and a real query to succeed.
+await_restore_database() {
+  local container="$1" attempts="${2:-90}" delay="${3:-2}" ready=0 pid1
+  for _ in $(seq 1 "$attempts"); do
+    pid1="$(docker exec "$container" sh -ec 'cat /proc/1/comm' 2>/dev/null || true)"
+    if [[ "$pid1" == "postgres" ]] \
+       && docker exec "$container" psql -XqAt -v ON_ERROR_STOP=1 -U postgres -d gpoint -c 'SELECT 1' >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    sleep "$delay"
+  done
+  [[ "$ready" == "1" ]]
+}
+await_restore_database "$restore_container_id"
 # The bootstrap `postgres` role is pinned by initdb and cannot be the source
 # of REASSIGN OWNED. Create an ordinary, isolated restore administrator instead.
 docker exec "$restore_container_id" psql -Xq -v ON_ERROR_STOP=1 -U postgres -d gpoint \

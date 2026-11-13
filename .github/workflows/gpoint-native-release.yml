@@ -341,6 +341,7 @@ jobs:
           tests/test_release_scope_consistency.py
           tests/test_release_routing_matrix.py
           tests/test_backup_install_script.py
+          tests/test_backup_restore_readiness.py
           tests/test_native_release_intent.py
           tests/test_kamal_migration_parity_dependencies.py
           tests/test_native_prepared_run.py
