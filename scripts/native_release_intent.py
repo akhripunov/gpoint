@@ -331,32 +331,17 @@ def validate_prepared_image_digests(build_components: list[str],
 def classify_dispatch(*, ref: str, candidate_sha: str, github_sha: str, actor: str,
                       repository_owner: str, migration_rehearsal: bool,
                       approve_production: bool,
-                      backup_maintenance: bool = False,
                       rollback: bool = False,
                       rollback_eros: bool = False,
-                      use_prepared_images: bool = False,
-                      layer7_staging: bool = False,
-                      approve_layer7_staging: bool = False) -> tuple[str, bool]:
-    if approve_layer7_staging and not layer7_staging:
-        return "INVALID_LAYER7_STAGING", False
-    if layer7_staging:
-        exact = bool(re.fullmatch(r"[0-9a-f]{40}", candidate_sha)) and candidate_sha == github_sha
-        owner = bool(repository_owner) and actor.lower() == repository_owner.lower()
-        if (ref == "refs/heads/main" and exact and owner and approve_layer7_staging
-                and use_prepared_images and not approve_production and not migration_rehearsal
-                and not backup_maintenance and not rollback and not rollback_eros):
-            return "LAYER7_STAGING", False
-        return "INVALID_LAYER7_STAGING", False
+                      use_prepared_images: bool = False) -> tuple[str, bool]:
     if rollback_eros and not rollback:
         return "INVALID_ROLLBACK", False
     exact = bool(re.fullmatch(r"[0-9a-f]{40}", candidate_sha)) and candidate_sha == github_sha
     owner = bool(repository_owner) and actor.lower() == repository_owner.lower()
-    if rollback and (migration_rehearsal or backup_maintenance or use_prepared_images):
+    if rollback and (migration_rehearsal or use_prepared_images):
         return "INVALID_ROLLBACK", False
-    if migration_rehearsal and (backup_maintenance or use_prepared_images):
+    if migration_rehearsal and use_prepared_images:
         return "INVALID_REHEARSAL", False
-    if backup_maintenance and use_prepared_images:
-        return "INVALID_BACKUP_MAINTENANCE", False
     if rollback:
         if ref == "refs/heads/main" and exact and owner and approve_production:
             # A rollback runs inside the protected Deploy job as a mode, so the
@@ -367,10 +352,6 @@ def classify_dispatch(*, ref: str, candidate_sha: str, github_sha: str, actor: s
         if (ref == "refs/heads/main" and exact and owner and not approve_production):
             return "REHEARSAL", False
         return "INVALID_REHEARSAL", False
-    if backup_maintenance:
-        if (ref == "refs/heads/main" and exact and owner and approve_production):
-            return "BACKUP_MAINTENANCE", False
-        return "INVALID_BACKUP_MAINTENANCE", False
     if ref == "refs/heads/main" and exact and owner and approve_production:
         return "DEPLOY", True
     if ref == "refs/heads/main":
@@ -656,13 +637,10 @@ def main() -> int:
     parser.add_argument("--triggering-actor", default="")
     parser.add_argument("--repository-owner", default="")
     parser.add_argument("--migration-rehearsal", action="store_true")
-    parser.add_argument("--backup-maintenance", action="store_true")
     parser.add_argument("--rollback", action="store_true")
     parser.add_argument("--rollback-eros", action="store_true")
     parser.add_argument("--use-prepared-images", action="store_true")
     parser.add_argument("--approve-production", action="store_true")
-    parser.add_argument("--layer7-staging", action="store_true")
-    parser.add_argument("--approve-layer7-staging", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -685,12 +663,9 @@ def main() -> int:
                 actor=args.actor, repository_owner=args.repository_owner,
                 migration_rehearsal=args.migration_rehearsal,
                 approve_production=args.approve_production,
-                backup_maintenance=args.backup_maintenance,
                 rollback=args.rollback,
                 rollback_eros=args.rollback_eros,
                 use_prepared_images=args.use_prepared_images,
-                layer7_staging=args.layer7_staging,
-                approve_layer7_staging=args.approve_layer7_staging,
             )
         else:
             mode, deploy = "NO_DEPLOY", False
