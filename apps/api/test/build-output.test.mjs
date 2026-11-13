@@ -27,5 +27,7 @@ test('production API build includes the GPoint-owned Eros response policy', asyn
   const adapter = await readFile(new URL('../dist/apps/api/src/eros-adapter.js', import.meta.url), 'utf8');
   assert.match(adapter, /from ['"]\.\/eros-response-prompt\.js['"]/);
   const { GPOINT_EROS_RESPONSE_PROMPT_TRAITS } = await import(compiled.href);
-  assert.equal(GPOINT_EROS_RESPONSE_PROMPT_TRAITS.length, 1);
+  assert.deepEqual(GPOINT_EROS_RESPONSE_PROMPT_TRAITS.map(({ tag }) => tag), [
+    'gpoint_reply_language', 'gpoint_language_privacy', 'gpoint_turn_style',
+  ]);
 });
