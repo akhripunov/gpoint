@@ -459,7 +459,10 @@ def test_isolated_restore_reassignment_uses_a_non_pinned_admin_role():
     helper = (Path(__file__).resolve().parents[1] / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
     assert "--env POSTGRES_USER=postgres" in helper
     assert "CREATE ROLE gpoint_restore_admin LOGIN SUPERUSER" in helper
-    assert 'pg_isready -q -U postgres -d gpoint' in helper
+    assert 'await_restore_database "$restore_container_id"' in helper
+    assert 'cat /proc/1/comm' in helper
+    assert "-c 'SELECT 1'" in helper
+    assert 'pg_isready -q -U postgres -d gpoint' not in helper
     assert 'REASSIGN OWNED BY gpoint_restore_admin TO gpoint' in helper
 
 
