@@ -10,11 +10,15 @@ backup_helper="${6:?GPoint backup helper required}"
 age_recipient="${7:?protected age recipient required}"
 backup_policy="${9:?GPoint backup policy helper required}"
 media_tree_helper="${8:?media tree manifest helper required}"
+backup_root=/opt/gpoint/backups/scheduled
+if [[ "${10:-}" == --release-backup ]]; then
+  backup_root=/opt/gpoint/backups/release
+fi
 
 [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]
 [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
 [[ "$baseline_sha" =~ ^[0-9a-f]{64}$ ]]
-[[ "$baseline_file" == "/opt/gpoint/backups/scheduled/runs/${candidate}-${run_id}-${attempt}/baseline.txt" ]]
+[[ "$baseline_file" == "$backup_root/runs/${candidate}-${run_id}-${attempt}/baseline.txt" ]]
 [[ "$backup_helper" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/backup.py" ]]
 [[ "$media_tree_helper" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/media-tree.py" ]]
 [[ "$backup_policy" == "/run/gpoint-kamal/${candidate}-${run_id}-${attempt}/backup-policy.py" ]]
@@ -151,7 +155,7 @@ else
   # Bind a normal scheduled backup to the fresh inventory's exact API media mount.
   inventory_file="$(baseline_value INVENTORY_FILE)"
   inventory_sha="$(baseline_value INVENTORY_SHA256)"
-  [[ "$inventory_file" == "/opt/gpoint/backups/scheduled/runs/${candidate}-${run_id}-${attempt}/inventory.json" ]]
+  [[ "$inventory_file" == "$backup_root/runs/${candidate}-${run_id}-${attempt}/inventory.json" ]]
   [[ "$inventory_sha" =~ ^[0-9a-f]{64}$ ]]
   test -s "$inventory_file"
   test "$(sha256sum "$inventory_file" | awk '{print $1}')" = "$inventory_sha"
@@ -393,7 +397,7 @@ PY
   chmod 600 "$backup_file"
   test "$(sha256sum "$backup_file" | awk '{print $1}')" = "$plaintext_sha"
   encrypted_name="gpoint-scheduled-${candidate}-${run_id}-${attempt}.dump.age"
-  backup_file="/opt/gpoint/backups/scheduled/$encrypted_name"
+  backup_file="$backup_root/$encrypted_name"
   backup_work="$(mktemp -d /opt/gpoint/backups/.gpoint-age-${run_id}-${attempt}.XXXXXX)"
   chmod 700 "$backup_work"
   age --recipient "$age_recipient" -o "$backup_work/$encrypted_name" "$plaintext_dir/$(basename "${backup_facts[0]}")"
@@ -411,7 +415,7 @@ fi
 # written to persistent storage.
 if [[ "${GPOINT_USE_EXISTING_BACKUP:-0}" != "1" ]]; then
   media_encrypted_name="gpoint-scheduled-${candidate}-${run_id}-${attempt}.media.tar.age"
-  media_backup_file="/opt/gpoint/backups/scheduled/$media_encrypted_name"
+  media_backup_file="$backup_root/$media_encrypted_name"
   test ! -e "$media_backup_file" && test ! -L "$media_backup_file"
   media_backup_work="$(mktemp -d /opt/gpoint/backups/.gpoint-media-age-${run_id}-${attempt}.XXXXXX)"
   chmod 700 "$media_backup_work"
@@ -434,7 +438,7 @@ fi
 # zone. Local recovery files remain intact until the separate policy transition.
 restore_backup_file="$backup_file"
 restore_media_backup_file="$media_backup_file"
-if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" != "1" && "${GPOINT_USE_EXISTING_BACKUP:-0}" != "1" ]]; then
+if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" != "1" && "${GPOINT_USE_EXISTING_BACKUP:-0}" != "1" && "${10:-}" != --release-backup ]]; then
   bunny_remote="${GPOINT_BACKUP_BUNNY_REMOTE:-}"
   [[ "$bunny_remote" =~ ^[A-Za-z0-9_-]+:gpoint-backups$ ]]
   test -f "$rclone_config" && test ! -L "$rclone_config"
@@ -892,7 +896,7 @@ fi
 echo GPOINT_MEDIA_BACKUP=PASS
 echo GPOINT_MEDIA_ISOLATED_RESTORE=PASS
 
-evidence="/opt/gpoint/backups/scheduled/runs/${candidate}-${run_id}-${attempt}/restore.txt"
+evidence="$backup_root/runs/${candidate}-${run_id}-${attempt}/restore.txt"
 cat > "$evidence" <<EOF
 BACKUP_RESTORE_SCHEMA=gpoint-kamal-backup-restore/v1
 CANDIDATE_SHA=$candidate
