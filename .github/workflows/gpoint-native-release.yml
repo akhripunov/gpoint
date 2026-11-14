@@ -390,6 +390,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      actions: read
     outputs:
       snapshot: ${{ steps.scope.outputs.snapshot }}
       build_components: ${{ steps.scope.outputs.build_components }}
@@ -408,6 +409,21 @@ jobs:
           test "$GITHUB_ACTOR" = "${{ github.repository_owner }}"
           test "$GITHUB_TRIGGERING_ACTOR" = "$GITHUB_ACTOR"
           test "$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)" = "$GITHUB_SHA"
+          environment="repos/$GITHUB_REPOSITORY/environments/layer7-api-auto"
+          gh api "$environment" | python3 -c '
+          import json, sys
+          env = json.load(sys.stdin)
+          policy = env["deployment_branch_policy"]
+          rules = [rule["type"] for rule in env["protection_rules"]]
+          if policy != {"protected_branches": False, "custom_branch_policies": True} or rules != ["branch_policy"]:
+              raise SystemExit("Layer7 auto environment requires branch policy as its only protection rule")
+          '
+          gh api "$environment/deployment-branch-policies" | python3 -c '
+          import json, sys
+          result = json.load(sys.stdin)
+          if result["total_count"] != 1 or [(p["name"], p["type"]) for p in result["branch_policies"]] != [("main", "branch")]:
+              raise SystemExit("Layer7 auto environment must allow only the main branch")
+          '
           snapshot="$RUNNER_TEMP/layer7-build-baseline.json"
           scripts/layer7-transport.sh ssh root@95.133.236.59 python3 - collect \
             < scripts/layer7_release_scope.py > "$snapshot"

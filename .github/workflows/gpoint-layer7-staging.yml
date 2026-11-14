@@ -72,7 +72,7 @@ jobs:
        (github.event_name == 'push' && inputs.scoped_snapshot != ''))
     runs-on: [self-hosted, macOS]
     environment:
-      name: layer7-staging
+      name: ${{ github.event_name == 'push' && 'layer7-api-auto' || 'layer7-staging' }}
     concurrency:
       group: gpoint-layer7-staging
       cancel-in-progress: false
@@ -91,7 +91,6 @@ jobs:
       GPOINT_SSH_KEY: /root/.ssh/gpoint_layer7
       GPOINT_KNOWN_HOSTS_FILE: /root/.ssh/known_hosts
       KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-      STAGING_ENV_BUNDLE: ${{ secrets.GPOINT_LAYER7_STAGING_APP_ENV }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -234,6 +233,7 @@ jobs:
           LAYER7_SSH_KEY="$key" "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
             "root@$GPOINT_LAYER7_STAGING_HOST" 'test "$(id -u)" = 0'
       - name: Validate staging-only application environment without logging values
+        if: github.event_name == 'workflow_dispatch'
         id: staging_env
         env:
           STAGING_ENV_BUNDLE: ${{ secrets.GPOINT_LAYER7_STAGING_APP_ENV }}
@@ -264,7 +264,6 @@ jobs:
           SNAPSHOT: ${{ inputs.scoped_snapshot }}
           IMAGE_VERSION: ${{ inputs.scoped_image_version }}
           CORE_DIGEST: ${{ inputs.prepared_app_digest }}
-          BOT_ENABLED: ${{ steps.staging_env.outputs.bot_enabled }}
         run: |
           set -euo pipefail
           test "$GITHUB_ACTOR" = "$OWNER"
@@ -281,12 +280,8 @@ jobs:
             < scripts/layer7_release_scope.py > "$before.live"
           cmp "$before" "$before.live"
           test "$(python3 scripts/layer7_release_scope.py plan "$GITHUB_SHA" "$before" --previous "$PREVIOUS_SHA")" = '["CORE"]'
-          python3 - "$before" "$BOT_ENABLED" <<'PYTHON'
-          import json, sys
-          roles = json.load(open(sys.argv[1]))["roles"]
-          if sys.argv[2] != str("gpoint-core-bot" in roles).lower():
-              raise SystemExit("Layer7 Bot runtime differs from the protected configuration")
-          PYTHON
+          bot_enabled="$(python3 -c 'import json,sys; print(str("gpoint-core-bot" in json.load(open(sys.argv[1]))["roles"]).lower())' "$before")"
+          printf 'bot_enabled=%s\n' "$bot_enabled" >> "$GITHUB_OUTPUT"
           # The API switch uses Kamal's digest-verifying pre-app-boot hook.
           # Check for pre-existing credentials before Kamal can change them.
           scripts/layer7-transport.sh ssh "root@$GPOINT_LAYER7_STAGING_HOST" python3 - <<'PYTHON'
@@ -448,7 +443,7 @@ jobs:
           MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
           EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
           SCOPED: ${{ github.event_name == 'push' }}
-          STAGING_BOT_ENABLED: ${{ steps.staging_env.outputs.bot_enabled }}
+          STAGING_BOT_ENABLED: ${{ steps.staging_env.outputs.bot_enabled || steps.scoped.outputs.bot_enabled }}
         run: |
           set -euo pipefail
           export GPOINT_SSH_KEY="$HOME/.ssh/gpoint_layer7"
@@ -565,7 +560,7 @@ jobs:
           MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
           EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
           SCOPED: ${{ github.event_name == 'push' }}
-          STAGING_BOT_ENABLED: ${{ steps.staging_env.outputs.bot_enabled }}
+          STAGING_BOT_ENABLED: ${{ steps.staging_env.outputs.bot_enabled || steps.scoped.outputs.bot_enabled }}
         run: |
           set -euo pipefail
           engine_version="$IMAGE_VERSION"
