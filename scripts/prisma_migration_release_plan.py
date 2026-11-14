@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 from typing import Any
 
@@ -19,6 +20,30 @@ ALLOWLIST_SCHEMA = "gpoint-prisma-production-apply/v1"
 
 def sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def release_scope_migrations(repo: Path, baseline_sha: str, candidate_sha: str) -> set[str]:
+    if not re.fullmatch(r"[0-9a-f]{40}", baseline_sha or "") or not re.fullmatch(
+        r"[0-9a-f]{40}", candidate_sha or ""
+    ):
+        raise ValueError("production baseline or candidate SHA is invalid")
+    raw = subprocess.check_output(
+        ["git", "diff", "--name-status", "-z", "--no-renames",
+         f"{baseline_sha}..{candidate_sha}", "--", "packages/db/prisma/migrations"],
+        cwd=repo,
+    )
+    parts = raw.decode("utf-8").split("\x00")
+    if not parts or parts.pop() != "" or len(parts) % 2:
+        raise ValueError("production migration scope diff is malformed")
+    names = set()
+    for status, path in zip(parts[::2], parts[1::2]):
+        match = re.fullmatch(
+            r"packages/db/prisma/migrations/([0-9]{14}_[a-z0-9_]+)/migration\.sql", path
+        )
+        if status != "A" or not match:
+            raise ValueError("production migration scope contains a modified or unmapped path")
+        names.add(match.group(1))
+    return names
 
 
 def migration_inventory(directory: Path) -> list[tuple[str, str]]:
@@ -71,6 +96,7 @@ def build_release_plan(
     applied_migrations: list[str],
     applied_checksums: dict[str, str],
     allowlist: dict[str, str],
+    release_scope: set[str],
 ) -> dict[str, Any]:
     source_rows = migration_inventory(migrations_dir)
     source = dict(source_rows)
@@ -91,15 +117,12 @@ def build_release_plan(
     pending_rows = source_rows[len(applied_migrations):]
     pending: list[dict[str, str]] = []
     for name, digest in pending_rows:
+        if name not in release_scope:
+            raise ValueError(f"pending migration is outside the confirmed release scope: {name}")
         if approved.get(name) != digest:
             raise ValueError(f"pending migration is not approved with its exact checksum: {name}")
         pending.append({"name": name, "sha256": digest})
-    return {
-        "apply": bool(pending),
-        "applied": list(applied_migrations),
-        "pending": pending,
-        "source_head": source_rows[-1][0],
-    }
+    return {"apply": bool(pending), "pending": pending, "source_head": source_rows[-1][0]}
 
 
 def parse_inventory(value: str, *, label: str) -> dict[str, str] | list[str]:
@@ -124,13 +147,16 @@ def main() -> int:
     parser.add_argument("--applied-migrations", required=True)
     parser.add_argument("--applied-checksums", required=True)
     parser.add_argument("--allowlist", type=Path, required=True)
+    parser.add_argument("--baseline-sha", required=True)
+    parser.add_argument("--candidate-sha", required=True)
     args = parser.parse_args()
     try:
         migrations = parse_inventory(args.applied_migrations, label="applied migrations")
         checksums = parse_inventory(args.applied_checksums, label="applied checksums")
         allowlist = load_allowlist(args.allowlist)
-        plan = build_release_plan(args.migrations_dir, migrations, checksums, allowlist)
-    except (OSError, ValueError) as error:
+        scope = release_scope_migrations(Path.cwd(), args.baseline_sha, args.candidate_sha)
+        plan = build_release_plan(args.migrations_dir, migrations, checksums, allowlist, scope)
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"PRISMA_RELEASE_PLAN=BLOCKED reason={error}", file=sys.stderr)
         return 1
     pending_ids = ",".join(item["name"] for item in plan["pending"])

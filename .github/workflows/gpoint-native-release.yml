@@ -770,10 +770,7 @@ jobs:
       IMAGE_VERSION: ${{ needs.build.outputs.image_version }}
       GPOINT_COMMIT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
       GPOINT_APP_SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
-      GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
       KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-      GPOINT_SSH_KEY: /root/.ssh/id_ed25519
-      GPOINT_KNOWN_HOSTS_FILE: /root/.ssh/known_hosts
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -844,6 +841,7 @@ jobs:
       - name: Install verified Kamal SSH credentials
         if: needs.tests.outputs.mode != 'LAYER7_API'
         env:
+          GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
           SSH_PRIVATE_KEY: ${{ secrets.GPOINT_KAMAL_SSH_PRIVATE_KEY }}
           VERIFIED_KNOWN_HOSTS: ${{ secrets.GPOINT_KAMAL_KNOWN_HOSTS }}
         run: |
@@ -865,6 +863,11 @@ jobs:
             UserKnownHostsFile $HOME/.ssh/known_hosts
           EOF
           chmod 600 "$HOME/.ssh/config"
+          {
+            echo "GPOINT_PRODUCTION_HOST=$GPOINT_PRODUCTION_HOST"
+            echo "GPOINT_SSH_KEY=/root/.ssh/id_ed25519"
+            echo "GPOINT_KNOWN_HOSTS_FILE=/root/.ssh/known_hosts"
+          } >> "$GITHUB_ENV"
       - name: Pull and verify pinned Kamal CLI image
         if: needs.tests.outputs.mode != 'LAYER7_API'
         env:
@@ -1252,13 +1255,17 @@ jobs:
           LIVE_MIGRATIONS: ${{ steps.migration_baseline.outputs.prisma_migrations }}
           LIVE_CHECKSUMS: ${{ steps.migration_baseline.outputs.prisma_checksums }}
           BUILD_COMPONENTS: ${{ needs.build.outputs.build_components }}
+          BASELINE_SOURCE_SHA: ${{ steps.topology.outputs.GPOINT_BASELINE_ROLE_SOURCE_SHA }}
+          CANDIDATE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           plan="$(python3 scripts/prisma_migration_release_plan.py \
             --migrations-dir packages/db/prisma/migrations \
             --applied-migrations "$LIVE_MIGRATIONS" \
             --applied-checksums "$LIVE_CHECKSUMS" \
-            --allowlist packages/db/prisma/production-approved-migrations.json)"
+            --allowlist packages/db/prisma/production-approved-migrations.json \
+            --baseline-sha "$BASELINE_SOURCE_SHA" \
+            --candidate-sha "$CANDIDATE_SHA")"
           grep -qx 'PRISMA_RELEASE_PLAN=PASS' <<< "$plan"
           apply="$(sed -n 's/^apply=//p' <<< "$plan")"
           pending="$(sed -n 's/^pending=//p' <<< "$plan")"
@@ -1295,7 +1302,7 @@ jobs:
           deployment_id="${resolved#deployment_id=}"
           echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
       - name: Apply approved Prisma migrations once before Kamal
-        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode != 'rollback')
+        if: needs.tests.outputs.mode == 'DEPLOY' && (inputs.mode != 'rollback')
         id: migration_apply
         env:
           APPLY: ${{ steps.migration_plan.outputs.apply }}
@@ -1424,7 +1431,7 @@ jobs:
           echo "GPOINT_PRISMA_APPLY=PASS PENDING=$PENDING_MIGRATIONS" >> "$GITHUB_STEP_SUMMARY"
       - name: Rehearse exact Eros SQLx transition against protected backup restore
         id: eros_database
-        if: needs.tests.outputs.mode != 'LAYER7_API' && ((steps.component_plan.outputs.deploy_eros == 'true') && inputs.mode != 'rollback')
+        if: needs.tests.outputs.mode == 'DEPLOY' && ((steps.component_plan.outputs.deploy_eros == 'true') && inputs.mode != 'rollback')
         env:
           CANDIDATE_SHA: ${{ github.sha }}
           EROS_DIGEST: ${{ steps.component_plan.outputs.eros_digest }}
@@ -1480,7 +1487,7 @@ jobs:
           echo "EROS_DATABASE_LIFECYCLE=PASS IMAGE=$eros_image" >> "$GITHUB_STEP_SUMMARY"
       - name: Deploy exact immutable images with stock Kamal
         id: kamal_apply
-        if: needs.tests.outputs.mode != 'LAYER7_API' && ((success()) && inputs.mode != 'rollback')
+        if: needs.tests.outputs.mode == 'DEPLOY' && ((success()) && inputs.mode != 'rollback')
         env:
           APP_DIGEST: ${{ steps.component_plan.outputs.app_digest }}
           AGATA_DIGEST: ${{ steps.component_plan.outputs.agata_digest }}

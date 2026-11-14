@@ -265,6 +265,14 @@ EXACT_SHA = re.compile(r"^[0-9a-f]{40}$")
 EXACT_VERSION = re.compile(r"^[0-9a-f]{40}-[0-9]+-[0-9]+$")
 EXACT_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 ARTIFACT_PREPARE_MARKER = "GPOINT-ARTIFACT-PREPARE"
+ARTIFACT_PREPARE_PATHS = frozenset({
+    ".github/workflows/gpoint-native-release.yml",
+    "scripts/native_release_intent.py",
+    "scripts/prisma_migration_release_plan.py",
+    "tests/test_native_prisma_apply_boundary.py",
+    "tests/test_native_release_intent.py",
+    "tests/test_prisma_migration_release_plan.py",
+})
 LAYER7_API_MARKER = "GPOINT-LAYER7-API"
 LAYER7_API_PATHS = frozenset({
     "apps/api/src/eros-response-prompt.js",
@@ -315,7 +323,9 @@ def classify_push(*, event_name: str, ref: str,
         if ARTIFACT_PREPARE_MARKER in markers or not changed_paths <= LAYER7_API_PATHS:
             return "BLOCK"
         return "LAYER7_API"
-    if ARTIFACT_PREPARE_MARKER in markers:
+    if ARTIFACT_PREPARE_MARKER in markers or changed_paths <= ARTIFACT_PREPARE_PATHS:
+        if not changed_paths <= ARTIFACT_PREPARE_PATHS:
+            return "BLOCK"
         return "ARTIFACT_PREPARE"
     # Prisma schema changes must reach hosted Tests, which compare the full
     # migration history with schema.prisma before Build. Production Apply still
