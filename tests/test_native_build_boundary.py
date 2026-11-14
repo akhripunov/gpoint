@@ -92,6 +92,14 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
                      if step.get("name") == "Deploy exact immutable images with stock Kamal")
         self.assertIn("--version \"$IMAGE_VERSION\"", kamal["run"])
 
+    def test_every_admitted_build_selects_an_exact_image_version(self):
+        build = self.workflow["jobs"]["build"]
+        version = next(step for step in build["steps"] if step.get("id") == "image_version")
+        self.assertNotIn("if", version)
+        self.assertEqual(build["outputs"]["image_version"], "${{ steps.image_version.outputs.image_version }}")
+        self.assertEqual(self.workflow["jobs"]["layer7_deploy"]["with"]["scoped_image_version"],
+                         "${{ needs.build.outputs.image_version }}")
+
     def test_image_version_selection_step_accepts_only_matching_prepared_sha_and_run(self):
         version_step = next(step for step in self.workflow["jobs"]["build"]["steps"]
                             if step.get("id") == "image_version")
