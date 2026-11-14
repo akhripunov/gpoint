@@ -812,6 +812,7 @@ jobs:
       - uses: ./.github/actions/layer7-deploy
         if: needs.tests.outputs.mode == 'LAYER7_API'
         with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           candidate_sha: ${{ github.sha }}
           staging_image_sha: ${{ github.sha }}
           scoped_snapshot: ${{ steps.layer7_plan.outputs.snapshot }}

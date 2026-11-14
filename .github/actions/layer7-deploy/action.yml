@@ -2,7 +2,13 @@ name: Layer7 immutable deploy and runtime verify
 description: Deploy the exact prepared Core image to Layer7 with stock Kamal 2 and verify it.
 inputs:
   ssh_key:
+    required: false
+    default: ""
+  github_token:
     required: true
+  staging_env_bundle:
+    required: false
+    default: ""
   candidate_sha:
     required: true
   staging_image_sha:
@@ -170,7 +176,7 @@ runs:
       if: github.event_name == 'workflow_dispatch'
       id: staging_env
       env:
-        STAGING_ENV_BUNDLE: ${{ secrets.GPOINT_LAYER7_STAGING_APP_ENV }}
+        STAGING_ENV_BUNDLE: ${{ inputs.staging_env_bundle }}
       shell: bash
       run: |
         set -euo pipefail
@@ -232,7 +238,7 @@ runs:
     - name: Install staging secrets and provision only the empty GPoint staging database
       if: github.event_name == 'workflow_dispatch'
       env:
-        STAGING_ENV_BUNDLE: ${{ secrets.GPOINT_LAYER7_STAGING_APP_ENV }}
+        STAGING_ENV_BUNDLE: ${{ inputs.staging_env_bundle }}
       shell: bash
       run: |
         set -euo pipefail
@@ -312,7 +318,7 @@ runs:
         EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
         IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.scoped.outputs.image_version }}
         SCOPED: ${{ github.event_name == 'push' }}
-        GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GHCR_TOKEN: ${{ inputs.github_token }}
       shell: bash
       run: |
         set -euo pipefail

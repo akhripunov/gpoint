@@ -465,6 +465,7 @@ def _known_non_runtime_path(path: str) -> bool:
             or PRISMA_MIGRATION.fullmatch(path) is not None
             or path.startswith("tests/")
             or (path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml")))
+            or (path.startswith(".github/actions/") and path.endswith((".yml", ".yaml")))
             or (path.startswith(".codex/roles/") and path.endswith(".md")))
 
 

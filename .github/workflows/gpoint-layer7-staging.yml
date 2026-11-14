@@ -114,6 +114,8 @@ jobs:
           } >> "$GITHUB_ENV"
       - uses: ./.github/actions/layer7-deploy
         with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          staging_env_bundle: ${{ secrets.GPOINT_LAYER7_STAGING_APP_ENV }}
           candidate_sha: ${{ inputs.candidate_sha }}
           staging_image_sha: ${{ inputs.staging_image_sha }}
           scoped_snapshot: ${{ inputs.scoped_snapshot }}

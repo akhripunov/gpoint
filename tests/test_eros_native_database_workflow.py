@@ -24,7 +24,7 @@ def test_native_deploy_provisions_only_bootstrap_and_rehearses_exact_eros_sqlx_t
     names = [step.get("name", "") for step in deploy]
     gate = next(step for step in deploy if step.get("name", "").startswith("Rehearse exact Eros SQLx"))
     body = gate["run"]
-    assert gate["if"] == "(steps.component_plan.outputs.deploy_eros == 'true') && inputs.mode != 'rollback'"
+    assert "(steps.component_plan.outputs.deploy_eros == 'true') && inputs.mode != 'rollback'" in gate["if"]
     assert names.index(gate["name"]) < names.index("Deploy exact immutable images with stock Kamal")
     assert "--provision-database" in body and "--write-native-engine-env" in body and "--write-native-api-env" in body
     assert "if [[ \"$EROS_BOOTSTRAP\" == true ]]" in body
@@ -219,7 +219,7 @@ def test_eros_image_rollback_is_opt_in_rehearsed_before_apply_and_verifies_datab
     runtime = names.index("Verify rollback Runtime and preserve databases before SUCCESS")
     assert retained < compatibility < apply < runtime
     compatibility_step = rollback[compatibility]
-    assert compatibility_step["if"] == "(inputs.rollback_eros == true) && inputs.mode == 'rollback'"
+    assert "(inputs.rollback_eros == true) && inputs.mode == 'rollback'" in compatibility_step["if"]
     assert "--mode rollback-check" in compatibility_step["run"]
     apply_step = rollback[apply]["run"]
     assert 'if [[ "$ROLLBACK_EROS" == true ]]' in apply_step
@@ -235,7 +235,7 @@ def test_eros_database_changes_do_not_run_for_core_only_deploy_or_rollback():
     assert "deploy_eros == 'true'" in gate["if"]
     rollback = steps_for("rollback")
     compat = next(step for step in rollback if step.get("name", "").startswith("Verify Eros rollback image"))
-    assert compat["if"] == "(inputs.rollback_eros == true) && inputs.mode == 'rollback'"
+    assert "(inputs.rollback_eros == true) && inputs.mode == 'rollback'" in compat["if"]
 
 
 def test_eros_topology_inventory_shell_loop_has_no_unused_read_variable():

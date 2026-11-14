@@ -18,7 +18,7 @@ def test_approved_prisma_apply_is_inside_the_protected_deploy_before_kamal():
     assert ids.index("migration_plan") < ids.index("deployment")
     assert ids.index("deployment") < ids.index("migration_apply") < ids.index("kamal_apply")
     apply = next(step for step in steps if step.get("id") == "migration_apply")
-    assert apply["if"] == "inputs.mode != 'rollback'"
+    assert apply["if"] == "needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode != 'rollback')"
     assert 'if [[ "$APPLY" == false ]]' in apply["run"]
     assert 'echo "agata_head=$BASELINE_AGATA_HEAD"' in apply["run"]
     assert apply["env"]["BASELINE_AGATA_HEAD"] == "${{ steps.migration_baseline.outputs.agata_head }}"
@@ -29,15 +29,15 @@ def test_approved_prisma_apply_is_inside_the_protected_deploy_before_kamal():
     assert apply["env"]["APP_IMAGE"] == "ghcr.io/akhripunov/gpoint-runtime@${{ steps.component_plan.outputs.migration_app_digest }}"
     assert "apply_failed" not in apply
     kamal = next(step for step in steps if step.get("id") == "kamal_apply")
-    assert kamal["if"] == "(success()) && inputs.mode != 'rollback'"
+    assert kamal["if"] == "needs.tests.outputs.mode != 'LAYER7_API' && ((success()) && inputs.mode != 'rollback')"
     verify = next(step for step in steps if step.get("id") == "verify")
     assert "steps.migration_apply.outputs.prisma_migrations" in verify["env"]["EXPECTED_PRISMA_MIGRATIONS"]
     assert verify["env"]["BASELINE_AGATA_HEAD"] == "${{ steps.migration_baseline.outputs.agata_head }}"
     assert '"$BASELINE_AGATA_HEAD" "$EXPECTED_ROLE_IDENTITIES_B64" "$EROS_DIGEST" <<\'REMOTE\'' in verify["run"]
-    assert set(jobs) == {"tests", "build", "deploy", "layer7_scope", "layer7_deploy"}
+    assert set(jobs) == {"tests", "build", "deploy"}
     staging = yaml.safe_load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text())["jobs"]["layer7_staging"]
     assert "needs" not in staging
-    assert staging["environment"] == {"name": "${{ github.event_name == 'push' && 'layer7-api-auto' || 'layer7-staging' }}"}
+    assert staging["environment"]["name"] == "${{ github.event_name == 'workflow_dispatch' && 'layer7-staging' || 'layer7-api-auto' }}"
     assert "production" not in staging["environment"].values()
     assert "GPOINT_KAMAL_HOST" not in staging.get("env", {})
 
@@ -59,8 +59,8 @@ def test_prisma_apply_never_changes_agata_migrations_or_rolls_back_database():
 def test_prisma_migration_plan_and_apply_remain_exact_sha_and_environment_scoped():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     deploy = workflow["jobs"]["deploy"]
-    assert deploy["environment"]["name"] == "production"
-    assert deploy["concurrency"]["group"] == "gpoint-production-release"
+    assert deploy["environment"]["name"] == "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}"
+    assert "gpoint-production-release" in deploy["concurrency"]["group"]
     assert "REQUESTED_SHA" in "\n".join(step.get("run", "") for step in deploy["steps"])
     plan = next(step for step in deploy["steps"] if step.get("id") == "migration_plan")
     assert "packages/db/prisma/production-approved-migrations.json" in plan["run"]

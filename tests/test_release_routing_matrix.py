@@ -41,6 +41,14 @@ REPLACEMENTS = (
 
 
 def evaluate(expression: str, **values) -> bool:
+    defaults = {
+        "tests_mode": "DEPLOY", "tests_deploy": "true", "tests_result": "success",
+        "build_result": "success", "deploy_scope": "CORE", "event": "push",
+        "ref": "refs/heads/main", "actor": "akhripunov", "owner": "akhripunov",
+        "inputs_mode": "deploy",
+    }
+    defaults.update(values)
+    values = defaults
     source = expression
     for pattern, replacement in REPLACEMENTS:
         source = re.sub(pattern, replacement, source)
