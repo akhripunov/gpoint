@@ -575,7 +575,6 @@ jobs:
           )"
       - name: Select exact immutable image version
         id: image_version
-        if: needs.tests.outputs.mode == 'DEPLOY'
         env:
           USE_PREPARED_IMAGES: ${{ inputs.use_prepared_images }}
           PREPARED_RUN_ID: ${{ inputs.prepared_run_id }}
