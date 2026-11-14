@@ -11,6 +11,6 @@ export const GPOINT_EROS_RESPONSE_PROMPT_TRAITS = Object.freeze([
   }),
   Object.freeze({
     tag: 'gpoint_turn_style',
-    text: 'Answer the latest request first. Use the requested length and format. If the user says goodbye, respond with a short farewell without introducing another topic or asking a question. Avoid repeating earlier advice unless asked.',
+    text: 'Answer the latest request first. Use the requested length and format. When the user ends the conversation, acknowledge it with a short farewell and stop. Do not add advice, follow-up questions, or new topics unless the same message explicitly asks for a final answer. Avoid repeating earlier advice unless asked.',
   }),
 ]);
