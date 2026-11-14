@@ -1,23 +1,6 @@
 name: GPoint — Protected Layer7 staging deploy
 
 on:
-  workflow_call:
-    inputs:
-      candidate_sha:
-        required: true
-        type: string
-      staging_image_sha:
-        required: true
-        type: string
-      scoped_snapshot:
-        required: true
-        type: string
-      scoped_image_version:
-        required: true
-        type: string
-      prepared_app_digest:
-        required: true
-        type: string
   workflow_dispatch:
     inputs:
       candidate_sha:
@@ -67,15 +50,14 @@ jobs:
   layer7_staging:
     name: Protected Layer7 staging Kamal deploy and verify
     if: >-
-      github.event_name == 'workflow_call' ||
-      (github.event_name == 'workflow_dispatch' &&
-       inputs.deploy_layer7_staging == true &&
-       inputs.approve_layer7_staging == true &&
-       inputs.staging_image_sha != '')
+      github.event_name == 'workflow_dispatch' &&
+      inputs.deploy_layer7_staging == true &&
+      inputs.approve_layer7_staging == true &&
+      inputs.staging_image_sha != ''
     runs-on: ubuntu-latest
     timeout-minutes: 90
     environment:
-      name: ${{ github.event_name == 'workflow_dispatch' && 'layer7-staging' || 'layer7-api-auto' }}
+      name: layer7-staging
     concurrency:
       group: gpoint-layer7-staging
       cancel-in-progress: false
@@ -118,8 +100,6 @@ jobs:
           staging_env_bundle: ${{ secrets.GPOINT_LAYER7_STAGING_APP_ENV }}
           candidate_sha: ${{ inputs.candidate_sha }}
           staging_image_sha: ${{ inputs.staging_image_sha }}
-          scoped_snapshot: ${{ inputs.scoped_snapshot }}
-          scoped_image_version: ${{ inputs.scoped_image_version }}
           prepared_app_digest: ${{ inputs.prepared_app_digest }}
           prepared_run_id: ${{ inputs.prepared_run_id }}
           prepared_agata_digest: ${{ inputs.prepared_agata_digest }}

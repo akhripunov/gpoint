@@ -36,7 +36,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("outputs.mode == 'ARTIFACT_PREPARE'", jobs["build"]["if"])
         staging = yaml.safe_load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text())["jobs"]["layer7_staging"]
         self.assertNotIn("needs", staging)
-        self.assertEqual(staging["environment"]["name"], "${{ github.event_name == 'workflow_dispatch' && 'layer7-staging' || 'layer7-api-auto' }}")
+        self.assertEqual(staging["environment"]["name"], "layer7-staging")
         self.assertIn("inputs.deploy_layer7_staging == true", staging["if"])
         self.assertIn("inputs.approve_layer7_staging == true", staging["if"])
         self.assertNotIn("GPOINT_KAMAL_HOST", staging.get("env", {}))

@@ -777,51 +777,14 @@ jobs:
             echo "GPOINT_LAYER7_STAGING_HOST=95.133.236.59"
             echo "GPOINT_KAMAL_TARGET_HOST=95.133.236.59"
           } >> "$GITHUB_ENV"
-      - name: Read the live Layer7 baseline before any change
-        id: layer7_plan
-        if: needs.tests.outputs.mode == 'LAYER7_API'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PREVIOUS_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          test "$GITHUB_ACTOR" = "${{ github.repository_owner }}"
-          test "$GITHUB_TRIGGERING_ACTOR" = "$GITHUB_ACTOR"
-          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)" = "$GITHUB_SHA"
-          environment="repos/$GITHUB_REPOSITORY/environments/layer7-api-auto"
-          gh api "$environment" | python3 -c '
-          import json, sys
-          env = json.load(sys.stdin)
-          policy = env["deployment_branch_policy"]
-          rules = [rule["type"] for rule in env["protection_rules"]]
-          if policy != {"protected_branches": False, "custom_branch_policies": True} or rules != ["branch_policy"]:
-              raise SystemExit("Layer7 auto environment requires branch policy as its only protection rule")
-          '
-          gh api "$environment/deployment-branch-policies" | python3 -c '
-          import json, sys
-          result = json.load(sys.stdin)
-          if result["total_count"] != 1 or [(p["name"], p["type"]) for p in result["branch_policies"]] != [("main", "branch")]:
-              raise SystemExit("Layer7 auto environment must allow only the main branch")
-          '
-          snapshot="$RUNNER_TEMP/layer7-build-baseline.json"
-          scripts/layer7-transport.sh ssh root@95.133.236.59 python3 - collect \
-            < scripts/layer7_release_scope.py > "$snapshot"
-          components="$(python3 scripts/layer7_release_scope.py plan "$GITHUB_SHA" "$snapshot" --previous "$PREVIOUS_SHA")"
-          test "$components" = '["CORE"]'
-          printf 'snapshot=%s\n' "$(openssl base64 -A -in "$snapshot")" >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/layer7-deploy
         if: needs.tests.outputs.mode == 'LAYER7_API'
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           candidate_sha: ${{ github.sha }}
           staging_image_sha: ${{ github.sha }}
-          scoped_snapshot: ${{ steps.layer7_plan.outputs.snapshot }}
           scoped_image_version: ${{ needs.build.outputs.image_version }}
           prepared_app_digest: ${{ needs.build.outputs.app_digest }}
-          prepared_run_id: ${{ github.run_id }}
-          prepared_agata_digest: ""
-          prepared_miniapp_digest: ""
-          prepared_eros_digest: ""
       - name: Recheck exact SHA, current main and owner approval
         if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode != 'rollback')
         env:

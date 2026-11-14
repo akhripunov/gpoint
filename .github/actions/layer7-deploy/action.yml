@@ -1,9 +1,6 @@
 name: Layer7 immutable deploy and runtime verify
 description: Deploy the exact prepared Core image to Layer7 with stock Kamal 2 and verify it.
 inputs:
-  ssh_key:
-    required: false
-    default: ""
   github_token:
     required: true
   staging_env_bundle:
@@ -13,10 +10,8 @@ inputs:
     required: true
   staging_image_sha:
     required: true
-  scoped_snapshot:
-    required: true
   scoped_image_version:
-    required: true
+    required: false
   prepared_app_digest:
     required: true
   prepared_run_id:
@@ -203,7 +198,6 @@ runs:
         OWNER: ${{ github.repository_owner }}
         PREVIOUS_SHA: ${{ github.event.before }}
         REQUESTED_SHA: ${{ inputs.candidate_sha }}
-        SNAPSHOT: ${{ inputs.scoped_snapshot }}
         IMAGE_VERSION: ${{ inputs.scoped_image_version }}
         CORE_DIGEST: ${{ inputs.prepared_app_digest }}
       shell: bash
@@ -217,11 +211,24 @@ runs:
         [[ "$CORE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
         test "$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)" = "$GITHUB_SHA"
         git log -1 --format=%B | grep -Fx GPOINT-LAYER7-API >/dev/null
+        environment="repos/$GITHUB_REPOSITORY/environments/layer7-api-auto"
+        gh api "$environment" | python3 -c '
+        import json, sys
+        env = json.load(sys.stdin)
+        policy = env["deployment_branch_policy"]
+        rules = [rule["type"] for rule in env["protection_rules"]]
+        if policy != {"protected_branches": False, "custom_branch_policies": True} or rules != ["branch_policy"]:
+            raise SystemExit("Layer7 auto environment requires branch policy as its only protection rule")
+        '
+        gh api "$environment/deployment-branch-policies" | python3 -c '
+        import json, sys
+        result = json.load(sys.stdin)
+        if result["total_count"] != 1 or [(p["name"], p["type"]) for p in result["branch_policies"]] != [("main", "branch")]:
+            raise SystemExit("Layer7 auto environment must allow only the main branch")
+        '
         before="$RUNNER_TEMP/layer7-verified-baseline.json"
-        printf '%s' "$SNAPSHOT" | openssl base64 -d -A > "$before"
         scripts/layer7-transport.sh ssh "root@$GPOINT_LAYER7_STAGING_HOST" python3 - collect \
-          < scripts/layer7_release_scope.py > "$before.live"
-        cmp "$before" "$before.live"
+          < scripts/layer7_release_scope.py > "$before"
         test "$(python3 scripts/layer7_release_scope.py plan "$GITHUB_SHA" "$before" --previous "$PREVIOUS_SHA")" = '["CORE"]'
         bot_enabled="$(python3 -c 'import json,sys; print(str("gpoint-core-bot" in json.load(open(sys.argv[1]))["roles"]).lower())' "$before")"
         printf 'bot_enabled=%s\n' "$bot_enabled" >> "$GITHUB_OUTPUT"

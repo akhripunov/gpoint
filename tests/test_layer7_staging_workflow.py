@@ -279,7 +279,7 @@ def test_layer7_staging_is_owner_dispatched_on_trusted_runner_with_read_only_pac
     actionlint = yaml.safe_load((ROOT / ".github/actionlint.yaml").read_text())
 
     assert job["runs-on"] == "ubuntu-latest"
-    assert job["environment"]["name"] == "${{ github.event_name == 'workflow_dispatch' && 'layer7-staging' || 'layer7-api-auto' }}"
+    assert job["environment"]["name"] == "layer7-staging"
     assert job["permissions"] == {
         "contents": "read",
         "packages": "read",
