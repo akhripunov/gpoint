@@ -33,6 +33,15 @@ def test_staging_ssh_keeps_silent_transfers_alive_without_weakening_host_keys():
     assert 'infra/staging/layer7_known_hosts' in transport
 
 
+
+
+def _fake_identity(tmp_path):
+    identity = tmp_path / 'identity'
+    if not identity.exists():
+        identity.write_text('fake-key\n')
+        identity.chmod(0o600)
+    return identity
+
 def _layer7_transport_env(tmp_path, failures_wanted, remote_status, stdin_payload=None):
     """Install a fake `ssh` that fails with 255 N times, then runs the remote command."""
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -57,6 +66,7 @@ def _layer7_transport_env(tmp_path, failures_wanted, remote_status, stdin_payloa
     return state, {
         **os.environ,
         'PATH': f'{tmp_path}:{os.environ["PATH"]}',
+        'LAYER7_SSH_KEY': str(_fake_identity(tmp_path)),
         'LAYER7_TRANSPORT_ATTEMPTS': '4',
         'LAYER7_TRANSPORT_BACKOFF_SECONDS': '0',
         'GITHUB_WORKSPACE': str(ROOT),
@@ -230,6 +240,7 @@ exit 0
                             env={**os.environ, 'PREVIOUS': previous, 'RACED': raced, 'ACTION_LOG': str(log),
                                  'CALLS_FILE': str(calls_file), 'GITHUB_WORKSPACE': str(ROOT),
                                  'PATH': f'{bin_dir}:{os.environ["PATH"]}',
+                                 'LAYER7_SSH_KEY': str(_fake_identity(tmp_path)),
                                  'GPOINT_LAYER7_STAGING_HOST': '95.133.236.59'})
     assert result.returncode == expected, result.stderr
     assert (log.read_text().splitlines() if log.exists() else []) == actions
