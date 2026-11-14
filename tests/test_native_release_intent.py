@@ -71,7 +71,7 @@ def test_known_operational_or_test_only_main_push_uses_the_same_release():
         {"scripts/verify.py", "scripts/new-helper.py"},
         {".kamal/hooks/pre-app-boot", ".kamal/hooks/post-app-boot"},
         {".kamal/secrets"},
-        {".github/workflows/gpoint-native-release.yml", "tests/test_native_release_intent.py"},
+        {".github/workflows/gpoint-operations.yml", "tests/test_native_release_intent.py"},
         {"docs/release/automation.md"},
         {"systemd/gpoint-backup.timer"},
         {"tests/test_release.py", "apps/api/test/main.test.ts"},
@@ -133,7 +133,7 @@ def test_approved_prisma_migration_source_paths_enter_the_existing_protected_dep
 def test_exact_main_push_with_artifact_prepare_marker_builds_without_authorizing_deploy():
     assert MODULE.classify_push(
         event_name="push", ref="refs/heads/main",
-        changed_paths={"apps/api/src/main.ts", "packages/db/prisma/migrations/20261105100000_global_policy/migration.sql"},
+        changed_paths={"scripts/native_release_intent.py", "tests/test_native_release_intent.py"},
         commit_message="ME-36 candidate\n\nGPOINT-ARTIFACT-PREPARE",
     ) == "ARTIFACT_PREPARE"
     assert MODULE.classify_push(
@@ -144,6 +144,13 @@ def test_exact_main_push_with_artifact_prepare_marker_builds_without_authorizing
         event_name="push", ref="refs/heads/main", changed_paths={"new-root/unclassified.py"},
         commit_message="GPOINT-ARTIFACT-PREPARE",
     ) == "BLOCK"
+    for paths in ({"apps/api/src/main.ts"},
+                  {"packages/db/prisma/schema.prisma"},
+                  {"packages/db/prisma/migrations/20261105100000_global_policy/migration.sql"}):
+        assert MODULE.classify_push(
+            event_name="push", ref="refs/heads/main", changed_paths=paths,
+            commit_message="GPOINT-ARTIFACT-PREPARE",
+        ) == "BLOCK"
 
 
 def test_artifact_prepare_marker_routes_main_push_to_build_only(monkeypatch, capsys):
@@ -153,11 +160,25 @@ def test_artifact_prepare_marker_routes_main_push_to_build_only(monkeypatch, cap
         "--actor", "akhripunov", "--triggering-actor", "akhripunov",
         "--repository-owner", "akhripunov", "--commit-message", "ME-36\nGPOINT-ARTIFACT-PREPARE",
     ])
-    monkeypatch.setattr(MODULE, "changed_paths", lambda *_args, **_kwargs: {"apps/api/src/main.ts"})
+    monkeypatch.setattr(MODULE, "changed_paths", lambda *_args, **_kwargs: {"scripts/native_release_intent.py"})
     assert MODULE.main() == 0
     output = capsys.readouterr().out
     assert "mode=ARTIFACT_PREPARE" in output
     assert "deploy=false" in output
+
+
+def test_artifact_prepare_marker_in_subject_is_not_a_mode_marker():
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths={"scripts/release_helper.py"},
+        commit_message="GPOINT-ARTIFACT-PREPARE: release helper",
+    ) == "DEPLOY"
+
+
+def test_exact_release_tooling_candidate_routes_to_artifact_prepare_without_marker():
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        changed_paths=set(MODULE.ARTIFACT_PREPARE_PATHS),
+    ) == "ARTIFACT_PREPARE"
 
 
 def test_prepared_image_digest_gate_requires_exact_scope_and_immutable_digests():
