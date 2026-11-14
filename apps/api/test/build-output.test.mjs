@@ -30,4 +30,6 @@ test('production API build includes the GPoint-owned Eros response policy', asyn
   assert.deepEqual(GPOINT_EROS_RESPONSE_PROMPT_TRAITS.map(({ tag }) => tag), [
     'gpoint_reply_language', 'gpoint_language_privacy', 'gpoint_turn_style',
   ]);
+  const turnStyle = GPOINT_EROS_RESPONSE_PROMPT_TRAITS.find(({ tag }) => tag === 'gpoint_turn_style');
+  assert.match(turnStyle.text, /short farewell and stop/);
 });
