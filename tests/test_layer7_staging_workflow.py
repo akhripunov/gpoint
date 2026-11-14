@@ -263,7 +263,7 @@ def test_layer7_staging_is_owner_dispatched_on_trusted_runner_with_read_only_pac
 
     assert job["runs-on"] == ["self-hosted", "macOS"]
     assert actionlint["self-hosted-runner"]["labels"] == ["macOS"]
-    assert job["environment"]["name"] == "layer7-staging"
+    assert job["environment"]["name"] == "${{ github.event_name == 'push' && 'layer7-api-auto' || 'layer7-staging' }}"
     assert job["permissions"] == {
         "contents": "read",
         "packages": "read",
@@ -399,11 +399,11 @@ def test_layer7_staging_can_run_core_and_eros_without_a_staging_telegram_bot():
     assert "TELEGRAM_BOT_TOKEN" not in validation["env"].get("TELEGRAM_BOT_TOKEN", "")
     assert "secrets.GPOINT_LAYER7_STAGING_APP_ENV" in validation["env"]["STAGING_ENV_BUNDLE"]
     deploy = next(step for step in steps if step.get("name") == "Deploy exact immutable images with stock Kamal 2 to Layer7 staging")
-    assert deploy["env"]["STAGING_BOT_ENABLED"] == "${{ steps.staging_env.outputs.bot_enabled }}"
+    assert deploy["env"]["STAGING_BOT_ENABLED"] == "${{ steps.staging_env.outputs.bot_enabled || steps.scoped.outputs.bot_enabled }}"
     assert 'if [[ "$role" == bot && "$STAGING_BOT_ENABLED" != true ]]' in deploy["run"]
     assert 'kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles api' in deploy["run"]
     verify = next(step for step in steps if step.get("name") == "Verify runtime roles, health, Eros embeddings, and API-to-engine route")
-    assert verify["env"]["STAGING_BOT_ENABLED"] == "${{ steps.staging_env.outputs.bot_enabled }}"
+    assert verify["env"]["STAGING_BOT_ENABLED"] == "${{ steps.staging_env.outputs.bot_enabled || steps.scoped.outputs.bot_enabled }}"
     assert '[[ "$bot_enabled" == true || "$bot_enabled" == false ]]' in verify["run"]
     assert '[[ "$bot_enabled" == false && "$spec" == gpoint-core-bot\\|* ]]' in verify["run"]
     assert "STAGING_BOT_ENABLED" not in str(staging["env"])

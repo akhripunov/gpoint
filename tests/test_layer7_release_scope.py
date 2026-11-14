@@ -76,7 +76,7 @@ def test_verification_refuses_changes_to_other_roles_and_database():
         verify_runtime(before, after, candidate, candidate + "-4-1", "sha256:" + "c" * 64)
 
 
-def test_scoped_workflow_keeps_approval_and_only_mutates_api():
+def test_auto_workflow_is_branch_restricted_and_only_mutates_api():
     import yaml
 
     native = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())["jobs"]
@@ -85,7 +85,19 @@ def test_scoped_workflow_keeps_approval_and_only_mutates_api():
     caller = native["layer7_deploy"]
     assert caller["needs"] == ["tests", "layer7_scope", "build"]
     assert caller["with"]["prepared_app_digest"] == "${{ needs.build.outputs.app_digest }}"
-    assert layer7["environment"] == {"name": "layer7-staging"}
+    assert layer7["environment"]["name"] == "${{ github.event_name == 'push' && 'layer7-api-auto' || 'layer7-staging' }}"
+    scope = next(step["run"] for step in native["layer7_scope"]["steps"] if step.get("id") == "scope")
+    assert "/environments/layer7-api-auto" in scope
+    assert '"$environment/deployment-branch-policies"' in scope
+    assert '[("main", "branch")]' in scope
+    assert next(step for step in layer7["steps"] if step.get("id") == "staging_env")["if"] == "github.event_name == 'workflow_dispatch'"
+    assert "STAGING_ENV_BUNDLE" not in layer7["env"]
+    assert native["layer7_scope"]["permissions"] == {"contents": "read", "actions": "read"}
+    assert 'custom_branch_policies' in scope
+    assert 'rules != ["branch_policy"]' in scope
+    assert scope.index('gh api "$environment"') < scope.index('scripts/layer7-transport.sh ssh')
+    assert 'github.triggering_actor == github.repository_owner' in native["layer7_scope"]["if"]
+    assert all("secrets" not in str(step) for step in native["layer7_scope"]["steps"])
     assert layer7["concurrency"]["group"] == "gpoint-layer7-staging"
     assert "github.actor == github.repository_owner" in native["layer7_scope"]["if"]
     assert "github.event_name == 'push'" in native["layer7_scope"]["if"]

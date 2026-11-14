@@ -19,8 +19,11 @@ Use the owner-authorized main commit marker `GPOINT-LAYER7-API` for changes to
 the Eros response prompt and its tests. GitHub Tests run first. A trusted Mac
 runner reads the current Layer7 role versions, image identities and migration
 ledgers. The Build job publishes the Core image when the running API's prompt
-differs. The same workflow then waits for the `layer7-staging` environment
-approval. The Deploy job rechecks main and the exact live snapshot before
+differs. The same workflow deploys automatically through `layer7-api-auto`,
+an environment limited to the `main` branch. Configure it before publishing the
+workflow, with a custom deployment branch rule for `main` and no environment
+secrets. Full Layer7 deployments retain the reviewer gate in `layer7-staging`.
+The Deploy job rechecks main and the exact live snapshot before
 switching the API with Kamal. Runtime Verify checks the API and Eros route,
 and compares the identities of untouched roles and both database ledgers.
 
