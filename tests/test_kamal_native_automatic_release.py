@@ -391,7 +391,7 @@ def test_ordinary_release_success_does_not_depend_on_scheduled_backup_freshness(
     no_migration_path = migration_apply.split('if [[ "$APPLY" == false ]]', 1)[1].split("exit 0", 1)[0]
     assert "gpoint-backup-policy.py" not in no_migration_path
     assert "freshness" not in no_migration_path
-    assert "gpoint-backup-policy.py freshness" in migration_apply
+    assert 'gpoint-backup-policy.py" freshness' in migration_apply
     assert "BACKUP_OUTCOME" not in status
     assert 'steps.verify.outcome != \'success\'' in status
     assert 'DEPLOY_JOB_STATUS' not in status

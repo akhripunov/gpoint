@@ -352,7 +352,7 @@ jobs:
           tests/test_release_scope_consistency.py
           tests/test_release_routing_matrix.py
           tests/test_backup_install_script.py
-          tests/test_backup_restore_readiness.py
+          tests/test_backup_restore_readiness.py tests/test_gpoint_scheduled_backup.py
           tests/test_native_release_intent.py
           tests/test_kamal_migration_parity_dependencies.py
           tests/test_native_prepared_run.py
@@ -1353,17 +1353,22 @@ jobs:
           remote_stage_created=true
           printf '%s' "$KAMAL_REGISTRY_PASSWORD" | ssh -T "root@${GPOINT_PRODUCTION_HOST}" \
             "DOCKER_CONFIG='$stage/docker-config' docker login ghcr.io --username '$GITHUB_ACTOR' --password-stdin" >/dev/null
-          echo 'Starting the existing encrypted backup and isolated-restore service before Prisma Apply.'
-          ssh -T "root@${GPOINT_PRODUCTION_HOST}" systemctl start gpoint-backup.service
-          backup_policy="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" \
-            python3 /opt/gpoint/gpoint-backup-current/scripts/gpoint-backup-policy.py freshness \
-            --manifest /opt/gpoint/backups/scheduled/latest.json --max-age-hours 26)"
-          grep -q '^GPOINT_BACKUP_FRESHNESS=PASS ' <<< "$backup_policy"
-          backup_manifest="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" cat /opt/gpoint/backups/scheduled/latest.json)"
+          # Use the exact candidate helpers for this one release snapshot.
+          tar -C scripts -cf - gpoint-scheduled-backup.py gpoint-backup-policy.py \
+            gpoint-media-tree.py agata-production-migration.py verify-gpoint-scheduled-backup-restore.sh \
+            | ssh -T "root@${GPOINT_PRODUCTION_HOST}" "tar -xf - -C '$stage'"
+          backup_output="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" \
+            python3 "$stage/gpoint-scheduled-backup.py" --release-backup)" || {
+            printf '%s\n' "$backup_output" >&2
+            exit 1
+          }
+          backup_path="$(sed -n 's/^GPOINT_RELEASE_BACKUP_MANIFEST=//p' <<< "$backup_output")"
+          [[ "$backup_path" =~ ^/opt/gpoint/backups/release/runs/[0-9a-f]{40}-[0-9]+-[0-9]+/manifest\.json$ ]]
+          backup_manifest="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" cat "$backup_path")"
           python3 - "$BASELINE_PRISMA_HEAD" "$BASELINE_AGATA_HEAD" "$backup_manifest" <<'PY'
           import json, sys
           manifest = json.loads(sys.argv[3])
-          if manifest.get("schema") != "gpoint-scheduled-backup/v1" or manifest.get("status") != "PASS":
+          if manifest.get("schema") != "gpoint-release-backup/v1" or manifest.get("status") != "PASS":
               raise SystemExit("fresh backup manifest is invalid")
           if manifest.get("database", {}).get("prisma_head") != sys.argv[1]:
               raise SystemExit("fresh isolated restore has a different Prisma baseline")
@@ -1373,7 +1378,7 @@ jobs:
           PY
           facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$stage" "$APP_IMAGE" "$CANDIDATE_SHA" \
             "$PENDING_MIGRATIONS" "$PENDING_CHECKSUMS" "$BASELINE_PRISMA_MIGRATIONS" \
-            "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "$BASELINE_AGATA_HEAD" <<'REMOTE_APPLY'
+            "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "$BASELINE_AGATA_HEAD" "$backup_path" <<'REMOTE_APPLY'
           set -euo pipefail
           stage="$1"; app_image="$2"; candidate="$3"; pending="$4"; pending_checksums="$5"
           baseline_migrations="$6"; baseline_checksums="$7"; baseline_head="$8"; baseline_agata="$9"
@@ -1387,8 +1392,8 @@ jobs:
           test "$(docker image inspect "$app_image" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
           test "$(docker image inspect "$app_image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$candidate"
           docker image inspect "$app_image" --format '{{json .RepoDigests}}' | grep -F "$app_image" >/dev/null
-          freshness="$(python3 /opt/gpoint/gpoint-backup-current/scripts/gpoint-backup-policy.py freshness \
-            --manifest /opt/gpoint/backups/scheduled/latest.json --max-age-hours 26)"
+          freshness="$(python3 "$stage/gpoint-backup-policy.py" freshness \
+            --release-backup --manifest "${10}" --max-age-hours 26)"
           grep -q '^GPOINT_BACKUP_FRESHNESS=PASS ' <<< "$freshness"
           docker run --rm --network shared_internal --env-file /opt/gpoint/env/production.env \
             --workdir /app/packages/db "$app_image" pnpm exec prisma migrate deploy

@@ -105,12 +105,14 @@ def verify_freshness(
     *,
     max_age_hours: int = 26,
     now: datetime | None = None,
+    release_backup: bool = False,
 ) -> dict[str, Any]:
-    """Require a recent successful encrypted upload, read-back, and restore."""
+    """Verify a fresh encrypted snapshot and its isolated restore evidence."""
+    backup_root = SCHEDULED_ROOT.parent / "release" if release_backup else SCHEDULED_ROOT
     if not isinstance(max_age_hours, int) or max_age_hours < 1 or max_age_hours > 168:
         raise BackupPolicyError("backup freshness limit is invalid")
     manifest = _read_private_json(Path(path))
-    if manifest.get("schema") != SCHEMA or manifest.get("status") != "PASS":
+    if manifest.get("schema") != ("gpoint-release-backup/v1" if release_backup else SCHEMA) or manifest.get("status") != "PASS":
         raise BackupPolicyError("latest scheduled backup is not a successful supported manifest")
     try:
         completed_at = datetime.fromisoformat(manifest["completed_at"])
@@ -135,7 +137,7 @@ def verify_freshness(
         if proof.get("encrypted") is not True:
             raise BackupPolicyError(f"{component} backup encryption proof is missing")
         backup_path = Path(str(proof.get("path", "")))
-        if backup_path.parent.resolve() != SCHEDULED_ROOT.resolve():
+        if backup_path.parent.resolve() != backup_root.resolve():
             raise BackupPolicyError(f"{component} backup path is outside scheduled VPS storage")
         try:
             info = backup_path.lstat()
@@ -153,7 +155,7 @@ def verify_freshness(
         raise BackupPolicyError("isolated restore evidence is missing or malformed")
     restore_path = Path(str(restore.get("path", "")))
     try:
-        relative = restore_path.relative_to(SCHEDULED_ROOT / "runs")
+        relative = restore_path.relative_to(backup_root / "runs")
         restore_info = restore_path.lstat()
         restore_digest = hashlib.sha256(restore_path.read_bytes()).hexdigest()
     except (OSError, ValueError):
@@ -162,7 +164,8 @@ def verify_freshness(
             or restore_info.st_uid != os.geteuid() or stat.S_IMODE(restore_info.st_mode) != 0o600
             or restore_digest != restore["sha256"]):
         raise BackupPolicyError("isolated restore evidence failed its identity or checksum check")
-    verify_bunny_evidence(manifest)
+    if not release_backup:
+        verify_bunny_evidence(manifest)
     return manifest
 
 
@@ -305,13 +308,15 @@ def main() -> int:
     freshness = subparsers.add_parser("freshness")
     freshness.add_argument("--manifest", type=Path, required=True)
     freshness.add_argument("--max-age-hours", type=int, default=26)
+    freshness.add_argument("--release-backup", action="store_true")
     release_evidence = subparsers.add_parser("release-evidence")
     release_evidence.add_argument("--evidence", type=Path, required=True)
     release_evidence.add_argument("--sha256", required=True)
     args = parser.parse_args()
     try:
         if args.command == "freshness":
-            manifest = verify_freshness(args.manifest, max_age_hours=args.max_age_hours)
+            manifest = verify_freshness(args.manifest, max_age_hours=args.max_age_hours,
+                                        release_backup=args.release_backup)
             print("GPOINT_BACKUP_FRESHNESS=PASS COMPLETED_AT=" + manifest["completed_at"])
         else:
             manifest = verify_release_backup_evidence(args.evidence, expected_sha256=args.sha256)

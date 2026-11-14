@@ -82,6 +82,33 @@ def test_local_backup_freshness_requires_encrypted_checksums_and_restore_proof(t
     assert result["status"] == "PASS"
 
 
+def test_release_snapshot_verifies_local_archives_without_bunny(tmp_path, monkeypatch):
+    scheduled_manifest, _ = make_manifest(tmp_path, monkeypatch)
+    snapshot = json.loads(scheduled_manifest.read_text())
+    release_root = tmp_path / "release"
+    evidence = Path(snapshot["restore_evidence"]["path"])
+    run_dir = release_root / "runs" / evidence.parent.name
+    run_dir.mkdir(parents=True)
+    snapshot["schema"] = "gpoint-release-backup/v1"
+    snapshot.pop("bunny")
+    for section in ("database", "media", "restore_evidence"):
+        original = Path(snapshot[section]["path"])
+        destination = (run_dir if section == "restore_evidence" else release_root) / original.name
+        shutil.copy2(original, destination)
+        snapshot[section]["path"] = str(destination)
+    manifest = run_dir / "manifest.json"
+    manifest.write_text(json.dumps(snapshot))
+    manifest.chmod(0o600)
+    now = gpoint_backup_policy.datetime.fromisoformat("2026-11-01T01:00:00+00:00")
+
+    assert gpoint_backup_policy.verify_freshness(manifest, now=now, release_backup=True) == snapshot
+    with pytest.raises(gpoint_backup_policy.BackupPolicyError):
+        gpoint_backup_policy.verify_freshness(manifest, now=now)
+    Path(snapshot["restore_evidence"]["path"]).write_text("restore failed")
+    with pytest.raises(gpoint_backup_policy.BackupPolicyError, match="checksum check"):
+        gpoint_backup_policy.verify_freshness(manifest, now=now, release_backup=True)
+
+
 def test_local_backup_freshness_rejects_tampered_backup_bytes(tmp_path, monkeypatch):
     manifest, database_path = make_manifest(tmp_path, monkeypatch)
     Path(database_path).write_bytes(b"tampered")
@@ -524,7 +551,7 @@ def test_scheduled_manifest_keeps_ciphertext_sizes_separate_from_restore_sizes(t
     }
     receipt = tmp_path / "restore.txt"
     receipt.write_text("verified restore")
-    values = dict(evidence=evidence, completed_at="2026-11-01T15:00:00+00:00", candidate="d" * 40,
+    values = dict(release_backup=False, evidence=evidence, completed_at="2026-11-01T15:00:00+00:00", candidate="d" * 40,
                   run_id="42", attempt="1", evidence_path=receipt,
                   _sha256=lambda path: hashlib.sha256(path.read_bytes()).hexdigest())
     exec(compile(ast.Module(body=[node], type_ignores=[]), "manifest", "exec"), values)

@@ -23,8 +23,10 @@ def test_approved_prisma_apply_is_inside_the_protected_deploy_before_kamal():
     assert 'echo "agata_head=$BASELINE_AGATA_HEAD"' in apply["run"]
     assert apply["env"]["BASELINE_AGATA_HEAD"] == "${{ steps.migration_baseline.outputs.agata_head }}"
     assert not any("steps.migration_apply.outputs." in value for value in apply["env"].values())
-    assert "systemctl start gpoint-backup.service" in apply["run"]
-    assert "gpoint-backup-policy.py freshness" in apply["run"]
+    assert "gpoint-scheduled-backup.py" in apply["run"]
+    assert "--release-backup" in apply["run"]
+    assert "systemctl start gpoint-backup.service" not in apply["run"]
+    assert 'gpoint-backup-policy.py" freshness' in apply["run"]
     assert "prisma migrate deploy" in apply["run"]
     assert apply["env"]["APP_IMAGE"] == "ghcr.io/akhripunov/gpoint-runtime@${{ steps.component_plan.outputs.migration_app_digest }}"
     assert "apply_failed" not in apply

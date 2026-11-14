@@ -370,7 +370,7 @@ def _commit_snapshot_manifest(manifest: dict[str, object], *, bunny_remote_root:
                               candidate: str, run_id: str, attempt: str,
                               evidence_path: Path, evidence: dict[str, str], completed_at: str,
                               latest_path: Path, run_dir: Path, run_evidence_dir: Path,
-                              policy_module, publish_bunny: bool = True) -> None:
+                              policy_module, publish_bunny: bool = True, release_backup: bool = False) -> None:
     pending_manifest = SCHEDULED_ROOT / f".latest-{run_id}-{attempt}.json"
     try:
         if publish_bunny:
@@ -378,7 +378,10 @@ def _commit_snapshot_manifest(manifest: dict[str, object], *, bunny_remote_root:
                 bunny_remote_root, candidate, run_id, attempt, evidence_path, evidence,
                 completed_at)
         _atomic_manifest(pending_manifest, manifest)
-        policy_module.verify_freshness(pending_manifest, max_age_hours=26)
+        if release_backup:
+            policy_module.verify_freshness(pending_manifest, max_age_hours=26, release_backup=True)
+        else:
+            policy_module.verify_freshness(pending_manifest, max_age_hours=26)
         os.replace(pending_manifest, latest_path)
     except Exception:
         pending_manifest.unlink(missing_ok=True)
@@ -386,7 +389,8 @@ def _commit_snapshot_manifest(manifest: dict[str, object], *, bunny_remote_root:
         raise
 
 
-def run() -> None:
+def run(*, release_backup: bool = False) -> None:
+    global SCHEDULED_ROOT
     migration_rehearsal = os.environ.get("GPOINT_MIGRATION_REHEARSAL") == "1"
     if migration_rehearsal:
         if not SHA40.fullmatch(os.environ.get("GPOINT_MIGRATION_CANDIDATE_SHA", "")):
@@ -403,6 +407,10 @@ def run() -> None:
         ):
             if not re.fullmatch(r"[0-9a-f]{64}", os.environ.get(name, "")):
                 raise ScheduledBackupError("migration rehearsal checksum input is invalid")
+    if release_backup and migration_rehearsal:
+        raise ScheduledBackupError("release backup and migration rehearsal are separate operations")
+    if release_backup:
+        SCHEDULED_ROOT = BACKUP_ROOT / "release"
     lock_path = Path("/run/lock/gpoint-scheduled-backup.lock")
     lock_path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     with lock_path.open("a") as lock:
@@ -417,8 +425,10 @@ def run() -> None:
         recipient = _run(["age-keygen", "-y", str(AGE_IDENTITY)], stage="age key identity")
         if not AGE_RECIPIENT.fullmatch(recipient):
             raise ScheduledBackupError("age identity recipient is invalid")
-        evidence_path, bunny_remote_root = _backup_evidence_and_bunny_remote(
-            migration_rehearsal=migration_rehearsal)
+        evidence_path, bunny_remote_root = ("", "")
+        if not release_backup:
+            evidence_path, bunny_remote_root = _backup_evidence_and_bunny_remote(
+                migration_rehearsal=migration_rehearsal)
         if migration_rehearsal:
             # A rehearsal's source of truth is the verified encrypted backup.
             # Do not inspect the live Kamal API, PostgreSQL container, network,
@@ -456,7 +466,10 @@ def run() -> None:
             candidate, postgres_id, postgres_image, system_id, facts = _source_facts()
         run_id = str(time.time_ns())
         attempt = "1"
-        required_directories = (Path("/run/gpoint-kamal"), BACKUP_ROOT)
+        runtime_root = Path("/run/gpoint-kamal")
+        if release_backup:
+            runtime_root.mkdir(mode=0o700, exist_ok=True)
+        required_directories = (runtime_root, BACKUP_ROOT)
         if not migration_rehearsal:
             required_directories += (MEDIA_ROOT,)
         for directory in required_directories:
@@ -531,6 +544,9 @@ def run() -> None:
         command = ["bash", str(run_dir / "restore.sh"), candidate, run_id, attempt,
                    str(baseline_path), baseline_sha, str(run_dir / "backup.py"), recipient,
                    str(run_dir / "media-tree.py"), str(run_dir / "backup-policy.py")]
+        if release_backup:
+            command.append("--release-backup")
+            latest_path = run_evidence_dir / "manifest.json"
         result = None
         try:
             result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -597,7 +613,8 @@ def run() -> None:
             return
         completed_at = datetime.now(timezone.utc).isoformat()
         manifest: dict[str, object] = {
-            "schema": "gpoint-scheduled-backup/v1", "status": "PASS",
+            "schema": "gpoint-release-backup/v1" if release_backup else "gpoint-scheduled-backup/v1",
+            "status": "PASS",
             "completed_at": completed_at, "candidate_sha": candidate,
             "run_id": run_id, "attempt": attempt,
             "database": {"path": evidence["BACKUP_PATH"], "sha256": evidence["BACKUP_SHA256"],
@@ -621,8 +638,11 @@ def run() -> None:
             run_id=run_id, attempt=attempt, evidence_path=evidence_path, evidence=evidence,
             completed_at=completed_at, latest_path=latest_path, run_dir=run_dir,
             run_evidence_dir=run_evidence_dir, policy_module=policy,
-            publish_bunny=not migration_rehearsal)
+            publish_bunny=not (migration_rehearsal or release_backup), release_backup=release_backup)
         _retain_local(time.time())
+        if release_backup:
+            print("GPOINT_RELEASE_BACKUP_MANIFEST=" + str(latest_path))
+            return
         print("GPOINT_BACKUP_SCHEDULED=PASS")
         if not migration_rehearsal:
             print("GPOINT_BACKUP_BUNNY=PASS")
@@ -630,8 +650,13 @@ def run() -> None:
 
 
 def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--release-backup", action="store_true")
+    args = parser.parse_args()
     try:
-        run()
+        run(release_backup=args.release_backup)
     except ScheduledBackupError as error:
         print("GPOINT_BACKUP_SCHEDULED=BLOCKED reason=" + str(error).replace("\n", " ")[:180])
         return 1
