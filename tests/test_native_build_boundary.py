@@ -19,7 +19,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
 
     def test_pipeline_has_release_gate_and_one_isolated_rehearsal_job(self):
         jobs = self.workflow["jobs"]
-        self.assertEqual(set(jobs), {"tests", "build", "deploy"})
+        self.assertEqual(set(jobs), {"tests", "build", "deploy", "layer7_scope", "layer7_deploy"})
         rollback = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())["jobs"]["deploy"]
         self.assertIn("inputs.mode == 'rollback'", rollback["if"])
         self.assertEqual(rollback["environment"], {
@@ -30,7 +30,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertNotIn("needs", rehearsal)
         self.assertIn("github.ref == 'refs/heads/main'", rehearsal["if"])
         self.assertIn("inputs.migration_rehearsal == true", rehearsal["if"])
-        self.assertEqual(jobs["build"]["needs"], ["tests"])
+        self.assertEqual(jobs["build"]["needs"], ["tests", "layer7_scope"])
         self.assertEqual(jobs["deploy"]["needs"], ["tests", "build"])
         self.assertIn("outputs.mode == 'DEPLOY'", jobs["build"]["if"])
         self.assertIn("outputs.mode == 'ARTIFACT_PREPARE'", jobs["build"]["if"])
@@ -221,7 +221,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(go_setup["with"]["go-version"], "1.25.3")
         self.assertLess(pnpm_setup, node_setup)
         self.assertEqual(steps[pnpm_setup]["with"]["version"], "9.15.0")
-        self.assertEqual(build["needs"], ["tests"])
+        self.assertEqual(build["needs"], ["tests", "layer7_scope"])
 
     def test_build_uses_immutable_candidate_identity_and_attestation(self):
         build = self.workflow["jobs"]["build"]
@@ -261,7 +261,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
     def test_runtime_images_build_only_after_verified_component_baseline(self):
         build = self.workflow["jobs"]["build"]
         self.assertNotIn("environment", build)
-        self.assertEqual(build["needs"], ["tests"])
+        self.assertEqual(build["needs"], ["tests", "layer7_scope"])
         steps = build["steps"]
         resolver = next(i for i, step in enumerate(steps)
                         if step.get("id") == "build_scope")

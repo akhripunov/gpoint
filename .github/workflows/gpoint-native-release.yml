@@ -172,7 +172,7 @@ jobs:
         if: matrix.suite == 'release-tooling'
         run: >-
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-          .github/workflows/gpoint-native-release.yml
+          .github/workflows/gpoint-native-release.yml .github/workflows/gpoint-layer7-staging.yml
       - name: Validate pinned Kamal configs and shared proxy routing
         if: matrix.suite == 'release-tooling'
         env:
@@ -344,7 +344,7 @@ jobs:
         if: matrix.suite == 'python'
         run: >-
           unset DATABASE_URL SHADOW_DATABASE_URL; python -m pytest -q
-          tests/test_layer7_staging_workflow.py
+          tests/test_layer7_staging_workflow.py tests/test_layer7_release_scope.py
           tests/test_layer7_staging_env.py
           tests/test_native_build_boundary.py
           tests/test_native_build_scope.py
@@ -379,10 +379,50 @@ jobs:
           python tests/integration/gpoint-chat-schema-docker.py --image pgvector/pgvector:0.8.6-pg16
           python services/gsales/tests/run_postgres.py
 
+  layer7_scope:
+    name: Read Layer7 release baseline
+    needs: [tests]
+    if: >-
+      needs.tests.outputs.mode == 'LAYER7_API' && github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' && github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      snapshot: ${{ steps.scope.outputs.snapshot }}
+      build_components: ${{ steps.scope.outputs.build_components }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify owner and read live roles and database ledgers
+        id: scope
+        env:
+          PREVIOUS_SHA: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTOR" = "${{ github.repository_owner }}"
+          test "$GITHUB_TRIGGERING_ACTOR" = "$GITHUB_ACTOR"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)" = "$GITHUB_SHA"
+          snapshot="$RUNNER_TEMP/layer7-build-baseline.json"
+          scripts/layer7-transport.sh ssh root@95.133.236.59 python3 - collect \
+            < scripts/layer7_release_scope.py > "$snapshot"
+          components="$(python3 scripts/layer7_release_scope.py plan "$GITHUB_SHA" "$snapshot" --previous "$PREVIOUS_SHA")"
+          printf 'build_components=%s\n' "$components" >> "$GITHUB_OUTPUT"
+          printf 'snapshot=%s\n' "$(openssl base64 -A -in "$snapshot")" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build and publish immutable images
-    needs: [tests]
-    if: needs.tests.outputs.mode == 'DEPLOY' || needs.tests.outputs.mode == 'ARTIFACT_PREPARE'
+    needs: [tests, layer7_scope]
+    if: >-
+      !cancelled() && needs.tests.result == 'success' &&
+      ((needs.layer7_scope.result == 'skipped' &&
+        (needs.tests.outputs.mode == 'DEPLOY' || needs.tests.outputs.mode == 'ARTIFACT_PREPARE')) ||
+       (needs.layer7_scope.result == 'success' && needs.tests.outputs.mode == 'LAYER7_API'))
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -409,11 +449,17 @@ jobs:
           persist-credentials: false
       - name: Resolve exact production component build scope
         id: build_scope
-        if: needs.tests.outputs.mode == 'DEPLOY' || needs.tests.outputs.mode == 'ARTIFACT_PREPARE'
         env:
+          LAYER7_COMPONENTS: ${{ needs.layer7_scope.outputs.build_components }}
+          RELEASE_MODE: ${{ needs.tests.outputs.mode }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          if [[ "$RELEASE_MODE" == LAYER7_API ]]; then
+            [[ "$LAYER7_COMPONENTS" == '["CORE"]' || "$LAYER7_COMPONENTS" == '[]' ]]
+            printf 'build_components=%s\n' "$LAYER7_COMPONENTS" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           python3 scripts/resolve_native_build_scope.py \
             --candidate-sha "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY" \
             | tee "$RUNNER_TEMP/gpoint-build-scope.json"
@@ -716,6 +762,26 @@ jobs:
             [[ "$image_bytes" =~ ^[0-9]+$ ]]
             echo "${role}_image_bytes=$image_bytes" >> "$GITHUB_OUTPUT"
           done
+
+  layer7_deploy:
+    name: Deploy verified API to Layer7
+    needs: [tests, layer7_scope, build]
+    if: >-
+      needs.tests.outputs.mode == 'LAYER7_API' &&
+      needs.layer7_scope.outputs.build_components == '["CORE"]' &&
+      needs.build.outputs.app_digest != ''
+    permissions:
+      contents: read
+      packages: read
+      actions: read
+      deployments: write
+    uses: ./.github/workflows/gpoint-layer7-staging.yml
+    with:
+      candidate_sha: ${{ github.sha }}
+      staging_image_sha: ${{ github.sha }}
+      scoped_snapshot: ${{ needs.layer7_scope.outputs.snapshot }}
+      scoped_image_version: ${{ needs.build.outputs.image_version }}
+      prepared_app_digest: ${{ needs.build.outputs.app_digest }}
 
   deploy:
     name: Kamal production Deploy and Verify

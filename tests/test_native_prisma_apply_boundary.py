@@ -34,7 +34,7 @@ def test_approved_prisma_apply_is_inside_the_protected_deploy_before_kamal():
     assert "steps.migration_apply.outputs.prisma_migrations" in verify["env"]["EXPECTED_PRISMA_MIGRATIONS"]
     assert verify["env"]["BASELINE_AGATA_HEAD"] == "${{ steps.migration_baseline.outputs.agata_head }}"
     assert '"$BASELINE_AGATA_HEAD" "$EXPECTED_ROLE_IDENTITIES_B64" "$EROS_DIGEST" <<\'REMOTE\'' in verify["run"]
-    assert set(jobs) == {"tests", "build", "deploy"}
+    assert set(jobs) == {"tests", "build", "deploy", "layer7_scope", "layer7_deploy"}
     staging = yaml.safe_load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text())["jobs"]["layer7_staging"]
     assert "needs" not in staging
     assert staging["environment"] == {"name": "layer7-staging"}
