@@ -682,8 +682,7 @@ def test_pinned_setup_go_uses_official_digest_pinned_tool_cache_seed():
     seed = steps[seed_index]
     setup = steps[setup_index]
     assert seed_index < setup_index
-    assert "if" not in seed
-    assert "if" not in setup
+    assert seed["if"] == setup["if"] == "matrix.suite == 'release-tooling'"
     assert "api.github.com/repos/actions/go-versions/releases/assets/303957986" in seed["run"]
     assert "Accept: application/octet-stream" in seed["run"]
     assert "1b6c5c84f587ab036ca904638a39cf4bd272d1e8d439eb9c8bc60f91793e0765" in seed["run"]

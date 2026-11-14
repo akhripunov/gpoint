@@ -145,30 +145,36 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("--commit-message", intent["run"])
         self.assertIn("ARTIFACT_PREPARE", self.workflow["jobs"]["build"]["if"])
 
-    def test_single_tests_job_preserves_all_suites_and_shared_fail_closed_outputs(self):
+    def test_parallel_tests_preserve_all_suites_and_shared_fail_closed_outputs(self):
         tests = self.workflow["jobs"]["tests"]
-        self.assertNotIn("strategy", tests)
+        self.assertEqual(tests["strategy"], {
+            "fail-fast": False,
+            "matrix": {"suite": ["workspace", "python", "release-tooling", "eros"]},
+        })
+        self.assertEqual(tests["runs-on"], "ubuntu-latest")
         intent = next(step for step in tests["steps"] if step.get("id") == "intent")
         self.assertNotIn("if", intent)
         self.assertEqual(tests["outputs"], {
             "mode": "${{ steps.intent.outputs.mode }}",
             "deploy": "${{ steps.intent.outputs.deploy }}",
         })
-        names = [step.get("name") for step in tests["steps"]]
-        for required in ("Validate pinned Kamal configs and shared proxy routing",
-                         "Build and typecheck workspace",
-                         "Run workflow, Native First and Kamal boundary tests"):
-            self.assertIn(required, names)
+        required_steps = {
+            "Validate pinned Kamal configs and shared proxy routing": "release-tooling",
+            "Build and typecheck workspace": "workspace",
+            "Run Mini App end-to-end tests": "workspace",
+            "Run workflow, Native First and Kamal boundary tests": "python",
+            "Run isolated PostgreSQL 16 migration and integration suites": "python",
+            "Run stock Eros SQLx and synthetic conversation E2E": "eros",
+        }
+        steps = {step.get("name"): step for step in tests["steps"]}
+        for name, suite in required_steps.items():
+            self.assertIn(f"matrix.suite == '{suite}'", steps[name]["if"])
         eros = next(step for step in tests["steps"] if step.get("id") == "eros_test_image")
         self.assertIn("steps.surface.outputs.full_ci == 'true'", eros["if"])
-        python = [step for step in tests["steps"]
-                  if step.get("name") in {"Run workflow, Native First and Kamal boundary tests",
-                                           "Run isolated PostgreSQL 16 migration and integration suites"}]
-        self.assertTrue(python)
+        python = [steps[name] for name, suite in required_steps.items() if suite == "python"]
         for step in python:
             self.assertIn("unset DATABASE_URL SHADOW_DATABASE_URL", step["run"])
-        for step in tests["steps"]:
-            self.assertNotIn("matrix.suite", str(step.get("if", "")))
+        self.assertIn("tests/test_layer7_mac_free_ssh.py", python[0]["run"])
 
     def test_main_push_runs_ci_build_and_kamal_production_jobs(self):
         triggers = self.workflow.get("on", self.workflow.get(True))
