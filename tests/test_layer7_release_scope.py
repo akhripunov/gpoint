@@ -82,28 +82,30 @@ def test_auto_workflow_is_branch_restricted_and_only_mutates_api():
     native = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())["jobs"]
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text())
     layer7 = workflow["jobs"]["layer7_staging"]
-    caller = native["layer7_deploy"]
-    assert caller["needs"] == ["tests", "layer7_scope", "build"]
-    assert caller["with"]["prepared_app_digest"] == "${{ needs.build.outputs.app_digest }}"
-    assert layer7["environment"]["name"] == "${{ github.event_name == 'push' && 'layer7-api-auto' || 'layer7-staging' }}"
-    scope = next(step["run"] for step in native["layer7_scope"]["steps"] if step.get("id") == "scope")
+    deploy = native["deploy"]
+    action = next(step for step in deploy["steps"]
+                  if step.get("uses") == "./.github/actions/layer7-deploy")
+    assert action["with"]["prepared_app_digest"] == "${{ needs.build.outputs.app_digest }}"
+    assert native["build"]["needs"] == ["tests"]
+    assert layer7["environment"]["name"] == "layer7-staging"
+    assert "workflow_call" not in workflow[True]
+    assert "STAGING_ENV_BUNDLE" not in layer7["env"]
+    assert layer7["concurrency"]["group"] == "gpoint-layer7-staging"
+    assert "github.triggering_actor == github.repository_owner" in deploy["if"]
+    assert "github.event_name == 'push'" in deploy["if"]
+    steps = yaml.safe_load((ROOT / ".github/actions/layer7-deploy/action.yml").read_text())["runs"]["steps"]
+    preflight = next(step for step in steps if step.get("id") == "scoped")
+    assert preflight["if"] == "github.event_name == 'push'"
+    scope = preflight["run"]
     assert "/environments/layer7-api-auto" in scope
     assert '"$environment/deployment-branch-policies"' in scope
     assert '[("main", "branch")]' in scope
-    assert next(step for step in layer7["steps"] if step.get("id") == "staging_env")["if"] == "github.event_name == 'workflow_dispatch'"
-    assert "STAGING_ENV_BUNDLE" not in layer7["env"]
-    assert native["layer7_scope"]["permissions"] == {"contents": "read", "actions": "read"}
-    assert 'custom_branch_policies' in scope
+    assert "custom_branch_policies" in scope
     assert 'rules != ["branch_policy"]' in scope
-    assert scope.index('gh api "$environment"') < scope.index('scripts/layer7-transport.sh ssh')
-    assert 'github.triggering_actor == github.repository_owner' in native["layer7_scope"]["if"]
-    assert all("secrets" not in str(step) for step in native["layer7_scope"]["steps"])
-    assert layer7["concurrency"]["group"] == "gpoint-layer7-staging"
-    assert "github.actor == github.repository_owner" in native["layer7_scope"]["if"]
-    assert "github.event_name == 'push'" in native["layer7_scope"]["if"]
-    steps = layer7["steps"]
-    preflight = next(step for step in steps if step.get("id") == "scoped")
-    assert 'cmp "$before" "$before.live"' in preflight["run"]
+    assert scope.index('gh api "$environment"') < scope.index("scripts/layer7-transport.sh ssh")
+    assert scope.count("python3 - collect") == 1
+    assert "python3 scripts/layer7_release_scope.py plan" in scope
+    assert all("python3 - collect" not in step.get("run", "") for step in deploy["steps"])
     for title in ("Apply isolated Prisma and SQLx migrations with recovery gates",
                   "Install staging secrets and provision only the empty GPoint staging database"):
         assert next(step for step in steps if step.get("name") == title)["if"] == "github.event_name == 'workflow_dispatch'"
@@ -126,8 +128,8 @@ def test_failed_kamal_switch_restores_only_verified_previous_api(tmp_path, verif
     import os
     import yaml
 
-    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text())
-    step = next(step for step in workflow["jobs"]["layer7_staging"]["steps"]
+    action = yaml.safe_load((ROOT / ".github/actions/layer7-deploy/action.yml").read_text())
+    step = next(step for step in action["runs"]["steps"]
                 if step.get("name", "").startswith("Deploy exact immutable"))
     body = step["run"]
     recovery = body[body.index('if ! GPOINT_KAMAL_EXPECTED_DIGEST='):body.rindex('if [[ "$SCOPED" != true ]]')]

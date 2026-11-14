@@ -79,7 +79,7 @@ jobs:
     permissions:
       contents: read
       deployments: read
-    # Both matrix legs run the same fail-closed intent step with identical event inputs.
+    # All suites compute identical intent outputs from the same event and checkout.
     outputs:
       mode: ${{ steps.intent.outputs.mode }}
       deploy: ${{ steps.intent.outputs.deploy }}
@@ -345,7 +345,7 @@ jobs:
         run: >-
           unset DATABASE_URL SHADOW_DATABASE_URL; python -m pytest -q
           tests/test_layer7_staging_workflow.py tests/test_layer7_release_scope.py
-          tests/test_layer7_staging_env.py
+          tests/test_layer7_staging_env.py tests/test_layer7_mac_free_ssh.py
           tests/test_native_build_boundary.py
           tests/test_native_build_scope.py
           tests/test_prepush_runner.py
@@ -379,66 +379,14 @@ jobs:
           python tests/integration/gpoint-chat-schema-docker.py --image pgvector/pgvector:0.8.6-pg16
           python services/gsales/tests/run_postgres.py
 
-  layer7_scope:
-    name: Read Layer7 release baseline
-    needs: [tests]
-    if: >-
-      needs.tests.outputs.mode == 'LAYER7_API' && github.event_name == 'push' &&
-      github.ref == 'refs/heads/main' && github.actor == github.repository_owner &&
-      github.triggering_actor == github.repository_owner
-    runs-on: [self-hosted, macOS]
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      actions: read
-    outputs:
-      snapshot: ${{ steps.scope.outputs.snapshot }}
-      build_components: ${{ steps.scope.outputs.build_components }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Verify owner and read live roles and database ledgers
-        id: scope
-        env:
-          PREVIOUS_SHA: ${{ github.event.before }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          test "$GITHUB_ACTOR" = "${{ github.repository_owner }}"
-          test "$GITHUB_TRIGGERING_ACTOR" = "$GITHUB_ACTOR"
-          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)" = "$GITHUB_SHA"
-          environment="repos/$GITHUB_REPOSITORY/environments/layer7-api-auto"
-          gh api "$environment" | python3 -c '
-          import json, sys
-          env = json.load(sys.stdin)
-          policy = env["deployment_branch_policy"]
-          rules = [rule["type"] for rule in env["protection_rules"]]
-          if policy != {"protected_branches": False, "custom_branch_policies": True} or rules != ["branch_policy"]:
-              raise SystemExit("Layer7 auto environment requires branch policy as its only protection rule")
-          '
-          gh api "$environment/deployment-branch-policies" | python3 -c '
-          import json, sys
-          result = json.load(sys.stdin)
-          if result["total_count"] != 1 or [(p["name"], p["type"]) for p in result["branch_policies"]] != [("main", "branch")]:
-              raise SystemExit("Layer7 auto environment must allow only the main branch")
-          '
-          snapshot="$RUNNER_TEMP/layer7-build-baseline.json"
-          scripts/layer7-transport.sh ssh root@95.133.236.59 python3 - collect \
-            < scripts/layer7_release_scope.py > "$snapshot"
-          components="$(python3 scripts/layer7_release_scope.py plan "$GITHUB_SHA" "$snapshot" --previous "$PREVIOUS_SHA")"
-          printf 'build_components=%s\n' "$components" >> "$GITHUB_OUTPUT"
-          printf 'snapshot=%s\n' "$(openssl base64 -A -in "$snapshot")" >> "$GITHUB_OUTPUT"
-
   build:
     name: Build and publish immutable images
-    needs: [tests, layer7_scope]
+    needs: [tests]
     if: >-
       !cancelled() && needs.tests.result == 'success' &&
-      ((needs.layer7_scope.result == 'skipped' &&
-        (needs.tests.outputs.mode == 'DEPLOY' || needs.tests.outputs.mode == 'ARTIFACT_PREPARE')) ||
-       (needs.layer7_scope.result == 'success' && needs.tests.outputs.mode == 'LAYER7_API'))
+      (needs.tests.outputs.mode == 'DEPLOY' ||
+       needs.tests.outputs.mode == 'ARTIFACT_PREPARE' ||
+       needs.tests.outputs.mode == 'LAYER7_API')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -466,14 +414,15 @@ jobs:
       - name: Resolve exact production component build scope
         id: build_scope
         env:
-          LAYER7_COMPONENTS: ${{ needs.layer7_scope.outputs.build_components }}
           RELEASE_MODE: ${{ needs.tests.outputs.mode }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [[ "$RELEASE_MODE" == LAYER7_API ]]; then
-            [[ "$LAYER7_COMPONENTS" == '["CORE"]' || "$LAYER7_COMPONENTS" == '[]' ]]
-            printf 'build_components=%s\n' "$LAYER7_COMPONENTS" >> "$GITHUB_OUTPUT"
+            # Narrow Layer7 API releases build only Core before the live state is
+            # read. Deploy re-reads the VPS and refuses anything wider.
+            printf 'build_components=["CORE"]\n' >> "$GITHUB_OUTPUT"
+            printf 'deploy_scope=CORE\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           python3 scripts/resolve_native_build_scope.py \
@@ -778,26 +727,6 @@ jobs:
             echo "${role}_image_bytes=$image_bytes" >> "$GITHUB_OUTPUT"
           done
 
-  layer7_deploy:
-    name: Deploy verified API to Layer7
-    needs: [tests, layer7_scope, build]
-    if: >-
-      needs.tests.outputs.mode == 'LAYER7_API' &&
-      needs.layer7_scope.outputs.build_components == '["CORE"]' &&
-      needs.build.outputs.app_digest != ''
-    permissions:
-      contents: read
-      packages: read
-      actions: read
-      deployments: write
-    uses: ./.github/workflows/gpoint-layer7-staging.yml
-    with:
-      candidate_sha: ${{ github.sha }}
-      staging_image_sha: ${{ github.sha }}
-      scoped_snapshot: ${{ needs.layer7_scope.outputs.snapshot }}
-      scoped_image_version: ${{ needs.build.outputs.image_version }}
-      prepared_app_digest: ${{ needs.build.outputs.app_digest }}
-
   deploy:
     name: Kamal production Deploy and Verify
     needs: [tests, build]
@@ -807,6 +736,11 @@ jobs:
         (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
          needs.tests.result == 'success' && needs.tests.outputs.deploy == 'true' &&
          needs.build.result == 'success' && needs.build.outputs.deploy_scope != 'NONE') ||
+        (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+         needs.tests.result == 'success' && needs.tests.outputs.mode == 'LAYER7_API' &&
+         github.actor == github.repository_owner && github.triggering_actor == github.repository_owner &&
+         needs.build.result == 'success' && needs.build.outputs.deploy_scope == 'CORE' &&
+         needs.build.outputs.app_digest != '') ||
         (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
          github.actor == github.repository_owner && needs.tests.result == 'success' &&
          (
@@ -820,10 +754,10 @@ jobs:
       )
     runs-on: ubuntu-latest
     environment:
-      name: production
-      url: ${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}
+      name: ${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}
+      url: ${{ needs.tests.outputs.mode == 'LAYER7_API' && 'http://95.133.236.59' || (inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url) }}
     concurrency:
-      group: gpoint-production-release
+      group: ${{ needs.tests.outputs.mode == 'LAYER7_API' && 'gpoint-layer7-staging' || 'gpoint-production-release' }}
       cancel-in-progress: false
     timeout-minutes: 360
     permissions:
@@ -846,8 +780,34 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Materialize Layer7 SSH credentials
+        if: needs.tests.outputs.mode == 'LAYER7_API'
+        env:
+          LAYER7_SSH_KEY_SECRET: ${{ secrets.LAYER7_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$LAYER7_SSH_KEY_SECRET"
+          install -d -m 700 "$RUNNER_TEMP/layer7"
+          printf '%s\n' "$LAYER7_SSH_KEY_SECRET" > "$RUNNER_TEMP/layer7/key"
+          chmod 600 "$RUNNER_TEMP/layer7/key"
+          test "$(stat -c '%a' "$RUNNER_TEMP/layer7/key")" = 600
+          {
+            echo "LAYER7_SSH_KEY=$RUNNER_TEMP/layer7/key"
+            echo "GPOINT_SSH_KEY=$RUNNER_TEMP/layer7/key"
+            echo "GPOINT_KNOWN_HOSTS_FILE=$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts"
+            echo "GPOINT_LAYER7_STAGING_HOST=95.133.236.59"
+            echo "GPOINT_KAMAL_TARGET_HOST=95.133.236.59"
+          } >> "$GITHUB_ENV"
+      - uses: ./.github/actions/layer7-deploy
+        if: needs.tests.outputs.mode == 'LAYER7_API'
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          candidate_sha: ${{ github.sha }}
+          staging_image_sha: ${{ github.sha }}
+          scoped_image_version: ${{ needs.build.outputs.image_version }}
+          prepared_app_digest: ${{ needs.build.outputs.app_digest }}
       - name: Recheck exact SHA, current main and owner approval
-        if: inputs.mode != 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode != 'rollback')
         env:
           GH_TOKEN: ${{ github.token }}
           APPROVE_PRODUCTION: ${{ inputs.approve_production || false }}
@@ -873,13 +833,16 @@ jobs:
           [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$REQUESTED_SHA"
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        if: needs.tests.outputs.mode != 'LAYER7_API'
         with:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: services/agata/pyproject.toml
       - name: Install pinned AGATA Alembic graph dependencies
+        if: needs.tests.outputs.mode != 'LAYER7_API'
         run: python -m pip install ./services/agata
       - name: Install verified Kamal SSH credentials
+        if: needs.tests.outputs.mode != 'LAYER7_API'
         env:
           SSH_PRIVATE_KEY: ${{ secrets.GPOINT_KAMAL_SSH_PRIVATE_KEY }}
           VERIFIED_KNOWN_HOSTS: ${{ secrets.GPOINT_KAMAL_KNOWN_HOSTS }}
@@ -903,6 +866,7 @@ jobs:
           EOF
           chmod 600 "$HOME/.ssh/config"
       - name: Pull and verify pinned Kamal CLI image
+        if: needs.tests.outputs.mode != 'LAYER7_API'
         env:
           KAMAL_IMAGE: ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625
         run: |
@@ -910,7 +874,7 @@ jobs:
           docker pull --platform linux/amd64 "$KAMAL_IMAGE"
           echo "KAMAL_IMAGE_PULL=PASS PLATFORM=linux/amd64 DIGEST=sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625"
       - name: Read live application version and containers with Kamal
-        if: inputs.mode != 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode != 'rollback')
         id: kamal_inventory
         env:
           KAMAL_IMAGE: ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625
@@ -1000,7 +964,7 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           done
       - name: Verify installed Kamal topology before ordinary release
-        if: inputs.mode != 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode != 'rollback')
         id: topology
         env:
           KAMAL_CORE_VERSION: ${{ steps.kamal_inventory.outputs.core_version }}
@@ -1087,7 +1051,7 @@ jobs:
             esac
           done <<< "$facts"
       - name: Plan exact component-scoped Kamal update from live baseline
-        if: inputs.mode != 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode != 'rollback')
         id: component_plan
         env:
           BASELINE_ROLE_INVENTORY: ${{ steps.topology.outputs.GPOINT_BASELINE_ROLE_INVENTORY }}
@@ -1174,7 +1138,7 @@ jobs:
           print("build_components=" + json.dumps(sorted(builds), separators=(",", ":")))
           PY
       - name: Verify immutable candidate images selected for the live scope
-        if: (steps.component_plan.outputs.build_components != '[]') && inputs.mode != 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && ((steps.component_plan.outputs.build_components != '[]') && inputs.mode != 'rollback')
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
@@ -1204,7 +1168,7 @@ jobs:
             fi
           done
       - name: Verify candidate compatibility with the live database baseline
-        if: inputs.mode != 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode != 'rollback')
         id: migration_baseline
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1264,7 +1228,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
       - name: Verify Eros production prerequisites before any database mutation
         id: eros_prereq
-        if: (steps.component_plan.outputs.deploy_eros == 'true') && inputs.mode != 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && ((steps.component_plan.outputs.deploy_eros == 'true') && inputs.mode != 'rollback')
         env:
           CANDIDATE_SHA: ${{ github.sha }}
           EROS_DIGEST: ${{ steps.component_plan.outputs.eros_digest }}
@@ -1282,7 +1246,7 @@ jobs:
             < scripts/eros-production-secrets.py
           echo "EROS_PREREQUISITES=PASS image=$eros_image bootstrap=$EROS_BOOTSTRAP read_only=true" >> "$GITHUB_STEP_SUMMARY"
       - name: Plan the exact approved Prisma migration set
-        if: inputs.mode != 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode != 'rollback')
         id: migration_plan
         env:
           LIVE_MIGRATIONS: ${{ steps.migration_baseline.outputs.prisma_migrations }}
@@ -1318,7 +1282,7 @@ jobs:
             echo "candidate_prisma_head=$source_head"
           } >> "$GITHUB_OUTPUT"
       - name: Resolve exact GitHub environment Deployment ID
-        if: inputs.mode != 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode != 'rollback')
         id: deployment
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1331,7 +1295,7 @@ jobs:
           deployment_id="${resolved#deployment_id=}"
           echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
       - name: Apply approved Prisma migrations once before Kamal
-        if: inputs.mode != 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode != 'rollback')
         id: migration_apply
         env:
           APPLY: ${{ steps.migration_plan.outputs.apply }}
@@ -1455,7 +1419,7 @@ jobs:
           echo "GPOINT_PRISMA_APPLY=PASS PENDING=$PENDING_MIGRATIONS" >> "$GITHUB_STEP_SUMMARY"
       - name: Rehearse exact Eros SQLx transition against protected backup restore
         id: eros_database
-        if: (steps.component_plan.outputs.deploy_eros == 'true') && inputs.mode != 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && ((steps.component_plan.outputs.deploy_eros == 'true') && inputs.mode != 'rollback')
         env:
           CANDIDATE_SHA: ${{ github.sha }}
           EROS_DIGEST: ${{ steps.component_plan.outputs.eros_digest }}
@@ -1511,7 +1475,7 @@ jobs:
           echo "EROS_DATABASE_LIFECYCLE=PASS IMAGE=$eros_image" >> "$GITHUB_STEP_SUMMARY"
       - name: Deploy exact immutable images with stock Kamal
         id: kamal_apply
-        if: (success()) && inputs.mode != 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && ((success()) && inputs.mode != 'rollback')
         env:
           APP_DIGEST: ${{ steps.component_plan.outputs.app_digest }}
           AGATA_DIGEST: ${{ steps.component_plan.outputs.agata_digest }}
@@ -1650,7 +1614,7 @@ jobs:
               kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
           fi
       - name: Verify public routes and exact running services
-        if: inputs.mode != 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode != 'rollback')
         id: verify
         env:
           APP_DIGEST: ${{ steps.component_plan.outputs.app_digest }}
@@ -1905,7 +1869,7 @@ jobs:
           echo "environment_url=https://gpoint.one/#gpoint-manifest-sha256=$manifest_sha&$source_params" >> "$GITHUB_OUTPUT"
           echo "GPOINT_KAMAL_VERIFY=PASS SHA=$CANDIDATE_SHA MANIFEST_SHA=$manifest_sha" >> "$GITHUB_STEP_SUMMARY"
       - name: Publish release timing
-        if: always()
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (always())
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -1941,7 +1905,7 @@ jobs:
             echo "GPOINT_RELEASE_TIMING=UNVERIFIED" >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Report recovery guidance after ordinary release
-        if: (always() && steps.deployment.outputs.id != '' && steps.verify.outcome != 'success') && inputs.mode != 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && ((always() && steps.deployment.outputs.id != '' && steps.verify.outcome != 'success') && inputs.mode != 'rollback')
         env:
           MIGRATION_APPLY_OUTCOME: ${{ steps.migration_apply.outcome }}
           EROS_DATABASE_OUTCOME: ${{ steps.eros_database.outcome }}
@@ -1957,12 +1921,12 @@ jobs:
             echo "RECOVERY_REQUIRED: partial Kamal transition or Runtime Verify failure for $CANDIDATE_SHA; automatic database downgrade is prohibited. Confirm the live topology and migration head read-only before another production mutation." >> "$GITHUB_STEP_SUMMARY"
           fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        if: inputs.mode == 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode == 'rollback')
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Require exact current main and owner-selected previous deployment
-        if: inputs.mode == 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode == 'rollback')
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
@@ -2018,7 +1982,7 @@ jobs:
           echo "TARGET_RUN_ID=$run_id" >> "$GITHUB_ENV"
           echo "TARGET_MANIFEST_SHA=$target_manifest_sha" >> "$GITHUB_ENV"
       - name: Install verified VPS SSH credentials
-        if: inputs.mode == 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode == 'rollback')
         env:
           SSH_PRIVATE_KEY: ${{ secrets.GPOINT_KAMAL_SSH_PRIVATE_KEY }}
           VERIFIED_KNOWN_HOSTS: ${{ secrets.GPOINT_KAMAL_KNOWN_HOSTS }}
@@ -2042,7 +2006,7 @@ jobs:
           EOF
           chmod 600 "$HOME/.ssh/config"
       - name: Retrieve only the manifest anchored by the prior successful status
-        if: inputs.mode == 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode == 'rollback')
         id: manifest
         env:
           TARGET_SHA: ${{ inputs.rollback_target_sha }}
@@ -2069,7 +2033,7 @@ jobs:
           printf '%s' "$encoded" | base64 --decode > "$RUNNER_TEMP/gpoint-rollback/manifest.json"
           echo "manifest_sha=$manifest_sha" >> "$GITHUB_OUTPUT"
       - name: Validate linked build, successful Runtime Verify and component-role manifest
-        if: inputs.mode == 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode == 'rollback')
         id: evidence
         env:
           TARGET_SHA: ${{ inputs.rollback_target_sha }}
@@ -2085,18 +2049,18 @@ jobs:
             --sha "$TARGET_SHA" --deployment-id "$TARGET_DEPLOYMENT_ID" \
             --repository "$GITHUB_REPOSITORY" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-        if: inputs.mode == 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode == 'rollback')
         with:
           platforms: linux/amd64
       - name: Authenticate to GHCR for read-only immutable image verification
-        if: inputs.mode == 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode == 'rollback')
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - name: Verify target digests, platform, revision and provenance
-        if: inputs.mode == 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode == 'rollback')
         env:
           TARGET_SHA: ${{ inputs.rollback_target_sha }}
           CORE_DIGEST: ${{ steps.evidence.outputs.core_digest }}
@@ -2133,25 +2097,25 @@ jobs:
               "$RUNNER_TEMP/gpoint-rollback/eros-provenance.json" "$EROS_DIGEST" "$EROS_SOURCE_SHA"
           fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        if: inputs.mode == 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode == 'rollback')
         with:
           ref: ${{ steps.evidence.outputs.core_source_sha }}
           path: rollback-core
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        if: inputs.mode == 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode == 'rollback')
         with:
           ref: ${{ steps.evidence.outputs.agata_source_sha }}
           path: rollback-agata
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        if: inputs.mode == 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode == 'rollback')
         with:
           ref: ${{ steps.evidence.outputs.miniapp_source_sha }}
           path: rollback-miniapp
           persist-credentials: false
       - name: Verify live DB compatibility and retained target containers before mutation
-        if: inputs.mode == 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode == 'rollback')
         id: baseline
         env:
           TARGET_SHA: ${{ inputs.rollback_target_sha }}
@@ -2208,7 +2172,7 @@ jobs:
             --agata-current-head "$(sed -n 's/^AGATA_HEAD=//p' <<< "$facts")"
           while IFS='=' read -r key value; do case "$key" in DB_CONTAINER_ID|REDIS_CONTAINER_ID|DB_MOUNTS_SHA256|REDIS_MOUNTS_SHA256) echo "$key=$value" >> "$GITHUB_OUTPUT" ;; esac; done <<< "$facts"
       - name: Verify retained Eros rollback containers
-        if: (inputs.rollback_eros == true) && inputs.mode == 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && ((inputs.rollback_eros == true) && inputs.mode == 'rollback')
         env:
           EROS_VERSION: ${{ steps.evidence.outputs.eros_version }}
           EROS_RELAY_VERSION: ${{ steps.evidence.outputs.eros_relay_version }}
@@ -2235,7 +2199,7 @@ jobs:
           echo EROS_ROLLBACK_TARGET_RETAINED=PASS
           REMOTE
       - name: Verify Eros rollback image against an isolated current database restore
-        if: (inputs.rollback_eros == true) && inputs.mode == 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && ((inputs.rollback_eros == true) && inputs.mode == 'rollback')
         env:
           EROS_SOURCE_SHA: ${{ steps.evidence.outputs.eros_source_sha }}
           EROS_DIGEST: ${{ steps.evidence.outputs.eros_digest }}
@@ -2257,7 +2221,7 @@ jobs:
             --candidate "$EROS_SOURCE_SHA" --image "$image" --run-id "$run_identity" \
             < scripts/eros-native-database.py
       - name: Roll back consumers and then APIs with stock Kamal
-        if: inputs.mode == 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode == 'rollback')
         id: rollback_apply
         env:
           CORE_VERSION: ${{ steps.evidence.outputs.core_version }}
@@ -2318,7 +2282,7 @@ jobs:
             verify_role gpoint-eros-relay-relay "$EROS_RELAY_VERSION" "$EROS_SOURCE_SHA"
           fi
       - name: Verify rollback Runtime and preserve databases before SUCCESS
-        if: inputs.mode == 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && (inputs.mode == 'rollback')
         id: rollback_verify
         env:
           TARGET_SHA: ${{ inputs.rollback_target_sha }}
@@ -2430,7 +2394,7 @@ jobs:
           printf 'environment_url=%s\n' "$environment_url" >> "$GITHUB_OUTPUT"
           echo "GPOINT_ROLLBACK_VERIFY=PASS SHA=$TARGET_SHA" >> "$GITHUB_STEP_SUMMARY"
       - name: Mark failed partial rollback for read-only recovery
-        if: (always() && (steps.rollback_apply.outcome == 'failure' || steps.rollback_verify.outcome == 'failure')) && inputs.mode == 'rollback'
+        if: needs.tests.outputs.mode != 'LAYER7_API' && ((always() && (steps.rollback_apply.outcome == 'failure' || steps.rollback_verify.outcome == 'failure')) && inputs.mode == 'rollback')
         env:
           APPLY_OUTCOME: ${{ steps.rollback_apply.outcome }}
           VERIFY_OUTCOME: ${{ steps.rollback_verify.outcome }}

@@ -22,7 +22,8 @@ shift
 attempts="${LAYER7_TRANSPORT_ATTEMPTS:-5}"
 backoff="${LAYER7_TRANSPORT_BACKOFF_SECONDS:-4}"
 connect_timeout="${LAYER7_TRANSPORT_CONNECT_TIMEOUT:-20}"
-identity="${LAYER7_SSH_KEY:-$HOME/.ssh/gpoint_layer7}"
+identity="${LAYER7_SSH_KEY:-${GPOINT_SSH_KEY:-}}"
+[ -n "$identity" ] || { echo 'LAYER7_SSH_KEY or GPOINT_SSH_KEY is required' >&2; exit 78; }
 known_hosts="${LAYER7_KNOWN_HOSTS_FILE:-${GITHUB_WORKSPACE:-.}/infra/staging/layer7_known_hosts}"
 
 # Replay stdin so a retried `ssh host python3 - < script.py` still receives the

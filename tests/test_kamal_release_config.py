@@ -97,11 +97,11 @@ def test_kamal_agata_and_miniapp_are_separate_services():
 def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
     jobs = workflow["jobs"]
-    assert {"tests", "build", "deploy", "layer7_scope", "layer7_deploy"}.issubset(jobs)
+    assert {"tests", "build", "deploy"} == set(jobs)
     assert not ({"workspace", "python"} & set(jobs))
-    assert jobs["build"]["needs"] == ["tests", "layer7_scope"]
+    assert jobs["build"]["needs"] == ["tests"]
     assert "needs.tests.result == 'success'" in jobs["build"]["if"]
-    assert "needs.layer7_scope.result == 'success'" in jobs["build"]["if"]
+    assert "outputs.mode == 'LAYER7_API'" in jobs["build"]["if"]
     assert "needs.tests.outputs.mode == 'ARTIFACT_PREPARE'" in jobs["build"]["if"]
     build_steps = yaml.safe_dump(jobs["build"]["steps"])
     assert "cache-to: type=gha,scope=gpoint-runtime,mode=max" in build_steps
@@ -109,8 +109,8 @@ def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
     assert "provenance: mode=max" in build_steps
     assert jobs["deploy"]["needs"] == ["tests", "build"]
     assert jobs["deploy"]["environment"] == {
-        "name": "production",
-        "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
+        "name": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}",
+        "url": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'http://95.133.236.59' || (inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url) }}",
     }
     assert "deployment" not in jobs["deploy"]["environment"]
 
@@ -682,8 +682,7 @@ def test_pinned_setup_go_uses_official_digest_pinned_tool_cache_seed():
     seed = steps[seed_index]
     setup = steps[setup_index]
     assert seed_index < setup_index
-    assert seed["if"] == "matrix.suite == 'release-tooling'"
-    assert setup["if"] == seed["if"]
+    assert seed["if"] == setup["if"] == "matrix.suite == 'release-tooling'"
     assert "api.github.com/repos/actions/go-versions/releases/assets/303957986" in seed["run"]
     assert "Accept: application/octet-stream" in seed["run"]
     assert "1b6c5c84f587ab036ca904638a39cf4bd272d1e8d439eb9c8bc60f91793e0765" in seed["run"]
@@ -698,8 +697,8 @@ def test_native_release_runs_kamal_after_successful_main_push():
     deploy = workflow["jobs"]["deploy"]
     assert "always()" in deploy["if"] and "needs.build.result == 'success'" in deploy["if"]
     assert deploy["environment"] == {
-        "name": "production",
-        "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
+        "name": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}",
+        "url": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'http://95.133.236.59' || (inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url) }}",
     }
     deploy_script = "\n".join(step.get("run", "") for step in deploy["steps"])
     assert 'test "$APPROVE_PRODUCTION" = true' in deploy_script
@@ -710,7 +709,7 @@ def test_native_release_runs_kamal_after_successful_main_push():
     rollback_workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
     rollback = rollback_workflow["jobs"]["deploy"]
     assert rollback["environment"] == {
-        "name": "production", "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
+        "name": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}", "url": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'http://95.133.236.59' || (inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url) }}",
     }
     rollback_script = "\n".join(step.get("run", "") for step in rollback["steps"])
     assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in rollback_script
@@ -864,25 +863,18 @@ def test_post_migration_head_requires_checksum_proof_when_old_runtime_lacks_revi
 
 
 def test_native_kamal_keeps_absolute_runner_ssh_config_paths_available():
-    workflow = (ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text()
-    wrappers = workflow.split('kamal() {')[1:]
-    assert wrappers
-    for wrapper in wrappers:
-        command = wrapper.split('\n          }', 1)[0]
-        if 'command kamal "$@"' in command:
-            assert 'docker run' not in command
-        elif 'gpoint_layer7:/root/.ssh/gpoint_layer7:ro' in command:
-            assert '--volume "$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts:/root/.ssh/known_hosts:ro"' in command
-            assert '--volume "$HOME/.ssh:/root/.ssh:ro"' not in command
-            assert '--volume "$HOME/.ssh:$HOME/.ssh:ro"' not in command
-        else:
-            assert '--volume "$HOME/.ssh:/root/.ssh:ro"' in command
-            assert '--volume "$HOME/.ssh:$HOME/.ssh:ro"' in command
-    assert 'export GPOINT_SSH_KEY="$HOME/.ssh/gpoint_layer7"' in workflow
-    assert 'export GPOINT_KNOWN_HOSTS_FILE="$HOME/.ssh/known_hosts"' in workflow
-    native = (ROOT / '.github/workflows/gpoint-native-release.yml').read_text()
-    assert 'git rev-list --first-parent --max-count=64 "$CANDIDATE_SHA"' in native
-    assert '--read-agata-ancestor-receipt' in native
+    staging = (ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text()
+    action = (ROOT / '.github/actions/layer7-deploy/action.yml').read_text()
+    # The key is materialized into the runner temp directory from the environment
+    # secret; no HOME-based SSH directory is mounted or assumed.
+    assert 'LAYER7_SSH_KEY=$RUNNER_TEMP/layer7/key' in staging
+    assert 'GPOINT_SSH_KEY=$RUNNER_TEMP/layer7/key' in staging
+    assert 'GPOINT_KNOWN_HOSTS_FILE=$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts' in staging
+    assert '/root/.ssh' not in staging
+    assert '/root/.ssh' not in action
+    transport = (ROOT / 'scripts/layer7-transport.sh').read_text()
+    assert 'StrictHostKeyChecking=yes' in transport
+    assert 'infra/staging/layer7_known_hosts' in transport
 
 
 @pytest.mark.parametrize('name', ['pre-app-boot', 'post-app-boot'])

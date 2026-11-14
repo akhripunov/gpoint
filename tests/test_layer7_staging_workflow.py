@@ -9,9 +9,15 @@ from urllib.parse import urlsplit
 from pathlib import Path
 
 
+def _staging_steps():
+    """The Layer7 deploy steps live in one composite action used by both paths."""
+    action = yaml.safe_load((ROOT / '.github/actions/layer7-deploy/action.yml').read_text())
+    return action['runs']['steps']
+
+
 def test_staging_ssh_keeps_silent_transfers_alive_without_weakening_host_keys():
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
-    text = '\n'.join(s.get('run', '') for s in workflow['jobs']['layer7_staging']['steps'])
+    text = '\n'.join(s.get('run', '') for s in _staging_steps())
     # Every staging transport call goes through one bounded-retry wrapper, so the
     # host-key, identity and keepalive policy cannot drift between call sites.
     assert text.count('scripts/layer7-transport.sh') >= 20
@@ -26,6 +32,15 @@ def test_staging_ssh_keeps_silent_transfers_alive_without_weakening_host_keys():
     assert '-o UserKnownHostsFile="$known_hosts"' in transport
     assert 'infra/staging/layer7_known_hosts' in transport
 
+
+
+
+def _fake_identity(tmp_path):
+    identity = tmp_path / 'identity'
+    if not identity.exists():
+        identity.write_text('fake-key\n')
+        identity.chmod(0o600)
+    return identity
 
 def _layer7_transport_env(tmp_path, failures_wanted, remote_status, stdin_payload=None):
     """Install a fake `ssh` that fails with 255 N times, then runs the remote command."""
@@ -51,6 +66,7 @@ def _layer7_transport_env(tmp_path, failures_wanted, remote_status, stdin_payloa
     return state, {
         **os.environ,
         'PATH': f'{tmp_path}:{os.environ["PATH"]}',
+        'LAYER7_SSH_KEY': str(_fake_identity(tmp_path)),
         'LAYER7_TRANSPORT_ATTEMPTS': '4',
         'LAYER7_TRANSPORT_BACKOFF_SECONDS': '0',
         'GITHUB_WORKSPACE': str(ROOT),
@@ -100,7 +116,7 @@ def test_staging_preserves_legacy_and_builds_kamal_compatible_eros_image():
     assert 'expected_service=gpoint-eros-pilot' in readback
     assert "{{index .Config.Labels \"service\"}}" in readback
     assert '\"$expected_service\"' in readback
-    deploy = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
+    deploy = next(s['run'] for s in _staging_steps() if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
     assert 'kamal deploy ' not in deploy
     assert deploy.count('kamal redeploy --skip-push') == 4
     assert deploy.index('kamal accessory boot relay') < deploy.index('kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles engine')
@@ -124,7 +140,7 @@ def test_host_relay_uses_stock_kamal_accessory_with_one_network():
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST' in text
     assert relay['options']['memory'] == '64m'
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
-    deploy = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
+    deploy = next(s['run'] for s in _staging_steps() if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
     assert 'kamal accessory boot relay' in deploy
     assert "--filter 'name=^/gpoint-eros-relay-relay$' --filter label=service=gpoint-eros-relay-relay" in deploy
     assert 'kamal accessory reboot relay' in deploy
@@ -132,7 +148,7 @@ def test_host_relay_uses_stock_kamal_accessory_with_one_network():
     assert len(accessory_commands) == 4
     assert all('--hosts \"$GPOINT_LAYER7_STAGING_HOST\"' in line for line in accessory_commands)
     assert 'kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles relay' not in deploy
-    verify = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Verify runtime roles, health, Eros embeddings, and API-to-engine route')
+    verify = next(s['run'] for s in _staging_steps() if s.get('name') == 'Verify runtime roles, health, Eros embeddings, and API-to-engine route')
     assert 'container=gpoint-eros-relay-relay' in verify
     assert '{{.HostConfig.NetworkMode}}' in verify
 
@@ -144,7 +160,7 @@ def test_host_relay_uses_stock_kamal_accessory_with_one_network():
 ])
 def test_relay_accessory_lifecycle_is_exact_and_stock_kamal(tmp_path, existing, expected, action):
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
-    deploy = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
+    deploy = next(s['run'] for s in _staging_steps() if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
     code = deploy[deploy.index('relay_container="$('):deploy.index('# Accessory prepare creates the stock kamal bridge')]
     log = tmp_path / 'actions'
     workspace = tmp_path / 'workspace'
@@ -161,7 +177,7 @@ def test_relay_accessory_lifecycle_is_exact_and_stock_kamal(tmp_path, existing, 
 
 def test_staging_label_lookup_templates_use_valid_string_literals():
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
-    commands = '\n'.join(s.get('run', '') for s in workflow['jobs']['layer7_staging']['steps'])
+    commands = '\n'.join(s.get('run', '') for s in _staging_steps())
     args = re.findall(r"\{\{index \.Config\.Labels (.*?)\}\}", commands)
     assert len(args) >= 4
     assert {json.loads(arg) for arg in args} == {'com.gpoint.source.revision', 'org.opencontainers.image.revision'}
@@ -169,7 +185,7 @@ def test_staging_label_lookup_templates_use_valid_string_literals():
 
 def test_staging_route_probe_receives_stdin_and_uses_generated_eros_host():
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
-    verify = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Verify runtime roles, health, Eros embeddings, and API-to-engine route')
+    verify = next(s['run'] for s in _staging_steps() if s.get('name') == 'Verify runtime roles, health, Eros embeddings, and API-to-engine route')
     assert 'docker exec -i "$api" node --input-type=module -' in verify
     writer = (ROOT / 'scripts/eros-production-secrets.py').read_text()
     endpoint = re.search(r"'EROS_SERVICE_URL': '([^']+)'", writer).group(1)
@@ -180,7 +196,7 @@ def test_staging_route_probe_receives_stdin_and_uses_generated_eros_host():
 @pytest.mark.parametrize('leak', ['', 'core_on_data', 'alias_on_shared'])
 def test_staging_network_isolation_probe_uses_actual_topology(tmp_path, leak):
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
-    verify = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Verify runtime roles, health, Eros embeddings, and API-to-engine route')
+    verify = next(s['run'] for s in _staging_steps() if s.get('name') == 'Verify runtime roles, health, Eros embeddings, and API-to-engine route')
     code = re.search(r"<<'PY_CORE_DB'\n(.*?)\nPY_CORE_DB", verify, re.S).group(1)
     api = {'gpoint_eros_api': {}, 'shared_internal': {}}
     db = {'gpoint_eros_data': {'Aliases': ['gpoint-eros-db']}, 'shared_internal': {'Aliases': None}}
@@ -201,7 +217,7 @@ def test_staging_network_isolation_probe_uses_actual_topology(tmp_path, leak):
 ])
 def test_private_gateway_stop_shell_preserves_first_install_and_race_recovery(tmp_path, previous, raced, expected, actions):
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
-    deploy = next(s['run'] for s in workflow['jobs']['layer7_staging']['steps'] if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
+    deploy = next(s['run'] for s in _staging_steps() if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
     section = deploy[deploy.index('check_queue_empty() {'):]
     section = section[:section.index('if ! GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST"')]
     log = tmp_path / 'kamal.log'
@@ -224,6 +240,7 @@ exit 0
                             env={**os.environ, 'PREVIOUS': previous, 'RACED': raced, 'ACTION_LOG': str(log),
                                  'CALLS_FILE': str(calls_file), 'GITHUB_WORKSPACE': str(ROOT),
                                  'PATH': f'{bin_dir}:{os.environ["PATH"]}',
+                                 'LAYER7_SSH_KEY': str(_fake_identity(tmp_path)),
                                  'GPOINT_LAYER7_STAGING_HOST': '95.133.236.59'})
     assert result.returncode == expected, result.stderr
     assert (log.read_text().splitlines() if log.exists() else []) == actions
@@ -238,7 +255,7 @@ def test_staging_api_keeps_the_existing_private_worker_forward_port():
 
 def test_staging_stops_only_managed_api_after_proving_queue_empty():
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
-    steps = workflow['jobs']['layer7_staging']['steps']
+    steps = _staging_steps()
     deploy = next(x['run'] for x in steps if x.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
     queue = deploy.index('LAYER7_GPOINT_QUEUE_EMPTY=PASS')
     stop = deploy.index('kamal app stop --roles api')
@@ -261,9 +278,8 @@ def test_layer7_staging_is_owner_dispatched_on_trusted_runner_with_read_only_pac
     job = workflow["jobs"]["layer7_staging"]
     actionlint = yaml.safe_load((ROOT / ".github/actionlint.yaml").read_text())
 
-    assert job["runs-on"] == ["self-hosted", "macOS"]
-    assert actionlint["self-hosted-runner"]["labels"] == ["macOS"]
-    assert job["environment"]["name"] == "${{ github.event_name == 'push' && 'layer7-api-auto' || 'layer7-staging' }}"
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["environment"]["name"] == "layer7-staging"
     assert job["permissions"] == {
         "contents": "read",
         "packages": "read",
@@ -277,17 +293,16 @@ def test_layer7_staging_is_owner_dispatched_on_trusted_runner_with_read_only_pac
 def test_layer7_staging_runs_pinned_kamal_without_a_local_docker_engine():
     workflow = yaml.load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text(), Loader=yaml.BaseLoader)
     job = workflow["jobs"]["layer7_staging"]
-    ruby = next(step for step in job["steps"] if step.get("uses", "").startswith("ruby/setup-ruby@"))
+    steps = _staging_steps()
+    ruby = next(step for step in steps if step.get("uses", "").startswith("ruby/setup-ruby@"))
     assert ruby["uses"] == "ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f"
     assert ruby["with"]["ruby-version"] == "3.3.6"
-    assert ruby["with"]["self-hosted"] == "true"
-    installer = next(step for step in job["steps"] if step.get("name") == "Install pinned Kamal 2.12.0")
+    assert "self-hosted" not in ruby["with"]
+    installer = next(step for step in steps if step.get("name") == "Install pinned Kamal 2.12.0")
     assert "gem install kamal --version 2.12.0" in installer["run"]
-    deploy = next(step for step in job["steps"] if step.get("name") == "Deploy exact immutable images with stock Kamal 2 to Layer7 staging")
-    assert "docker run" not in deploy["run"]
+    deploy = next(step for step in steps if step.get("name") == "Deploy exact immutable images with stock Kamal 2 to Layer7 staging")
     assert 'command kamal "$@"' in deploy["run"]
-    assert "$HOME/.ssh/gpoint_layer7" in deploy["run"]
-    image_pull = next(step for step in job["steps"] if step.get("name") == "Pull and verify exact private images with the read-only job token")
+    image_pull = next(step for step in steps if step.get("name") == "Pull and verify exact private images with the read-only job token")
     assert "kamal_image=ghcr.io/basecamp/kamal" not in image_pull["run"]
     assert 'docker pull --platform linux/amd64 "$kamal_image"' not in image_pull["run"]
 
@@ -306,16 +321,17 @@ def test_layer7_staging_requires_exact_successful_prepare_and_explicit_staging_i
     assert "inputs.deploy_layer7_staging == true" in job["if"]
     assert "inputs.approve_layer7_staging == true" in job["if"]
     assert "inputs.staging_image_sha != ''" in job["if"]
-    step_text = yaml.safe_dump(job["steps"])
+    step_text = yaml.safe_dump(_staging_steps())
     assert "verify_native_prepared_run.py" in step_text
     assert "prepared_run_id" in step_text
     assert "prepared_eros_digest" in step_text
     assert "scripts/layer7-transport.sh" in step_text
     assert "StrictHostKeyChecking=yes" in (ROOT / "scripts/layer7-transport.sh").read_text()
-    assert job["env"]["CANDIDATE_SHA"] == "${{ inputs.staging_image_sha }}"
+    materialize = next(step for step in job["steps"] if step.get("name") == "Materialize Layer7 SSH credentials")
+    assert 'CANDIDATE_SHA=$GITHUB_SHA' in materialize["run"]
     checkout = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@"))
     assert checkout["with"]["ref"] == "${{ github.sha }}"
-    recheck = next(step for step in job["steps"] if step.get("name") == "Recheck owner dispatch, current main, and prepared image ancestry")
+    recheck = next(step for step in _staging_steps() if step.get("name") == "Recheck owner dispatch, current main, and prepared image ancestry")
     assert "STAGING_IMAGE_SHA" in recheck["env"]
     assert "compare/$STAGING_IMAGE_SHA...$WORKFLOW_SHA" in recheck["run"]
     assert 'merge_base_commit",{}).get("sha")' in recheck["run"]
@@ -324,7 +340,7 @@ def test_layer7_staging_requires_exact_successful_prepare_and_explicit_staging_i
     assert "docker logout ghcr.io" in step_text
     assert "no_existing_credentials=true" in step_text
     assert "CORE_API_EROS_ROUTE=PASS EROS_DATABASE_NETWORK_ISOLATION=PASS" in (
-        ROOT / ".github/workflows/gpoint-layer7-staging.yml"
+        ROOT / ".github/actions/layer7-deploy/action.yml"
     ).read_text()
 
 
@@ -365,14 +381,14 @@ def test_layer7_staging_is_separate_from_build_and_production_deploy_jobs():
     workflow = yaml.load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text(), Loader=yaml.BaseLoader)
     native = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
     staging = workflow["jobs"]["layer7_staging"]
-    assert set(native["jobs"]) == {"tests", "build", "deploy", "layer7_scope", "layer7_deploy"}
+    assert set(native["jobs"]) == {"tests", "build", "deploy"}
     assert set(workflow["jobs"]) == {"layer7_staging"}
     assert staging["env"]["KAMAL_REGISTRY_PASSWORD"] == "${{ secrets.GITHUB_TOKEN }}"
     assert staging["permissions"]["packages"] == "read"
     assert staging["permissions"].get("contents") == "read"
     assert staging["permissions"].get("deployments") == "write"
     assert "packages: write" not in yaml.safe_dump(staging)
-    steps = yaml.safe_dump(staging["steps"])
+    steps = yaml.safe_dump(_staging_steps())
     assert "steps.prepared.outputs.image_version" in steps
     for config in (
         "config/deploy.layer7-staging.eros.yml",
@@ -393,11 +409,11 @@ def test_layer7_staging_is_separate_from_build_and_production_deploy_jobs():
 def test_layer7_staging_can_run_core_and_eros_without_a_staging_telegram_bot():
     workflow = yaml.load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text(), Loader=yaml.BaseLoader)
     staging = workflow["jobs"]["layer7_staging"]
-    steps = staging["steps"]
+    steps = _staging_steps()
     validation = next(step for step in steps if step.get("id") == "staging_env")
     assert "bot_enabled=" in validation["run"]
     assert "TELEGRAM_BOT_TOKEN" not in validation["env"].get("TELEGRAM_BOT_TOKEN", "")
-    assert "secrets.GPOINT_LAYER7_STAGING_APP_ENV" in validation["env"]["STAGING_ENV_BUNDLE"]
+    assert "${{ inputs.staging_env_bundle }}" in validation["env"]["STAGING_ENV_BUNDLE"]
     deploy = next(step for step in steps if step.get("name") == "Deploy exact immutable images with stock Kamal 2 to Layer7 staging")
     assert deploy["env"]["STAGING_BOT_ENABLED"] == "${{ steps.staging_env.outputs.bot_enabled || steps.scoped.outputs.bot_enabled }}"
     assert 'if [[ "$role" == bot && "$STAGING_BOT_ENABLED" != true ]]' in deploy["run"]

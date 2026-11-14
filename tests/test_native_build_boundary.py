@@ -19,25 +19,25 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
 
     def test_pipeline_has_release_gate_and_one_isolated_rehearsal_job(self):
         jobs = self.workflow["jobs"]
-        self.assertEqual(set(jobs), {"tests", "build", "deploy", "layer7_scope", "layer7_deploy"})
+        self.assertEqual(set(jobs), {"tests", "build", "deploy"})
         rollback = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())["jobs"]["deploy"]
         self.assertIn("inputs.mode == 'rollback'", rollback["if"])
-        self.assertEqual(rollback["environment"], {
-            "name": "production", "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
-        })
-        self.assertEqual(rollback["concurrency"], {"group": "gpoint-production-release", "cancel-in-progress": False})
+        self.assertEqual(rollback["environment"]["name"],
+                         "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}")
+        self.assertIn("steps.verify.outputs.environment_url", rollback["environment"]["url"])
+        self.assertIn("gpoint-production-release", rollback["concurrency"]["group"])
         rehearsal = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())["jobs"]["migration_rehearsal"]
         self.assertNotIn("needs", rehearsal)
         self.assertIn("github.ref == 'refs/heads/main'", rehearsal["if"])
         self.assertIn("inputs.migration_rehearsal == true", rehearsal["if"])
-        self.assertEqual(jobs["build"]["needs"], ["tests", "layer7_scope"])
+        self.assertEqual(jobs["build"]["needs"], ["tests"])
         self.assertEqual(jobs["deploy"]["needs"], ["tests", "build"])
         self.assertIn("outputs.mode == 'DEPLOY'", jobs["build"]["if"])
         self.assertIn("outputs.mode == 'ARTIFACT_PREPARE'", jobs["build"]["if"])
         staging = yaml.safe_load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text())["jobs"]["layer7_staging"]
         self.assertNotIn("needs", staging)
-        self.assertEqual(staging["environment"]["name"], "${{ github.event_name == 'push' && 'layer7-api-auto' || 'layer7-staging' }}")
-        self.assertIn("github.ref == 'refs/heads/main'", staging["if"])
+        self.assertEqual(staging["environment"]["name"], "layer7-staging")
+        self.assertIn("inputs.deploy_layer7_staging == true", staging["if"])
         self.assertIn("inputs.approve_layer7_staging == true", staging["if"])
         self.assertNotIn("GPOINT_KAMAL_HOST", staging.get("env", {}))
 
@@ -97,7 +97,9 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         version = next(step for step in build["steps"] if step.get("id") == "image_version")
         self.assertNotIn("if", version)
         self.assertEqual(build["outputs"]["image_version"], "${{ steps.image_version.outputs.image_version }}")
-        self.assertEqual(self.workflow["jobs"]["layer7_deploy"]["with"]["scoped_image_version"],
+        action = next(step for step in self.workflow["jobs"]["deploy"]["steps"]
+                      if step.get("uses") == "./.github/actions/layer7-deploy")
+        self.assertEqual(action["with"]["scoped_image_version"],
                          "${{ needs.build.outputs.image_version }}")
 
     def test_image_version_selection_step_accepts_only_matching_prepared_sha_and_run(self):
@@ -143,34 +145,36 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("--commit-message", intent["run"])
         self.assertIn("ARTIFACT_PREPARE", self.workflow["jobs"]["build"]["if"])
 
-    def test_tests_matrix_preserves_parallel_suites_and_shared_fail_closed_outputs(self):
+    def test_parallel_tests_preserve_all_suites_and_shared_fail_closed_outputs(self):
         tests = self.workflow["jobs"]["tests"]
-        self.assertEqual(tests["strategy"]["matrix"]["suite"], ["workspace", "python", "release-tooling", "eros"])
+        self.assertEqual(tests["strategy"], {
+            "fail-fast": False,
+            "matrix": {"suite": ["workspace", "python", "release-tooling", "eros"]},
+        })
+        self.assertEqual(tests["runs-on"], "ubuntu-latest")
         intent = next(step for step in tests["steps"] if step.get("id") == "intent")
         self.assertNotIn("if", intent)
         self.assertEqual(tests["outputs"], {
             "mode": "${{ steps.intent.outputs.mode }}",
             "deploy": "${{ steps.intent.outputs.deploy }}",
         })
-        workspace_steps = [step for step in tests["steps"]
-                           if step.get("name") in {"Generate Prisma client and apply test migrations",
-                                                    "Build and typecheck workspace"}]
-        tooling = next(step for step in tests["steps"]
-                       if step.get("name") == "Validate pinned Kamal configs and shared proxy routing")
+        required_steps = {
+            "Validate pinned Kamal configs and shared proxy routing": "release-tooling",
+            "Build and typecheck workspace": "workspace",
+            "Run Mini App end-to-end tests": "workspace",
+            "Run workflow, Native First and Kamal boundary tests": "python",
+            "Run isolated PostgreSQL 16 migration and integration suites": "python",
+            "Run stock Eros SQLx and synthetic conversation E2E": "eros",
+        }
+        steps = {step.get("name"): step for step in tests["steps"]}
+        for name, suite in required_steps.items():
+            self.assertIn(f"matrix.suite == '{suite}'", steps[name]["if"])
         eros = next(step for step in tests["steps"] if step.get("id") == "eros_test_image")
-        self.assertEqual(tooling["if"], "matrix.suite == 'release-tooling'")
-        self.assertTrue(eros["if"].startswith("matrix.suite == 'eros' &&"))
         self.assertIn("steps.surface.outputs.full_ci == 'true'", eros["if"])
-        python_steps = [step for step in tests["steps"]
-                        if step.get("name") in {"Run workflow, Native First and Kamal boundary tests",
-                                                 "Run isolated PostgreSQL 16 migration and integration suites"}]
-        self.assertTrue(all(step["if"] == "matrix.suite == 'workspace'" for step in workspace_steps))
-        self.assertTrue(all(step["if"].startswith("matrix.suite == 'python'") for step in python_steps))
-        self.assertIn("unset DATABASE_URL SHADOW_DATABASE_URL", python_steps[0]["run"])
-        self.assertIn("unset DATABASE_URL SHADOW_DATABASE_URL", python_steps[1]["run"])
-        for step in tests["steps"]:
-            if step.get("if") == "matrix.suite == 'python'" and step.get("run"):
-                self.assertIn("unset DATABASE_URL SHADOW_DATABASE_URL", step["run"], step.get("name"))
+        python = [steps[name] for name, suite in required_steps.items() if suite == "python"]
+        for step in python:
+            self.assertIn("unset DATABASE_URL SHADOW_DATABASE_URL", step["run"])
+        self.assertIn("tests/test_layer7_mac_free_ssh.py", python[0]["run"])
 
     def test_main_push_runs_ci_build_and_kamal_production_jobs(self):
         triggers = self.workflow.get("on", self.workflow.get(True))
@@ -229,7 +233,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(go_setup["with"]["go-version"], "1.25.3")
         self.assertLess(pnpm_setup, node_setup)
         self.assertEqual(steps[pnpm_setup]["with"]["version"], "9.15.0")
-        self.assertEqual(build["needs"], ["tests", "layer7_scope"])
+        self.assertEqual(build["needs"], ["tests"])
 
     def test_build_uses_immutable_candidate_identity_and_attestation(self):
         build = self.workflow["jobs"]["build"]
@@ -269,7 +273,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
     def test_runtime_images_build_only_after_verified_component_baseline(self):
         build = self.workflow["jobs"]["build"]
         self.assertNotIn("environment", build)
-        self.assertEqual(build["needs"], ["tests", "layer7_scope"])
+        self.assertEqual(build["needs"], ["tests"])
         steps = build["steps"]
         resolver = next(i for i, step in enumerate(steps)
                         if step.get("id") == "build_scope")
@@ -394,7 +398,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertLess(resolve, verify)
         self.assertIn("manifest_sha", steps[verify]["run"])
         self.assertIn("environment_url=https://gpoint.one/#gpoint-manifest-sha256=$manifest_sha", steps[verify]["run"])
-        self.assertEqual(deploy["environment"]["url"], "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}")
+        self.assertIn("steps.verify.outputs.environment_url", deploy["environment"]["url"])
         self.assertNotIn("deployments/$DEPLOYMENT_ID/statuses", "\n".join(step.get("run", "") for step in steps))
         verify_run = steps[verify]["run"]
         self.assertIn("scp -p scripts/write-kamal-production-manifest.py", verify_run)
@@ -453,7 +457,9 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         text = WORKFLOW.read_text()
         self.assertNotIn("[self-hosted, macOS, gpoint-production]", text)
         staging_text = (ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text()
-        self.assertIn("runs-on: [self-hosted, macOS]", staging_text)
+        self.assertIn("runs-on: ubuntu-latest", staging_text)
+        self.assertNotIn("[self-hosted, macOS]", staging_text)
+        self.assertNotIn("gpoint-owner-mac", text + staging_text)
         self.assertNotIn("release:gpoint", text)
 
     def test_native_kamal_uses_attempt_scoped_image_version_and_hook_context(self):
