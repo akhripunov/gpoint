@@ -1356,7 +1356,7 @@ jobs:
           # Use the exact candidate helpers for this one release snapshot.
           tar -C scripts -cf - gpoint-scheduled-backup.py gpoint-backup-policy.py \
             gpoint-media-tree.py agata-production-migration.py verify-gpoint-scheduled-backup-restore.sh \
-            | ssh -T "root@${GPOINT_PRODUCTION_HOST}" "tar -xf - -C '$stage'"
+            | ssh -T "root@${GPOINT_PRODUCTION_HOST}" "tar --no-same-owner -xf - -C '$stage'"
           backup_output="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" \
             python3 "$stage/gpoint-scheduled-backup.py" --release-backup)" || {
             printf '%s\n' "$backup_output" >&2
