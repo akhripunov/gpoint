@@ -342,28 +342,25 @@ test('GitHub Prepare accepts only its pinned setup-docker Unix socket context', 
   }), /unapproved_docker_socket/);
 });
 
-test('Prepare selects the pinned Docker action context without exporting DOCKER_HOST', () => {
-  const workflow = readFileSync(new URL('../../.github/workflows/gpoint-prepare.yml', directory), 'utf8');
-  const setup = workflow.slice(workflow.indexOf('uses: docker/setup-docker-action@'), workflow.indexOf('uses: crazy-max/ghaction-github-runtime@'));
-  assert.match(setup, /context: gpoint-setup-docker/);
-  assert.match(setup, /runtime-basedir: \$\{\{ runner\.temp \}\}\/gpoint-setup-docker/);
-  assert.match(setup, /set-host: false/);
-  assert.match(setup, /DOCKER_CONTEXT=gpoint-setup-docker/);
-  assert.match(setup, /GPOINT_DOCKER_RUNTIME_BASEDIR=.*gpoint-setup-docker/);
+test('Native release uses its pinned Buildx action and has no legacy Prepare workflow', () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/gpoint-native-release.yml', directory), 'utf8');
+  assert.match(workflow, /uses: docker\/setup-buildx-action@[0-9a-f]{40}/);
+  assert.match(workflow, /name: Build stock Eros test image/);
+  assert.doesNotMatch(workflow, /setup-docker-action|gpoint-setup-docker|gpoint-prepare\.yml/);
 });
 
 test('Eros image requires stock upstream provenance and rejects downstream patches', () => {
   const policy = readFileSync(new URL('local-test-policy.mjs', directory), 'utf8');
   assert.match(policy, /com\.gpoint\.integration\.revision/);
-  const reference = 'gpoint-eros:stock-d1a140083321687212fb7b17c09cc0c3c9639f5e';
+  const reference = 'gpoint-eros:stock-83a54d1dba57874d55ecaa9756473f126b62844f';
   const metadata = {
     id: `sha256:${'a'.repeat(64)}`,
     os: 'linux',
     architecture: 'amd64',
     source: 'https://github.com/etherfunlab/eros-engine',
-    upstreamRevision: 'd1a140083321687212fb7b17c09cc0c3c9639f5e',
+    upstreamRevision: '83a54d1dba57874d55ecaa9756473f126b62844f',
     patchSha256: 'none',
-    buildRevision: 'd1a140083321687212fb7b17c09cc0c3c9639f5e',
+    buildRevision: '83a54d1dba57874d55ecaa9756473f126b62844f',
   };
   assert.equal(validateErosImageInspection(reference, metadata), metadata.id);
   const candidateSha = 'b'.repeat(40);
@@ -387,7 +384,7 @@ test('the Eros patch applier is disabled and the stock builder pins a clean sour
   assert.match(applier, /fails closed|patches_disabled/i);
   assert.doesNotMatch(applier, /git .* apply/);
   assert.match(builder, /eros_source_not_clean/);
-  assert.match(builder, /d1a140083321687212fb7b17c09cc0c3c9639f5e/);
+  assert.match(builder, /83a54d1dba57874d55ecaa9756473f126b62844f/);
   assert.match(builder, /patch-set\.sha256=none/);
 });
 

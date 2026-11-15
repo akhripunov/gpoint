@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { join, normalize } from 'node:path';
 import { statSync } from 'node:fs';
 
-const PINNED_UPSTREAM = 'd1a140083321687212fb7b17c09cc0c3c9639f5e';
+const PINNED_UPSTREAM = '83a54d1dba57874d55ecaa9756473f126b62844f';
 const PINNED_SOURCE = 'https://github.com/etherfunlab/eros-engine';
 
 export function validateDockerEndpoint(endpoint, {

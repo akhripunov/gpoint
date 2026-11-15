@@ -2,7 +2,7 @@
 # Build an explicitly pinned, unmodified upstream Eros image locally.
 set -eu
 
-expected_sha=d1a140083321687212fb7b17c09cc0c3c9639f5e
+expected_sha=83a54d1dba57874d55ecaa9756473f126b62844f
 if [ "$#" -ne 2 ]; then
   printf '%s\n' 'usage: build-stock-image.sh <clean-upstream-checkout> <local-image-tag>' >&2
   exit 2
@@ -25,7 +25,7 @@ fi
 docker build \
   --label 'org.opencontainers.image.source=https://github.com/etherfunlab/eros-engine' \
   --label "org.opencontainers.image.revision=$actual_sha" \
-  --label 'com.gpoint.eros.upstream-revision=d1a140083321687212fb7b17c09cc0c3c9639f5e' \
+  --label 'com.gpoint.eros.upstream-revision=83a54d1dba57874d55ecaa9756473f126b62844f' \
   --label 'com.gpoint.eros.patch-set.sha256=none' \
   --tag "$image_tag" \
   --file "$source_dir/docker/Dockerfile" \
