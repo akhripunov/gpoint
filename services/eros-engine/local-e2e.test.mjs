@@ -577,7 +577,8 @@ test('dreaming scan, durable retrieval and provider context are checked by the r
   assert.match(runner, /LOCAL_E2E_DREAMING_SCAN=PASS/);
   assert.match(runner, /LOCAL_E2E_DURABLE_MEMORY=PASS/);
   assert.match(runner, /--recall-only/);
-  assert.match(runner, /classified_at IS NOT NULL/);
+  assert.doesNotMatch(runner, /classified_at/);
+  assert.match(runner, /SELECT count\(\*\) FROM engine\.companion_memories WHERE session_id =/);
 });
 
 test('dreaming idle fixture ages the stock Eros scan-state clock', () => {

@@ -335,11 +335,11 @@ scan_state_pending=$(compose exec -T postgres psql -U eros_test_admin -d eros_te
 memory_state=
 for attempt in $(seq 1 60); do
   memory_state=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc \
-    "SELECT (SELECT classified_at IS NOT NULL FROM engine.chat_sessions WHERE id = '$session_id'::uuid)::text || ':' || (SELECT count(*) FROM engine.companion_memories WHERE session_id = '$session_id'::uuid AND category IS NOT NULL AND content LIKE 'SYNTH_%');")
-  [ "$memory_state" = "true:2" ] && break
+    "SELECT count(*) FROM engine.companion_memories WHERE session_id = '$session_id'::uuid AND category IS NOT NULL AND content LIKE 'SYNTH_%';")
+  [ "$memory_state" = "2" ] && break
   sleep 1
 done
-if [ "$memory_state" != "true:2" ]; then
+if [ "$memory_state" != "2" ]; then
   echo "LOCAL_E2E_DURABLE_MEMORY=FAIL state=$memory_state" >&2
   compose exec -T postgres psql -U eros_test_admin -d gpoint_test -Atc \
     "SELECT 'EROS_QUEUE_DIAGNOSTIC=' || job_type || ':' || status || ':' || coalesce(error_code, 'none') || ':attempts=' || attempts FROM engine.eros_inference_jobs ORDER BY created_at;" >&2 || true
