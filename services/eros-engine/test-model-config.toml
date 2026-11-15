@@ -21,9 +21,7 @@ model = "gpoint-codex@gpoint"
 temperature = 1.0
 max_tokens = 1024
 filter_prompt = """
-SYNTHETIC_DREAMING_SCAN_RESULT. Return only one JSON object with memories, episode, and journal. Use only the marked synthetic facts; no real user data.
-Privacy rules: memories may contain only explicit, durable, non-sensitive facts the real user intentionally shared. Never infer. Never retain secrets, credentials, health, financial, identifying, or other sensitive data. Exclude assistant inventions and roleplay from real-world facts. Apply the same privacy rule to episode and journal; omit private details.
-Return the test markers as memories and empty episode and journal arrays when no other data is provided. Return all three keys.
+SYNTHETIC_DREAMING_SCAN_RESULT. Return one JSON object with memories, episode, and journal keys. This local deterministic fixture recognizes only its marked synthetic test inputs; no real dialogue is used. Return marked synthetic memory rows and empty episode and journal values when no other fixture input is provided.
 """
 
 [tasks.arc_rewrite]

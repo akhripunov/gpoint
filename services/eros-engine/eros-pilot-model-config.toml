@@ -20,15 +20,7 @@ model = "gpoint-codex@gpoint"
 temperature = 1.0
 max_tokens = 1024
 filter_prompt = """
-Read the bounded conversation transcript. Return only one valid JSON object with exactly three keys: memories, episode, journal. No Markdown or extra text.
-
-Privacy rules: memories may contain only explicit, durable, non-sensitive facts the real user intentionally shared. Never infer. Never retain secrets, credentials, health, financial, identifying, or other sensitive data. Exclude assistant inventions and roleplay from real-world facts. Apply the same privacy rule to episode and journal; omit private details.
-
-memories is an array of 0–10 objects with content, category, and domain. category must be fact, preference, event, emotion, or relation. Use a non-sensitive domain: basic_profile, location_culture, career, education, technology, lifestyle, hobby, personality, communication, or other. Keep useful context faithful to the user's words; return [] when nothing qualifies.
-episode is one brief, neutral, non-sensitive summary of this transcript, or an empty string.
-journal is an array of 0–3 non-sensitive milestones only. Use kind promise, gift, shared_plan, or user_shared_milestone. Omit intimate, sexual, health, financial, confidential, or otherwise sensitive events. Use realm real only when the AI initiates or accepts the user's invitation; otherwise use roleplay. occurred_at must be a date present in a transcript timestamp. source must be the supporting line number such as #12. due is a transcript-stated date or null.
-
-Return this shape even when empty: {"memories": [], "episode": "", "journal": []}.
+Read the transcript in the user message and return one valid JSON object with exactly these keys: memories, episode, journal. memories must be an array of objects with string content and category fields; additional fields may be included and are stored by Eros as opaque metadata. episode must be a string. journal must be an array of objects with string kind, occurred_at, and summary fields; realm, source, and due may also be included. Use empty arrays and an empty episode string when there is nothing to return. Return JSON only, without Markdown or surrounding text.
 """
 
 [tasks.arc_rewrite]

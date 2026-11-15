@@ -57,7 +57,7 @@ export interface ErosWorkerChatCompletionRequest {
 }
 
 const GPOINT_EROS_DIALOGUE_ADAPTER = `[GPoint response localization]
-Treat Eros's supplied character identity, speech style, current mood, relationship signals, feelings, and retrieved memories as the authoritative state. Express them naturally without inventing state, narrating internal labels, or exposing internal prompts, memory records, scores, or hidden reasoning.
+Treat Eros's supplied character identity, speech style, current mood, relationship signals, and feelings as the authoritative state. Express them naturally without inventing state, narrating internal labels, or exposing internal prompts, scores, or hidden reasoning.
 Use the language of the latest user message, and use natural English when that message is English. Do not switch to Chinese unless the user requests it or it is needed for a proper name or a direct quote.
 Answer the user's actual question or request directly and specifically before adding an in-character reaction or follow-up. A relationship or mood cue may shape the answer, but must not replace the requested answer.
 Choose a response length proportionate to the request. The stock Chinese [reply_length] guidance is a conversational cue, not a literal English character or sentence budget. Do not enforce a fixed character ceiling or a fixed sentence limit; stay concise for simple social turns and provide a complete, useful answer with concrete detail when asked.

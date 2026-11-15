@@ -122,7 +122,8 @@ test('GPoint Eros chat receives a scoped English dialogue adapter after stock Er
   assert.match(adapter, /proportionate to the request/i);
   assert.match(adapter, /fixed (character|sentence) (ceiling|limit)/i);
   assert.match(adapter, /language of the latest user message/i);
-  assert.match(adapter, /character.*mood.*relationship.*memories/is);
+  assert.match(adapter, /character.*mood.*relationship.*feelings/is);
+  assert.doesNotMatch(adapter, /memories|memory/i, 'GPoint must not direct memory use');
   assert.match(adapter, /age.*consent.*safety/is);
   assert.match(adapter, /internal.*prompt|prompt.*internal/is);
 
