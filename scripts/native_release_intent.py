@@ -273,6 +273,27 @@ ARTIFACT_PREPARE_PATHS = frozenset({
     "tests/test_native_release_intent.py",
     "tests/test_prisma_migration_release_plan.py",
 })
+LAYER7_EROS_MARKER = "GPOINT-LAYER7-EROS"
+EROS_UPSTREAM_PIN = "services/eros-engine/upstream.sha"
+LAYER7_EROS_RELEASE_PATHS = frozenset({
+    ".github/actions/layer7-deploy/action.yml",
+    ".github/workflows/gpoint-layer7-staging.yml",
+    ".github/workflows/gpoint-native-release.yml",
+    "docs/release/automation.md",
+    "scripts/eros-native-database.py",
+    "scripts/layer7_release_scope.py",
+    "scripts/native_release_intent.py",
+    "scripts/verify_native_eros_image.py",
+    "scripts/verify_native_prepared_run.py",
+    "tests/test_eros_native_database.py",
+    "tests/test_eros_native_database_workflow.py",
+    "tests/test_kamal_release_config.py",
+    "tests/test_layer7_release_scope.py",
+    "tests/test_layer7_staging_workflow.py",
+    "tests/test_native_build_boundary.py",
+    "tests/test_native_release_intent.py",
+    "tests/test_native_prepared_run.py",
+})
 LAYER7_API_MARKER = "GPOINT-LAYER7-API"
 LAYER7_API_PATHS = frozenset({
     "apps/api/src/eros-response-prompt.js",
@@ -319,6 +340,17 @@ def classify_push(*, event_name: str, ref: str,
     if "schema" in kinds or "unknown" in kinds:
         return "BLOCK"
     markers = set(commit_message.splitlines())
+    if LAYER7_EROS_MARKER in markers:
+        if markers & {ARTIFACT_PREPARE_MARKER, LAYER7_API_MARKER}:
+            return "BLOCK"
+        if not any(path.startswith("services/eros-engine/") for path in changed_paths):
+            return "BLOCK"
+        if any(not path.startswith("services/eros-engine/")
+               for path in changed_paths - LAYER7_EROS_RELEASE_PATHS):
+            return "BLOCK"
+        return "LAYER7_EROS"
+    if EROS_UPSTREAM_PIN in changed_paths:
+        return "BLOCK"
     if LAYER7_API_MARKER in markers:
         if ARTIFACT_PREPARE_MARKER in markers or not changed_paths <= LAYER7_API_PATHS:
             return "BLOCK"

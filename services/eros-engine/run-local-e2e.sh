@@ -11,7 +11,7 @@ docker_local(){ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH DOCK
 image_id=$(node "$repo/services/eros-engine/local-test-policy.mjs" image "$image") || exit 2
 printf 'LOCAL_E2E_DOCKER_CONTEXT=LOCAL_UNIX:%s\n' "$local_context"
 printf 'LOCAL_E2E_EROS_IMAGE_ID=%s\n' "$image_id"
-printf 'LOCAL_E2E_STOCK_EROS_IMAGE=PASS source_sha=83a54d1dba57874d55ecaa9756473f126b62844f\n'
+printf 'LOCAL_E2E_STOCK_EROS_IMAGE=PASS source_sha=%s\n' "$(cat "$(dirname -- "$0")/upstream.sha")"
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/me36-local-e2e.XXXXXX"); chmod 700 "$tmp"
 project="me36_$(python3 -c 'import secrets;print(secrets.token_hex(10))')"

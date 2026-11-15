@@ -437,13 +437,13 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         build = jobs["build"]
         eros_build = next(step for step in build["steps"] if step.get("id") == "eros")
         self.assertEqual(eros_build["with"]["context"],
-                         "https://github.com/etherfunlab/eros-engine.git#83a54d1dba57874d55ecaa9756473f126b62844f")
+                         "https://github.com/etherfunlab/eros-engine.git#${{ env.EROS_UPSTREAM_SHA }}")
         self.assertEqual(eros_build["with"]["platforms"], "linux/amd64")
         self.assertTrue(eros_build["with"]["push"])
         self.assertIn("sbom: true", yaml.safe_dump(eros_build["with"]))
         self.assertIn("provenance: mode=max", yaml.safe_dump(eros_build["with"]))
         self.assertIn("verify_native_eros_image.py", workflow_text)
-        self.assertIn("83a54d1dba57874d55ecaa9756473f126b62844f", workflow_text)
+        self.assertIn("services/eros-engine/upstream.sha", workflow_text)
         self.assertIn("config/deploy.eros.yml", workflow_text)
         self.assertIn("config/deploy.eros-relay.yml", workflow_text)
         self.assertIn("DEPLOY_EROS", workflow_text)

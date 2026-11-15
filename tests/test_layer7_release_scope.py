@@ -108,7 +108,7 @@ def test_auto_workflow_is_branch_restricted_and_only_mutates_api():
     assert all("python3 - collect" not in step.get("run", "") for step in deploy["steps"])
     for title in ("Apply isolated Prisma and SQLx migrations with recovery gates",
                   "Install staging secrets and provision only the empty GPoint staging database"):
-        assert next(step for step in steps if step.get("name") == title)["if"] == "github.event_name == 'workflow_dispatch'"
+        assert next(step for step in steps if step.get("name") == title)["if"] == "github.event_name == 'workflow_dispatch' && inputs.mode == 'full'"
     pull = next(step for step in steps if step.get("name", "").startswith("Pull and verify exact private"))
     assert pull["run"].index('if [[ "$SCOPED" != true ]]') < pull["run"].index('images+=(')
     deploy = next(step["run"] for step in steps if step.get("name", "").startswith("Deploy exact immutable"))

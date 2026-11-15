@@ -1,8 +1,19 @@
 name: GPoint — Protected Layer7 staging deploy
 
+run-name: Layer7 ${{ inputs.mode }} ${{ inputs.candidate_sha }}
+
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: Layer7 deployment scope and phase
+        type: choice
+        options: [full, eros-prepare, eros-deploy]
+        default: full
+      eros_rehearsal:
+        description: Successful eros-prepare run ID and attempt, as ID-attempt
+        required: false
+        type: string
       candidate_sha:
         description: Exact 40-character candidate SHA
         required: true
@@ -51,13 +62,18 @@ jobs:
     name: Protected Layer7 staging Kamal deploy and verify
     if: >-
       github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_layer7_staging == true &&
+      github.ref == 'refs/heads/main' &&
+      github.actor == github.repository_owner && github.triggering_actor == github.repository_owner &&
+      inputs.candidate_sha == github.sha &&
       inputs.approve_layer7_staging == true &&
+      ((inputs.mode == 'eros-prepare' && inputs.deploy_layer7_staging == false) ||
+       (inputs.mode != 'eros-prepare' && inputs.deploy_layer7_staging == true)) &&
       inputs.staging_image_sha != ''
     runs-on: ubuntu-latest
     timeout-minutes: 90
     environment:
       name: layer7-staging
+      deployment: ${{ inputs.mode != 'eros-prepare' }}
     concurrency:
       group: gpoint-layer7-staging
       cancel-in-progress: false
@@ -96,6 +112,8 @@ jobs:
           } >> "$GITHUB_ENV"
       - uses: ./.github/actions/layer7-deploy
         with:
+          mode: ${{ inputs.mode }}
+          eros_rehearsal: ${{ inputs.eros_rehearsal }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           staging_env_bundle: ${{ secrets.GPOINT_LAYER7_STAGING_APP_ENV }}
           candidate_sha: ${{ inputs.candidate_sha }}

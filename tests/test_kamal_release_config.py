@@ -926,6 +926,7 @@ def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
                 'gpoint-miniapp-web': {'version': 'a' * 40 + '-123-1', 'sourceSha': 'a' * 40, 'repositoryDigest': 'ghcr.io/akhripunov/gpoint-miniapp@sha256:' + 'd' * 64, 'baselineImageId': None},
             },
         }, separators=(',', ':')).encode()).decode(),
+        'expected_eros_upstream': 'c' * 40,
         'BASELINE_ROLE_VERSION': 'b' * 40 + '-100-1', 'BASELINE_ROLE_SOURCE_SHA': 'b' * 40,
         'DB_MOUNTS_SHA256': 'c' * 64, 'REDIS_MOUNTS_SHA256': 'd' * 64,
     }

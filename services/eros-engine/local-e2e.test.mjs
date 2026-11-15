@@ -374,15 +374,16 @@ test('Native release uses its pinned Buildx action and has no legacy Prepare wor
 test('Eros image requires stock upstream provenance and rejects downstream patches', () => {
   const policy = readFileSync(new URL('local-test-policy.mjs', directory), 'utf8');
   assert.match(policy, /com\.gpoint\.integration\.revision/);
-  const reference = 'gpoint-eros:stock-83a54d1dba57874d55ecaa9756473f126b62844f';
+  const upstream = readFileSync(new URL('upstream.sha', directory), 'utf8').trim();
+  const reference = `gpoint-eros:stock-${upstream}`;
   const metadata = {
     id: `sha256:${'a'.repeat(64)}`,
     os: 'linux',
     architecture: 'amd64',
     source: 'https://github.com/etherfunlab/eros-engine',
-    upstreamRevision: '83a54d1dba57874d55ecaa9756473f126b62844f',
+    upstreamRevision: upstream,
     patchSha256: 'none',
-    buildRevision: '83a54d1dba57874d55ecaa9756473f126b62844f',
+    buildRevision: upstream,
   };
   assert.equal(validateErosImageInspection(reference, metadata), metadata.id);
   const candidateSha = 'b'.repeat(40);
@@ -406,7 +407,7 @@ test('the Eros patch applier is disabled and the stock builder pins a clean sour
   assert.match(applier, /fails closed|patches_disabled/i);
   assert.doesNotMatch(applier, /git .* apply/);
   assert.match(builder, /eros_source_not_clean/);
-  assert.match(builder, /83a54d1dba57874d55ecaa9756473f126b62844f/);
+  assert.match(builder, /upstream\.sha/);
   assert.match(builder, /patch-set\.sha256=none/);
 });
 

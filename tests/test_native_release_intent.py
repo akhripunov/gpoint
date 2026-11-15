@@ -953,3 +953,17 @@ def test_rollback_dispatch_requires_main_exact_owner_explicit_approval_and_no_ot
         invalid.update(changes)
         assert MODULE.classify_dispatch(**invalid)[1] is False
         assert MODULE.classify_dispatch(**invalid)[0] != "ROLLBACK"
+
+
+def test_layer7_eros_push_requires_explicit_isolated_artifact_route():
+    paths = {"services/eros-engine/upstream.sha", "scripts/eros-native-database.py"}
+    context = {"event_name": "push", "ref": "refs/heads/main"}
+    marker = "Stock Eros update\n\nGPOINT-LAYER7-EROS"
+    assert MODULE.classify_push(**context, changed_paths=paths, commit_message=marker) == "LAYER7_EROS"
+    assert MODULE.classify_push(**context, changed_paths=paths) == "BLOCK"
+    assert MODULE.classify_push(
+        **context, changed_paths=paths | {"apps/api/src/main.ts"}, commit_message=marker
+    ) == "BLOCK"
+    assert MODULE.classify_push(
+        **context, changed_paths=paths, commit_message=marker + "\nGPOINT-ARTIFACT-PREPARE"
+    ) == "BLOCK"

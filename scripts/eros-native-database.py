@@ -620,7 +620,7 @@ def _load_plan(path: Path) -> dict:
 def lifecycle(mode: str, candidate: str, image: str, run_id: str, *, rollback: bool = False) -> dict:
     if not SHA40.fullmatch(candidate or "") or not IMAGE.fullmatch(image or "") or not RUN_ID.fullmatch(run_id or ""):
         raise ValueError("exact Eros candidate, digest and run identity are required")
-    if mode not in {"prepare", "apply", "rollback-check", "verify-unchanged"}:
+    if mode not in {"prepare", "apply", "rollback-check", "verify-unchanged", "verify-prepared", "verify-applied"}:
         raise ValueError("unsupported Eros database lifecycle mode")
     env = _read_env()
     plan_path = BACKUP_DIR / f"native-plan-{run_id}.json"
@@ -697,11 +697,17 @@ def lifecycle(mode: str, candidate: str, image: str, run_id: str, *, rollback: b
         raise RuntimeError("PostgreSQL runtime identity changed after Eros migration rehearsal")
     facts = _database_facts(env_identity)
     before = _ledger("eros")
+    use_target = mode == "verify-applied"
+    expected_ledger = plan["targetLedger"] if use_target else plan["baselineLedger"]
+    expected_ledger_digest = plan["targetLedgerSha256"] if use_target else plan["baselineLedgerSha256"]
     if (facts["marker"] != plan["databaseIdentity"]
             or facts["clusterSystemIdentifier"] != plan["clusterSystemIdentifier"]
-            or before != plan["baselineLedger"]
-            or _ledger_digest(before) != plan["baselineLedgerSha256"]):
+            or before != expected_ledger or _ledger_digest(before) != expected_ledger_digest):
         raise RuntimeError("Eros database changed after isolated migration rehearsal")
+    if mode in {"verify-prepared", "verify-applied"}:
+        print("EROS_SQLX_PENDING=" + str(len(plan["pendingMigrations"])))
+        print("EROS_DATABASE_" + mode.removeprefix("verify-").upper() + "=PASS")
+        return plan
     if plan["pendingMigrations"]:
         expected_stages = [{"image": stage_image, "upstreamSha": upstream_sha}
                            for stage_image, upstream_sha in _migration_stage_images(before, image)]
@@ -726,7 +732,7 @@ def lifecycle(mode: str, candidate: str, image: str, run_id: str, *, rollback: b
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("prepare", "apply", "rollback-check", "verify-unchanged"), required=True)
+    parser.add_argument("--mode", choices=("prepare", "apply", "rollback-check", "verify-unchanged", "verify-prepared", "verify-applied"), required=True)
     parser.add_argument("--candidate", required=True)
     parser.add_argument("--image", required=True)
     parser.add_argument("--run-id", required=True)

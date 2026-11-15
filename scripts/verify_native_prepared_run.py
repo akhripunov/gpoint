@@ -15,6 +15,7 @@ from typing import Any
 WORKFLOW_PATH = ".github/workflows/gpoint-native-release.yml"
 BUILD_JOB_NAME = "Build and publish immutable images"
 ARTIFACT_PREPARE_MARKER = "GPOINT-ARTIFACT-PREPARE"
+LAYER7_EROS_MARKER = "GPOINT-LAYER7-EROS"
 REPOSITORIES = {
     "CORE": "ghcr.io/akhripunov/gpoint-runtime",
     "AGATA": "ghcr.io/akhripunov/gpoint-agata-runtime",
@@ -52,7 +53,8 @@ def _strip_github_timestamp(line: str) -> str:
 
 def verify_prepared_run(run: Any, jobs_payload: Any, logs: bytes,
                         candidate_sha: str, digests: dict[str, str],
-                        expected_run_id: int, commit_payload: Any) -> tuple[int, str]:
+                        expected_run_id: int, commit_payload: Any, *,
+                        layer7_eros: bool = False) -> tuple[int, str]:
     if not isinstance(run, dict):
         raise ValueError("prepared run metadata is malformed")
     expected_run = {
@@ -75,17 +77,26 @@ def verify_prepared_run(run: Any, jobs_payload: Any, logs: bytes,
         raise ValueError("prepared run attempt is missing or invalid")
     commit = commit_payload.get("commit") if isinstance(commit_payload, dict) else None
     message = commit.get("message") if isinstance(commit, dict) else None
-    if (not isinstance(message, str)
-            or not re.search(rf"(?m)^{re.escape(ARTIFACT_PREPARE_MARKER)}$", message)):
+    marker = LAYER7_EROS_MARKER if layer7_eros else ARTIFACT_PREPARE_MARKER
+    if not isinstance(message, str) or marker not in message.splitlines():
         raise ValueError("prepared run commit is not marked for artifact-only preparation")
     if not isinstance(digests, dict) or not digests or any(
             component not in REPOSITORIES or not isinstance(digest, str)
             or not DIGEST.fullmatch(digest) for component, digest in digests.items()):
         raise ValueError("prepared image digest map is malformed")
 
+    if layer7_eros and set(digests) != {"EROS"}:
+        raise ValueError("Layer7 Eros preparation requires exactly the Eros digest")
+
     jobs = jobs_payload.get("jobs") if isinstance(jobs_payload, dict) else None
     if not isinstance(jobs, list):
         raise ValueError("prepared run job list is malformed")
+    if layer7_eros:
+        deploys = [job for job in jobs if isinstance(job, dict)
+                   and job.get("name") == "Kamal production Deploy and Verify"]
+        if len(deploys) != 1 or deploys[0].get("conclusion") != "skipped":
+            raise ValueError("prepared Eros run must have skipped production Deploy")
+
     builds = [job for job in jobs if isinstance(job, dict)
               and job.get("name") == BUILD_JOB_NAME]
     if len(builds) != 1:
@@ -112,6 +123,7 @@ def verify_prepared_run(run: Any, jobs_payload: Any, logs: bytes,
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--layer7-eros", action="store_true")
     parser.add_argument("--run", required=True, type=Path)
     parser.add_argument("--jobs", required=True, type=Path)
     parser.add_argument("--commit", required=True, type=Path)
@@ -129,7 +141,7 @@ def main() -> int:
             json.loads(args.jobs.read_text(encoding="utf-8")),
             args.logs.read_bytes(), args.candidate_sha,
             json.loads(args.digests), args.run_id,
-            json.loads(args.commit.read_text(encoding="utf-8")),
+            json.loads(args.commit.read_text(encoding="utf-8")), layer7_eros=args.layer7_eros,
         )
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise SystemExit("PREPARED_RUN=FAIL reason=" + str(exc)) from None

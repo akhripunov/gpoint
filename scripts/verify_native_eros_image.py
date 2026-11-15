@@ -14,7 +14,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from verify_native_image_attestation import verify_provenance_identity, verify_sbom
 
 UPSTREAM_REPOSITORY = "https://github.com/etherfunlab/eros-engine.git"
-UPSTREAM_SHA = "83a54d1dba57874d55ecaa9756473f126b62844f"
+UPSTREAM_SHA = (Path(__file__).resolve().parents[1] / "services/eros-engine/upstream.sha").read_text().strip()
+if not re.fullmatch(r"[0-9a-f]{40}", UPSTREAM_SHA):
+    raise ValueError("invalid Eros upstream SHA")
 EROS_IMAGE = "ghcr.io/akhripunov/gpoint-eros"
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 OCI_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
