@@ -490,7 +490,6 @@ export class ErosEngineClient {
       {
         content,
         client_msg_id: clientMessageId,
-        memory_scope: 'neutral_and_relationship',
         prompt_traits: GPOINT_EROS_RESPONSE_PROMPT_TRAITS,
         audit: { user: bridgeIdentity },
       }, 'text/event-stream');
