@@ -582,8 +582,8 @@ test('dreaming scan, durable retrieval and provider context are checked by the r
 
 test('dreaming idle fixture ages the stock Eros scan-state clock', () => {
   const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
-  assert.match(runner, /UPDATE engine\.relationship_scan_state SET last_turn_at = now\(\) - interval '2 minutes' WHERE instance_id =/);
-  assert.match(runner, /AND pending_turns >= 3 RETURNING pending_turns/);
+  assert.match(runner, /WITH aged_scan_state AS \(UPDATE engine\.relationship_scan_state SET last_turn_at = now\(\) - interval '2 minutes' WHERE instance_id =/);
+  assert.match(runner, /AND pending_turns >= 3 RETURNING pending_turns\) SELECT pending_turns FROM aged_scan_state/);
 });
 
 test('standalone PostgreSQL integration container is owned by and cleaned with its project', () => {
