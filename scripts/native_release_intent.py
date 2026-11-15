@@ -275,12 +275,13 @@ ARTIFACT_PREPARE_PATHS = frozenset({
 })
 LAYER7_EROS_MARKER = "GPOINT-LAYER7-EROS"
 EROS_UPSTREAM_PIN = "services/eros-engine/upstream.sha"
+EROS_MIGRATION_HELPER = "scripts/eros-native-database.py"
 LAYER7_EROS_RELEASE_PATHS = frozenset({
     ".github/actions/layer7-deploy/action.yml",
     ".github/workflows/gpoint-layer7-staging.yml",
     ".github/workflows/gpoint-native-release.yml",
     "docs/release/automation.md",
-    "scripts/eros-native-database.py",
+    EROS_MIGRATION_HELPER,
     "scripts/layer7_release_scope.py",
     "scripts/native_release_intent.py",
     "scripts/verify_native_eros_image.py",
@@ -344,13 +345,15 @@ def classify_push(*, event_name: str, ref: str,
     if LAYER7_EROS_MARKER in markers:
         if markers & {ARTIFACT_PREPARE_MARKER, LAYER7_API_MARKER}:
             return "BLOCK"
-        if not any(path.startswith("services/eros-engine/") for path in changed_paths):
+        if EROS_MIGRATION_HELPER not in changed_paths and not any(
+            path.startswith("services/eros-engine/") for path in changed_paths
+        ):
             return "BLOCK"
         if any(not path.startswith("services/eros-engine/")
                for path in changed_paths - LAYER7_EROS_RELEASE_PATHS):
             return "BLOCK"
         return "LAYER7_EROS"
-    if EROS_UPSTREAM_PIN in changed_paths:
+    if changed_paths & {EROS_UPSTREAM_PIN, EROS_MIGRATION_HELPER}:
         return "BLOCK"
     if LAYER7_API_MARKER in markers:
         if ARTIFACT_PREPARE_MARKER in markers or not changed_paths <= LAYER7_API_PATHS:

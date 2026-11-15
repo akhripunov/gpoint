@@ -192,6 +192,12 @@ class ErosNativeDatabaseTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "confirmed v2.3.1 upstream"):
                 DB._validate_v231_source_history(rows, "f" * 40)
 
+    def test_v270_ledger_uses_sqlx_descriptions_with_spaces(self):
+        rows = [ledger(version, checksum, description.replace("_", " "))[0]
+                for version, (description, checksum) in DB.EROS_V270_HISTORY.items()]
+        self.assertEqual(rows[1]["description"], "chat images events event")
+        self.assertEqual(DB._validate_v270_history(rows), rows)
+
     def test_official_v270_history_requires_exact_versions_and_checksums(self):
         rows = [ledger(version, *reversed(DB.EROS_V270_HISTORY[version]))[0]
                 for version in DB.EROS_V270_HISTORY]
