@@ -31,6 +31,30 @@ IMAGE = re.compile(r"^ghcr\.io/akhripunov/gpoint-eros@sha256:[0-9a-f]{64}$")
 RUN_ID = re.compile(r"^[0-9]{1,20}-[0-9]{1,8}$")
 DB_NAME = re.compile(r"^eros_[a-z0-9_]{1,48}$")
 
+# Signed upstream release tags were verified against these commits. Pin the
+# published multi-arch manifests so the legacy SQLx history is validated by
+# stock Eros migrators, never by a local imitation of SQLx.
+EROS_V231_SHA = "fd72b0ff1c145d4bdd9cc27b731e9e6512dc038b"
+EROS_V231_IMAGE = "ghcr.io/etherfunlab/eros-engine@sha256:0b2b29a989e7795058e00956712bba0e4be037817253fb4ffe7f5194dc838bf8"
+# SHA-256 over canonical [version, description, SHA-384 checksum] triples from
+# the official v2.3.1 migration files, for the v2.2.1 and v2.3.1 checkpoints.
+EROS_V221_HISTORY_SHA256 = "8384fd67e6b280c3d6ca6683343516acaa1f60934363aea69d231fdc1393c207"
+EROS_V231_HISTORY_SHA256 = "00c0e0e461ca84095cae16ee3912649ab64f4796d5bd1fb74a2a3d8897548649"
+EROS_V250_SHA = "d12172de0e674b9f6fbe8cf78ebbb3338b746a7b"
+EROS_V250_IMAGE = "ghcr.io/etherfunlab/eros-engine@sha256:bf9a887f7a1a12816957eaf83b4ad0fde7d581e2795ad937d3ee33b95f3065a5"
+EROS_V270_SHA = "83a54d1dba57874d55ecaa9756473f126b62844f"
+EROS_V270_HISTORY = {
+    0: ("baseline", "36dee22457e174da8003b5efe9730bd877745eef9334d275eb8ae40662863d9d02880c73185e5f672a5da8f589f141c2"),
+    78: ("chat_images_events_event", "e1d7b3a625212c58ec2c462a8f6e37685b52e38eb13bfb8b7655a9d516cefd4df30ef9876344b31908b5a8c37a50aba1"),
+    79: ("human_facts", "7da3303ed9cf36ee261fdc225876ad849b3c6dd389cf7ffe4dd54b173a506e495fb061503f6b1c8436231c5b6392e449"),
+    80: ("human_facts_backfill", "b4514743964b097b8c9c7b6be0b72208a02386bc1ce35ee30dd69428989bd05c27e2a74bca02a1df0c0f559cdbb59347"),
+    81: ("insights_2_cleanup", "6e4d48bb0c167b1429c013363df46d58ec21ed648b0f0405e27aacac32941d9d8aec8914fdfcf6baf24ead5ca69ac768"),
+    82: ("relationship_memory", "5d63b454a5a8e43a5021fda22031e60c340f8bd6ecca497a2c322d4dd4dfc1756484265654b53b607f8ebca1dc64d8d7"),
+    83: ("life_choices_romantic_kinds", "b6716f71621c33c859a61b4cfbdb94d0a5d97f795ca6483e8a16774582e5ca4575f9d0c656bc2d0780bae95152629fdb"),
+    84: ("row_deletions", "e8ce20d4b600254cc513d056cd6efeddef391d081916c1ef4d4b3632e9e74595abd9aae3832937e92e29b0d9e919f430"),
+    85: ("activities", "ee3d6ea0b6e30a3a74c89c0cff6d55365923bfe089b6295076efc12ab173f03bfcfa384a0a5ac7192d595a90a776442b"),
+}
+
 
 def _run(argv: list[str], *, input: str | bytes | None = None, timeout: int = 180,
          check: bool = True, stdout=None, stdin=None) -> subprocess.CompletedProcess:
@@ -249,6 +273,123 @@ def _migration_delta(before: list[dict], after: list[dict]) -> list[dict]:
     if pending and before and min(row["version"] for row in pending) <= max(known):
         raise RuntimeError("stock Eros transition inserts a migration behind the live SQLx head")
     return pending
+
+
+def _versions(rows: list[dict]) -> tuple[int, ...]:
+    return tuple(row["version"] for row in rows)
+
+
+def _migration_history_digest(rows: list[dict]) -> str:
+    entries = [[row.get("version"), row.get("description"), row.get("checksum")] for row in rows]
+    return hashlib.sha256(json.dumps(entries, separators=(",", ":")).encode()).hexdigest()
+
+
+def _validate_v231_source_history(rows: list[dict], upstream_sha: str) -> list[dict]:
+    if upstream_sha != EROS_V231_SHA:
+        raise RuntimeError("Eros source SQLx history is not tied to the confirmed v2.3.1 upstream")
+    versions = _versions(rows)
+    if versions == tuple(range(72)):
+        expected = EROS_V221_HISTORY_SHA256
+    elif versions == tuple(range(78)):
+        expected = EROS_V231_HISTORY_SHA256
+    else:
+        raise RuntimeError("Eros source SQLx history is not an exact v2.2.1 or v2.3.1 checkpoint")
+    if any(row.get("success") is not True or not re.fullmatch(r"[0-9a-f]{96}", row.get("checksum", ""))
+           or not row.get("description") for row in rows):
+        raise RuntimeError("Eros source SQLx history contains failed or malformed migrations")
+    if _migration_history_digest(rows) != expected:
+        raise RuntimeError("Eros source SQLx history differs from the confirmed v2.3.1 upstream migrations")
+    return rows
+
+
+def _validate_exact_history(rows: list[dict], expected: dict[int, tuple[str, str]]) -> list[dict]:
+    if _versions(rows) != tuple(expected):
+        raise RuntimeError("Eros SQLx ledger does not match the exact upstream migration history")
+    for row in rows:
+        description, checksum = expected[row["version"]]
+        if (row.get("description") != description or row.get("checksum") != checksum
+                or row.get("success") is not True):
+            raise RuntimeError("Eros SQLx ledger does not match the exact upstream migration history")
+    return rows
+
+
+def _validate_baseline_transition(before: list[dict], after: list[dict], upstream_sha: str) -> list[dict]:
+    if upstream_sha != EROS_V250_SHA or _versions(before) != tuple(range(78)):
+        raise RuntimeError("Eros baseline fold requires the confirmed upstream v2.5.0 history")
+    return _validate_exact_history(after, {version: EROS_V270_HISTORY[version]
+                                           for version in (0, 78, 79, 80, 81)})
+
+
+def _validate_v270_history(rows: list[dict]) -> list[dict]:
+    return _validate_exact_history(rows, EROS_V270_HISTORY)
+
+
+def _image_upstream_sha(image: str) -> str:
+    result = _run(["docker", "image", "inspect", "--format",
+                   '{{index .Config.Labels "com.gpoint.eros.upstream-revision"}}', image], timeout=30)
+    sha = result.stdout.strip()
+    if not SHA40.fullmatch(sha):
+        raise RuntimeError("candidate Eros image has no confirmed upstream revision")
+    return sha
+
+
+def _migration_stage_images(before: list[dict], image: str, *, rollback: bool = False) -> list[tuple[str, str]]:
+    versions = _versions(before)
+    legacy_v221 = tuple(range(72))
+    legacy_v231 = tuple(range(78))
+    folded_v250 = (0, 78, 79, 80, 81)
+    if rollback:
+        return [(image, "")]
+    upstream_sha = _image_upstream_sha(image)
+    if upstream_sha != EROS_V270_SHA:
+        return [(image, upstream_sha)]
+    supported_folded = (versions and versions[0] == 0
+                        and tuple(range(78, versions[-1] + 1)) == versions[1:]
+                        and 81 <= versions[-1] <= 85)
+    if versions not in ((), legacy_v221, legacy_v231) and not supported_folded:
+        raise RuntimeError("Eros v2.7.0 refuses an unknown or unsupported SQLx migration history")
+    if versions in (legacy_v221, legacy_v231):
+        return [(EROS_V231_IMAGE, EROS_V231_SHA), (EROS_V250_IMAGE, EROS_V250_SHA), (image, EROS_V270_SHA)]
+    return [(image, EROS_V270_SHA)]
+
+
+def _run_migration_chain(image: str, database: str, env: dict[str, str], before: list[dict],
+                         *, rollback: bool = False) -> tuple[list[dict], list[dict], list[dict]]:
+    stages = _migration_stage_images(before, image, rollback=rollback)
+    if (EROS_V270_SHA in {upstream_sha for _, upstream_sha in stages}
+            and _versions(before) in (tuple(range(72)), tuple(range(78)))):
+        # Check all source versions, descriptions and SHA-384 checksums before
+        # any stock migrator can change the rehearsal or live database.
+        _validate_v231_source_history(before, EROS_V231_SHA)
+    current = before
+    applied: list[dict] = []
+    receipts: list[dict] = []
+    for stage_image, upstream_sha in stages:
+        prior = current
+        _run_migrator(stage_image, database, env)
+        current = _ledger(database)
+        if upstream_sha == EROS_V231_SHA:
+            prior_versions = _versions(prior)
+            if prior_versions not in (tuple(range(72)), tuple(range(78))):
+                raise RuntimeError("Eros v2.3.1 migration does not start at a confirmed SQLx history")
+            delta = _migration_delta(prior, current)
+            expected_delta = list(range(72, 78)) if prior_versions == tuple(range(72)) else []
+            if _versions(current) != tuple(range(78)) or [row["version"] for row in delta] != expected_delta:
+                raise RuntimeError("Eros v2.3.1 migration did not produce the exact 0–77 history")
+            applied.extend(delta)
+        elif upstream_sha == EROS_V250_SHA:
+            _validate_baseline_transition(prior, current, upstream_sha)
+            applied.extend(row for row in current if 78 <= row["version"] <= 81)
+        elif upstream_sha == EROS_V270_SHA:
+            delta = _migration_delta(prior, current)
+            _validate_v270_history(current)
+            applied.extend(delta)
+        else:
+            delta = _migration_delta(prior, current)
+            applied.extend(delta)
+        receipts.append({"image": stage_image, "upstreamSha": upstream_sha,
+                         "ledgerSha256": _ledger_digest(current)})
+    return current, applied, receipts
 
 
 def _dsn_for_database(url: str, database: str) -> str:
@@ -479,7 +620,7 @@ def _load_plan(path: Path) -> dict:
 def lifecycle(mode: str, candidate: str, image: str, run_id: str, *, rollback: bool = False) -> dict:
     if not SHA40.fullmatch(candidate or "") or not IMAGE.fullmatch(image or "") or not RUN_ID.fullmatch(run_id or ""):
         raise ValueError("exact Eros candidate, digest and run identity are required")
-    if mode not in {"prepare", "apply", "rollback-check", "verify-unchanged"}:
+    if mode not in {"prepare", "apply", "rollback-check", "verify-unchanged", "verify-prepared", "verify-applied"}:
         raise ValueError("unsupported Eros database lifecycle mode")
     env = _read_env()
     plan_path = BACKUP_DIR / f"native-plan-{run_id}.json"
@@ -497,10 +638,9 @@ def lifecycle(mode: str, candidate: str, image: str, run_id: str, *, rollback: b
             restored_before = _ledger(restore_db)
             if restored_before != before:
                 raise RuntimeError("isolated Eros restore SQLx ledger differs from the live database")
-            _run_migrator(image, restore_db, env)
+            after, pending, migration_stages = _run_migration_chain(
+                image, restore_db, env, before, rollback=rollback)
             _database_facts(env["EROS_DATABASE_IDENTITY"], restore_db)
-            after = _ledger(restore_db)
-            pending = _migration_delta(before, after)
             if _postgres_identity() != postgres_identity:
                 raise RuntimeError("PostgreSQL runtime identity changed during Eros migration rehearsal")
             if rollback and pending:
@@ -512,7 +652,8 @@ def lifecycle(mode: str, candidate: str, image: str, run_id: str, *, rollback: b
                     "databaseOwner": facts["owner"], "backupPath": str(backup), "backupSha256": backup_sha,
                     "baselineLedger": before, "baselineLedgerSha256": _ledger_digest(before),
                     "targetLedger": after, "targetLedgerSha256": _ledger_digest(after),
-                    "pendingMigrations": pending, "schemaApply": bool(pending), "rollbackCheck": rollback}
+                    "pendingMigrations": pending, "migrationStages": migration_stages,
+                    "schemaApply": bool(pending), "rollbackCheck": rollback}
             _safe_write_plan(plan_path, plan)
             print("EROS_DATABASE_PREFLIGHT=PASS")
             print("EROS_SQLX_MIGRATION_COUNT=" + str(len(before)))
@@ -556,16 +697,28 @@ def lifecycle(mode: str, candidate: str, image: str, run_id: str, *, rollback: b
         raise RuntimeError("PostgreSQL runtime identity changed after Eros migration rehearsal")
     facts = _database_facts(env_identity)
     before = _ledger("eros")
+    use_target = mode == "verify-applied"
+    expected_ledger = plan["targetLedger"] if use_target else plan["baselineLedger"]
+    expected_ledger_digest = plan["targetLedgerSha256"] if use_target else plan["baselineLedgerSha256"]
     if (facts["marker"] != plan["databaseIdentity"]
             or facts["clusterSystemIdentifier"] != plan["clusterSystemIdentifier"]
-            or before != plan["baselineLedger"]
-            or _ledger_digest(before) != plan["baselineLedgerSha256"]):
+            or before != expected_ledger or _ledger_digest(before) != expected_ledger_digest):
         raise RuntimeError("Eros database changed after isolated migration rehearsal")
+    if mode in {"verify-prepared", "verify-applied"}:
+        print("EROS_SQLX_PENDING=" + str(len(plan["pendingMigrations"])))
+        print("EROS_DATABASE_" + mode.removeprefix("verify-").upper() + "=PASS")
+        return plan
     if plan["pendingMigrations"]:
-        _run_migrator(image, "eros", env)
+        expected_stages = [{"image": stage_image, "upstreamSha": upstream_sha}
+                           for stage_image, upstream_sha in _migration_stage_images(before, image)]
+        planned_stages = [{"image": row.get("image"), "upstreamSha": row.get("upstreamSha")}
+                          for row in plan.get("migrationStages", [])]
+        if planned_stages != expected_stages:
+            raise RuntimeError("Eros migration stage plan differs from the isolated rehearsal")
+        after, _, migration_stages = _run_migration_chain(image, "eros", env, before)
         _database_facts(env_identity)
-        after = _ledger("eros")
-        if after != plan["targetLedger"] or _ledger_digest(after) != plan["targetLedgerSha256"]:
+        if (migration_stages != plan.get("migrationStages")
+                or after != plan["targetLedger"] or _ledger_digest(after) != plan["targetLedgerSha256"]):
             raise RuntimeError("live Eros SQLx ledger differs from isolated migration rehearsal")
         print("EROS_SCHEMA_APPLY=PASS MIGRATIONS=" + str(len(plan["pendingMigrations"])))
     else:
@@ -579,7 +732,7 @@ def lifecycle(mode: str, candidate: str, image: str, run_id: str, *, rollback: b
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("prepare", "apply", "rollback-check", "verify-unchanged"), required=True)
+    parser.add_argument("--mode", choices=("prepare", "apply", "rollback-check", "verify-unchanged", "verify-prepared", "verify-applied"), required=True)
     parser.add_argument("--candidate", required=True)
     parser.add_argument("--image", required=True)
     parser.add_argument("--run-id", required=True)

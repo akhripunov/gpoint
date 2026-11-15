@@ -151,21 +151,22 @@ def plan(repo, candidate, snapshot, *, previous=None, verify_schema=False):
     return ["CORE"] if changed else []
 
 
-def verify_runtime(before, after, candidate, version, digest):
+def verify_runtime(before, after, candidate, version, digest, *, eros=False):
     validate(before)
     validate(after)
-    if any(before[key] != after[key] for key in ("database", "prisma", "sqlx")):
-        raise ValueError("Layer7 database state changed during API-only release")
-    before_roles = {role: row for role, row in before["roles"].items() if role != API}
-    after_roles = {role: row for role, row in after["roles"].items() if role != API}
+    database_keys = ("database", "prisma") if eros else ("database", "prisma", "sqlx")
+    if any(before[key] != after[key] for key in database_keys):
+        raise ValueError("Layer7 database state changed outside the release scope")
+    target = ENGINE if eros else API
+    before_roles = {role: row for role, row in before["roles"].items() if role != target}
+    after_roles = {role: row for role, row in after["roles"].items() if role != target}
     if before_roles != after_roles:
-        raise ValueError("Layer7 untouched roles changed during API-only release")
-    api = after["roles"][API]
-    if (api["source"], api["version"], api["digest"]) != (candidate, version, digest):
-        raise ValueError("Layer7 installed API differs from the exact candidate image")
-    if api["container"] == before["roles"][API]["container"]:
-        raise ValueError("Layer7 API container was not replaced")
-
+        raise ValueError("Layer7 untouched roles changed during the scoped release")
+    running = after["roles"][target]
+    if (running["source"], running["version"], running["digest"]) != (candidate, version, digest):
+        raise ValueError(f"Layer7 installed {'Eros' if eros else 'API'} differs from the exact candidate image")
+    if running["container"] == before["roles"][target]["container"]:
+        raise ValueError("Layer7 target container was not replaced")
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -176,6 +177,7 @@ def main():
     planning.add_argument("snapshot", type=Path)
     planning.add_argument("--previous", required=True)
     verify = sub.add_parser("verify")
+    verify.add_argument("--eros", action="store_true")
     verify.add_argument("before", type=Path)
     verify.add_argument("after", type=Path)
     verify.add_argument("candidate")
@@ -189,7 +191,7 @@ def main():
                               previous=args.previous, verify_schema=True)))
     else:
         verify_runtime(json.loads(args.before.read_text()), json.loads(args.after.read_text()),
-                       args.candidate, args.version, args.digest)
+                       args.candidate, args.version, args.digest, eros=args.eros)
 
 
 if __name__ == "__main__":

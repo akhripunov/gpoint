@@ -1,9 +1,10 @@
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, normalize } from 'node:path';
-import { statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 
-const PINNED_UPSTREAM = 'd1a140083321687212fb7b17c09cc0c3c9639f5e';
+const PINNED_UPSTREAM = readFileSync(new URL('./upstream.sha', import.meta.url), 'utf8').trim();
+if (!/^[0-9a-f]{40}$/.test(PINNED_UPSTREAM)) throw new Error('invalid_eros_upstream_revision');
 const PINNED_SOURCE = 'https://github.com/etherfunlab/eros-engine';
 
 export function validateDockerEndpoint(endpoint, {

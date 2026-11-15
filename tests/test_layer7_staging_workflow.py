@@ -180,7 +180,10 @@ def test_staging_label_lookup_templates_use_valid_string_literals():
     commands = '\n'.join(s.get('run', '') for s in _staging_steps())
     args = re.findall(r"\{\{index \.Config\.Labels (.*?)\}\}", commands)
     assert len(args) >= 4
-    assert {json.loads(arg) for arg in args} == {'com.gpoint.source.revision', 'org.opencontainers.image.revision'}
+    assert {json.loads(arg) for arg in args} == {
+        'com.gpoint.source.revision', 'org.opencontainers.image.revision',
+        'com.gpoint.eros.upstream-revision', 'com.gpoint.eros.patch-set.sha256',
+    }
 
 
 def test_staging_route_probe_receives_stdin_and_uses_generated_eros_host():
@@ -437,3 +440,20 @@ def test_staging_eros_engine_reaches_the_embedding_relay_on_its_trusted_network(
 
     relay = (ROOT / 'services/eros-engine/eros-pilot-embedding-relay.mjs').read_text()
     assert 'EROS_DATA_NETWORK_PREFIX = "172.31.254."' in relay
+
+
+def test_eros_rehearsal_returns_before_live_apply_and_only_eros_redeploys():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text())
+    job = workflow["jobs"]["layer7_staging"]
+    assert "inputs.deploy_layer7_staging == false" in job["if"]
+    assert "inputs.deploy_layer7_staging == true" in job["if"]
+    assert job["concurrency"]["group"] == "gpoint-layer7-staging"
+    step = next(step for step in _staging_steps() if step.get("name", "").startswith("Rehearse or release"))
+    run = step["run"]
+    assert run.index('database verify-prepared "$run_id"') < run.index("exit 0") < run.index("database apply")
+    assert run.index("kamal app stop --roles engine") < run.index("database apply")
+    assert run.index("database apply") < run.index("kamal redeploy")
+    assert run.index("kamal redeploy") < run.index("database verify-applied")
+    assert "prisma migrate" not in run
+    assert run.count("kamal redeploy") == 1
+    assert '--roles engine --config-file "$config"' in run

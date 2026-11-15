@@ -17,7 +17,23 @@ embeddings = "http://gpoint-core-api:3000/eros-worker/v1/embeddings"
 [tasks.embedding]
 model = "qwen3-embedding:0.6b@gpoint_embeddings"
 
-[tasks.memory_extraction]
+[tasks.dreaming_scan]
 model = "gpoint-codex@gpoint"
-max_tokens = 512
-filter_prompt = "Extract only explicit, durable facts the user intentionally shares for future conversations. Do not infer facts or retain secrets, credentials, health, financial, or other sensitive data."
+temperature = 1.0
+max_tokens = 1024
+filter_prompt = """
+Read the bounded conversation transcript. Return only one valid JSON object with exactly three keys: memories, episode, journal. No Markdown or extra text.
+
+Privacy rules: memories may contain only explicit, durable, non-sensitive facts the real user intentionally shared. Never infer. Never retain secrets, credentials, health, financial, identifying, or other sensitive data. Exclude assistant inventions and roleplay from real-world facts. Apply the same privacy rule to episode and journal; omit private details.
+
+memories is an array of 0–10 objects with content, category, and domain. category must be fact, preference, event, emotion, or relation. Use a non-sensitive domain: basic_profile, location_culture, career, education, technology, lifestyle, hobby, personality, communication, or other. Keep useful context faithful to the user's words; return [] when nothing qualifies.
+episode is one brief, neutral, non-sensitive summary of this transcript, or an empty string.
+journal is an array of 0–3 non-sensitive milestones only. Use kind promise, gift, shared_plan, or user_shared_milestone. Omit intimate, sexual, health, financial, confidential, or otherwise sensitive events. Use realm real only when the AI initiates or accepts the user's invitation; otherwise use roleplay. occurred_at must be a date present in a transcript timestamp. source must be the supporting line number such as #12. due is a transcript-stated date or null.
+
+Return this shape even when empty: {"memories": [], "episode": "", "journal": []}.
+"""
+
+[tasks.arc_rewrite]
+model = "gpoint-codex@gpoint"
+temperature = 1.0
+max_tokens = 1500

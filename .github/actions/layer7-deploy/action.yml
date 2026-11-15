@@ -1,6 +1,12 @@
 name: Layer7 immutable deploy and runtime verify
 description: Deploy the exact prepared Core image to Layer7 with stock Kamal 2 and verify it.
 inputs:
+  mode:
+    required: false
+    default: full
+  eros_rehearsal:
+    required: false
+    default: ""
   github_token:
     required: true
   staging_env_bundle:
@@ -29,10 +35,12 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
+    - if: inputs.mode != 'eros-prepare'
+      uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
       with:
         ruby-version: 3.3.6
     - name: Install pinned Kamal 2.12.0
+      if: inputs.mode != 'eros-prepare'
       shell: bash
       run: |
         set -euo pipefail
@@ -54,6 +62,7 @@ runs:
         REQUESTED_SHA: ${{ inputs.candidate_sha }}
         STAGING_IMAGE_SHA: ${{ inputs.staging_image_sha }}
         WORKFLOW_SHA: ${{ github.sha }}
+        MODE: ${{ inputs.mode }}
       shell: bash
       run: |
         set -euo pipefail
@@ -70,6 +79,11 @@ runs:
           "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/heads/main" \
           | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')"
         test "$current_main" = "$WORKFLOW_SHA"
+        case "$MODE" in
+          eros-prepare|eros-deploy) test "$STAGING_IMAGE_SHA" = "$WORKFLOW_SHA"; exit 0 ;;
+          full) ;;
+          *) exit 1 ;;
+        esac
         comparison="$(curl --fail --silent --show-error \
           -H "Authorization: Bearer $GH_TOKEN" \
           -H 'Accept: application/vnd.github+json' \
@@ -81,6 +95,7 @@ runs:
       id: prepared
       env:
         GH_TOKEN: ${{ github.token }}
+        MODE: ${{ inputs.mode }}
         PREPARED_RUN_ID: ${{ inputs.prepared_run_id }}
         PREPARED_APP_DIGEST: ${{ inputs.prepared_app_digest }}
         PREPARED_AGATA_DIGEST: ${{ inputs.prepared_agata_digest }}
@@ -90,18 +105,21 @@ runs:
       run: |
         set -euo pipefail
         [[ "$PREPARED_RUN_ID" =~ ^[1-9][0-9]*$ ]]
-        [[ "$PREPARED_APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-        [[ "$PREPARED_MINIAPP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
         [[ "$PREPARED_EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+        scope_args=()
+        if [[ "$MODE" == full ]]; then
+          [[ "$PREPARED_APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$PREPARED_MINIAPP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+        else
+          [[ -z "$PREPARED_APP_DIGEST$PREPARED_MINIAPP_DIGEST$PREPARED_AGATA_DIGEST" ]]
+          scope_args=(--layer7-eros)
+        fi
         digests="$(python3 - <<'PY'
         import json, os
-        values = {
-            "CORE": os.environ["PREPARED_APP_DIGEST"],
-            "MINIAPP": os.environ["PREPARED_MINIAPP_DIGEST"],
-            "EROS": os.environ["PREPARED_EROS_DIGEST"],
-        }
-        if os.environ.get("PREPARED_AGATA_DIGEST"):
-            values["AGATA"] = os.environ["PREPARED_AGATA_DIGEST"]
+        values = {name: os.environ[var] for name, var in {
+            "CORE": "PREPARED_APP_DIGEST", "MINIAPP": "PREPARED_MINIAPP_DIGEST",
+            "EROS": "PREPARED_EROS_DIGEST", "AGATA": "PREPARED_AGATA_DIGEST",
+        }.items() if os.environ[var]}
         print(json.dumps(values, separators=(",", ":")))
         PY
         )"
@@ -151,7 +169,7 @@ runs:
         python3 scripts/verify_native_prepared_run.py \
           --run "$run_json" --jobs "$jobs_json" --commit "$commit_json" --logs "$log_file" \
           --candidate-sha "$CANDIDATE_SHA" --run-id "$PREPARED_RUN_ID" --digests "$digests" \
-          --output "$GITHUB_OUTPUT"
+          --output "$GITHUB_OUTPUT" "${scope_args[@]}"
         rm -f "$run_json" "$jobs_json" "$commit_json" "$log_headers" "$log_file"
     - name: Verify pinned Layer7 host key and existing SSH access
       shell: bash
@@ -168,8 +186,128 @@ runs:
         # shellcheck disable=SC2016
         LAYER7_SSH_KEY="$key" "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
           "root@$GPOINT_LAYER7_STAGING_HOST" 'test "$(id -u)" = 0'
+    - name: Rehearse or release only the Eros engine on Layer7
+      if: inputs.mode == 'eros-prepare' || inputs.mode == 'eros-deploy'
+      env:
+        MODE: ${{ inputs.mode }}
+        PREVIOUS_REHEARSAL: ${{ inputs.eros_rehearsal }}
+        EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
+        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version }}
+        GH_TOKEN: ${{ inputs.github_token }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        target="root@$GPOINT_LAYER7_STAGING_HOST"
+        repository=ghcr.io/akhripunov/gpoint-eros
+        image="$repository@$EROS_DIGEST"
+        run_id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+        upstream="$(cat services/eros-engine/upstream.sha)"
+        [[ "$upstream" =~ ^[0-9a-f]{40}$ && "$IMAGE_VERSION" == "$CANDIDATE_SHA-"* ]]
+        transport=scripts/layer7-transport.sh
+        baseline="$RUNNER_TEMP/layer7-eros-before.json"
+        after="$RUNNER_TEMP/layer7-eros-after.json"
+        collect() { "$transport" ssh "$target" python3 - collect < scripts/layer7_release_scope.py; }
+        database() {
+          "$transport" ssh "$target" python3 - --mode "$1" --candidate "$CANDIDATE_SHA" \
+            --image "$image" --run-id "$2" < scripts/eros-native-database.py
+        }
+        collect > "$baseline"
+        registry_config="/run/gpoint-ghcr-$run_id"
+        trap '"$transport" ssh "$target" rm -rf -- "$registry_config"' EXIT
+        "$transport" ssh "$target" install -d -m 0700 "$registry_config"
+        printf '%s' "$GH_TOKEN" | "$transport" ssh "$target" \
+          env "DOCKER_CONFIG=$registry_config" docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin >/dev/null
+        "$transport" ssh "$target" env "DOCKER_CONFIG=$registry_config" \
+          docker pull --platform linux/amd64 "$repository:$IMAGE_VERSION" >/dev/null
+        "$transport" ssh "$target" bash -s -- "$repository:$IMAGE_VERSION" "$image" "$CANDIDATE_SHA" "$upstream" <<'REMOTE'
+        set -euo pipefail
+        image_id="$(docker image inspect --format '{{.Id}}' "$1")"
+        test "$image_id" = "$(docker image inspect --format '{{.Id}}' "$2")"
+        test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$1")" = linux/amd64
+        test "$(docker image inspect --format '{{index .Config.Labels "com.gpoint.source.revision"}}' "$1")" = "$3"
+        test "$(docker image inspect --format '{{index .Config.Labels "com.gpoint.eros.upstream-revision"}}' "$1")" = "$4"
+        test "$(docker image inspect --format '{{index .Config.Labels "com.gpoint.eros.patch-set.sha256"}}' "$1")" = none
+        REMOTE
+        if [[ "$MODE" == eros-prepare ]]; then
+          test -z "$PREVIOUS_REHEARSAL"
+          database prepare "$run_id"
+          database verify-prepared "$run_id"
+          collect > "$after"
+          cmp "$baseline" "$after"
+          echo "LAYER7_EROS_REHEARSAL=PASS SHA=$CANDIDATE_SHA DIGEST=$EROS_DIGEST RUN=$run_id" >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+
+        [[ "$PREVIOUS_REHEARSAL" =~ ^[0-9]+-[0-9]+$ ]]
+        gh api "repos/$GITHUB_REPOSITORY/actions/runs/${PREVIOUS_REHEARSAL%-*}/attempts/${PREVIOUS_REHEARSAL##*-}" |
+          jq -e --arg sha "$CANDIDATE_SHA" '
+            .head_sha == $sha and .head_branch == "main" and .event == "workflow_dispatch" and
+            .path == ".github/workflows/gpoint-layer7-staging.yml" and .conclusion == "success" and
+            .display_title == ("Layer7 eros-prepare " + $sha)' >/dev/null
+        prepared="$(database verify-prepared "$PREVIOUS_REHEARSAL")"
+        pending="$(sed -n 's/^EROS_SQLX_PENDING=//p' <<< "$prepared")"
+        [[ "$pending" =~ ^[0-9]+$ ]]
+        test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
+        export GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine
+        export GPOINT_KAMAL_EXPECTED_DIGEST="$EROS_DIGEST"
+        config=config/deploy.layer7-staging.eros.yml
+        model=services/eros-engine/eros-layer7-staging-model-config.toml
+        model_sha="$(sha256sum "$model" | cut -d ' ' -f 1)"
+        model_target=/opt/gpoint/env/eros-layer7-staging-model-config.toml
+        "$transport" ssh "$target" test -f "$model_target"
+        "$transport" ssh "$target" test ! -L "$model_target"
+        # Before any possible downtime, check that the role can be reached by stock Kamal.
+        kamal app version --roles engine --config-file "$config"
+        if (( pending > 0 )); then
+          "$transport" ssh "$target" bash -s <<'REMOTE'
+        set -euo pipefail
+        queue_count="$(docker exec shared_postgres_1 sh -ec \
+          'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d gpoint_staging -c "$1"' sh \
+          "SELECT count(*) FROM engine.eros_inference_jobs WHERE status IN ('PENDING','RUNNING')")"
+        test "$queue_count" = 0 || { echo 'Layer7 Eros inference queue is not drained' >&2; exit 1; }
+        REMOTE
+          kamal app stop --roles engine --config-file "$config"
+          "$transport" ssh "$target" bash -s <<'REMOTE'
+        set -euo pipefail
+        connections="$(docker exec shared_postgres_1 sh -ec \
+          'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d postgres -c "$1"' sh \
+          "SELECT count(*) FROM pg_stat_activity WHERE datname = 'eros' AND backend_type = 'client backend'")"
+        test "$connections" = 0 || { echo 'Layer7 Eros database still has clients' >&2; exit 1; }
+        REMOTE
+          database prepare "$run_id"
+          database apply "$run_id"
+        else
+          run_id="$PREVIOUS_REHEARSAL"
+        fi
+        staged_model="/run/gpoint-eros-model-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.toml"
+        "$transport" scp "$model" "$target:$staged_model"
+        "$transport" ssh "$target" bash -s -- "$staged_model" "$model_target" "$model_sha" <<'REMOTE'
+        set -euo pipefail
+        staged="$1" target="$2" expected_sha="$3"
+        temp="$(mktemp /opt/gpoint/env/.eros-model.XXXXXX)"
+        trap 'rm -f -- "$temp" "$staged"' EXIT
+        test -f "$target" && test ! -L "$target"
+        install -o "$(stat -c %u "$target")" -g "$(stat -c %g "$target")" \
+          -m "$(stat -c %a "$target")" "$staged" "$temp"
+        printf '%s  %s\n' "$expected_sha" "$temp" | sha256sum -c
+        mv -T -- "$temp" "$target"
+        REMOTE
+        kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles engine --config-file "$config"
+        database verify-applied "$run_id"
+        collect > "$after"
+        python3 scripts/layer7_release_scope.py verify --eros "$baseline" "$after" \
+          "$CANDIDATE_SHA" "$IMAGE_VERSION" "$EROS_DIGEST"
+        api_version="$(jq -er '.roles["gpoint-core-api"].version' "$after")"
+        "$transport" ssh "$target" docker exec "gpoint-eros-pilot-engine-$IMAGE_VERSION" \
+          curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8080/healthz >/dev/null
+        "$transport" ssh "$target" docker exec -i "gpoint-core-api-$api_version" node --input-type=module - <<'JS'
+        const url = new URL('/healthz', process.env.EROS_SERVICE_URL ?? '');
+        if (url.hostname !== 'gpoint-eros' || !(await fetch(url, { signal: AbortSignal.timeout(5000) })).ok)
+          throw new Error('Core API cannot reach the Layer7 Eros engine');
+        JS
+        echo "LAYER7_EROS_RUNTIME_VERIFY=PASS SHA=$CANDIDATE_SHA DIGEST=$EROS_DIGEST UPSTREAM=$upstream" >> "$GITHUB_STEP_SUMMARY"
     - name: Validate staging-only application environment without logging values
-      if: github.event_name == 'workflow_dispatch'
+      if: github.event_name == 'workflow_dispatch' && inputs.mode == 'full'
       id: staging_env
       env:
         STAGING_ENV_BUNDLE: ${{ inputs.staging_env_bundle }}
@@ -244,7 +382,7 @@ runs:
         PYTHON
         printf 'image_version=%s\n' "$IMAGE_VERSION" >> "$GITHUB_OUTPUT"
     - name: Install staging secrets and provision only the empty GPoint staging database
-      if: github.event_name == 'workflow_dispatch'
+      if: github.event_name == 'workflow_dispatch' && inputs.mode == 'full'
       env:
         STAGING_ENV_BUNDLE: ${{ inputs.staging_env_bundle }}
       shell: bash
@@ -278,7 +416,7 @@ runs:
         "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
           "root@$GPOINT_LAYER7_STAGING_HOST" rm -f /run/eros-production-secrets.py
     - name: Layer7 staging preflight and isolated GPoint schema bootstrap
-      if: github.event_name == 'workflow_dispatch'
+      if: github.event_name == 'workflow_dispatch' && inputs.mode == 'full'
       id: staging_preflight
       env:
         CORE_DIGEST: ${{ inputs.prepared_app_digest }}
@@ -320,6 +458,7 @@ runs:
         test "$database_owner" = gpoint_staging_runtime
         REMOTE
     - name: Pull and verify exact private images with the read-only job token
+      if: inputs.mode == 'full'
       env:
         CORE_DIGEST: ${{ inputs.prepared_app_digest }}
         MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
@@ -368,7 +507,7 @@ runs:
         done
         echo 'LAYER7_STAGING_PRIVATE_GHCR_PULL=PASS packages_read=true immutable_digests=true'
     - name: Apply isolated Prisma and SQLx migrations with recovery gates
-      if: github.event_name == 'workflow_dispatch'
+      if: github.event_name == 'workflow_dispatch' && inputs.mode == 'full'
       env:
         CORE_DIGEST: ${{ inputs.prepared_app_digest }}
         EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
@@ -391,6 +530,7 @@ runs:
           --candidate "$CANDIDATE_SHA" --image "ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST" \
           --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" < scripts/eros-native-database.py
     - name: Deploy exact immutable images with stock Kamal 2 to Layer7 staging
+      if: inputs.mode == 'full'
       env:
         IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.scoped.outputs.image_version }}
         CORE_DIGEST: ${{ inputs.prepared_app_digest }}
@@ -511,6 +651,7 @@ runs:
             kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.layer7-staging.miniapp.yml
         fi
     - name: Verify runtime roles, health, Eros embeddings, and API-to-engine route
+      if: inputs.mode == 'full'
       env:
         IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.scoped.outputs.image_version }}
         CORE_DIGEST: ${{ inputs.prepared_app_digest }}

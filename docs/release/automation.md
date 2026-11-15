@@ -13,6 +13,30 @@
 >
 > Выборочная выкладка API использует защищённый job Layer7 после Build.
 
+### Layer7 stock Eros update
+
+Pin the upstream commit in `services/eros-engine/upstream.sha` and review the
+upstream migration requirements and Layer7 model TOML. Use the
+`GPOINT-LAYER7-EROS` line in the authorized main commit message. Native Tests
+and Build publish only the Eros image. Production Deploy is skipped.
+
+Dispatch `gpoint-layer7-staging.yml` on exact current main with
+`mode=eros-prepare`, the successful Native Build run ID and the Eros digest.
+Set `approve_layer7_staging=true` and `deploy_layer7_staging=false`. The protected
+job restores an encrypted backup to a temporary PostgreSQL database, rehearses
+stock migrations and compares before/after runtime and ledger snapshots.
+
+After review of that rehearsal and approval for the exact candidate, dispatch
+`mode=eros-deploy` with the same SHA, Build run and digest, set
+`deploy_layer7_staging=true`, and supply the successful rehearsal ID and attempt
+as `eros_rehearsal`. Use the same candidate SHA for `staging_image_sha`.
+If there are pending SQLx migrations, the job checks the queue, stops only the
+Eros engine with Kamal, snapshots the quiesced database, then applies the stock
+migration chain. After a successful Apply, recover any deployment failure
+forward with the approved artifact. A pre-migration image may be restarted only
+after independently proving the source ledger and runtime configuration are
+still compatible. Record the verified Layer7 runtime and conversation checks.
+
 ### Layer7 API prompt release
 
 Use the owner-authorized main commit marker `GPOINT-LAYER7-API` for changes to

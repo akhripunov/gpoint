@@ -1,5 +1,5 @@
 # Local synthetic acceptance only. No hosted providers are configured.
-# Memory extraction uses a deterministic synthetic response from the isolated
+# Dreaming scan uses a deterministic synthetic response from the isolated
 # test Worker. No real model or hosted provider is contacted.
 [defaults]
 fallback_model = "gpoint-codex@gpoint"
@@ -16,7 +16,17 @@ embeddings = "http://gpoint-api:3000/eros-worker/v1/embeddings"
 [tasks.embedding]
 model = "qwen3-embedding:0.6b@gpoint"
 
-[tasks.memory_extraction]
+[tasks.dreaming_scan]
 model = "gpoint-codex@gpoint"
-filter_prompt = "SYNTHETIC_MEMORY_EXTRACTION_RESULT. Extract the marked synthetic test facts only; return JSON with a memories array."
-max_tokens = 512
+temperature = 1.0
+max_tokens = 1024
+filter_prompt = """
+SYNTHETIC_DREAMING_SCAN_RESULT. Return only one JSON object with memories, episode, and journal. Use only the marked synthetic facts; no real user data.
+Privacy rules: memories may contain only explicit, durable, non-sensitive facts the real user intentionally shared. Never infer. Never retain secrets, credentials, health, financial, identifying, or other sensitive data. Exclude assistant inventions and roleplay from real-world facts. Apply the same privacy rule to episode and journal; omit private details.
+Return the test markers as memories and empty episode and journal arrays when no other data is provided. Return all three keys.
+"""
+
+[tasks.arc_rewrite]
+model = "gpoint-codex@gpoint"
+temperature = 1.0
+max_tokens = 1500

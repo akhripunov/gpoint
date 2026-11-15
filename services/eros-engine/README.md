@@ -3,7 +3,7 @@
 ## Owner decision
 
 Use the unmodified upstream `etherfunlab/eros-engine` source at
-`d1a140083321687212fb7b17c09cc0c3c9639f5e` (v2.2.1). Do not apply Rust
+`83a54d1dba57874d55ecaa9756473f126b62844f` (v2.7.0). Do not apply Rust
 patches, maintain a fork, replace the installed GPOINT Mac Product Worker, or
 add an EROS Worker/lane. The files in `patches/` are retained as historical
 audit evidence only. `apply-patches.sh` now fails closed without changing its
@@ -14,7 +14,7 @@ Build a local stock image from a clean exact upstream checkout:
 ```sh
 services/eros-engine/build-stock-image.sh \
   /path/to/clean-eros-engine-checkout \
-  gpoint-eros:stock-d1a140083321687212fb7b17c09cc0c3c9639f5e
+  gpoint-eros:stock-83a54d1ba57874d55ecaa9756473f126b62844f
 ```
 
 The script verifies the upstream commit and clean Git tree before invoking the
@@ -116,6 +116,9 @@ offline `print-openapi` command and full local Compose E2E passed. Evidence:
 `LOCAL_E2E_STOCK_API_USER_ISOLATION=PASS`,
 `LOCAL_E2E_GPOINT_QUEUE_RLS_TENANT_ISOLATION=PASS`,
 `LOCAL_E2E_MEMORY_RECALL=PASS`, and `LOCAL_E2E_CLEANUP=PASS`.
+That historical run used the v2.2.1 `memory_extraction` config. It does not
+validate the new v2.7.0 `dreaming_scan` and `arc_rewrite` configuration; the
+updated Docker/PostgreSQL E2E has not yet run.
 `OPENROUTER_API_KEY` was empty, with no credential; the inference test network
 had no egress. Real inference was not run. The GPoint queue tenant RLS test
 passed with a non-bypass worker role; Eros has no per-user RLS, and the API

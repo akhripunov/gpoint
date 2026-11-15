@@ -111,6 +111,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Read pinned Eros upstream source
+        shell: bash
+        run: |
+          set -euo pipefail
+          upstream="$(cat services/eros-engine/upstream.sha)"
+          [[ "$upstream" =~ ^[0-9a-f]{40}$ ]]
+          echo "EROS_UPSTREAM_SHA=$upstream" >> "$GITHUB_ENV"
       - name: Resolve changed surface
         id: surface
         env:
@@ -190,25 +197,25 @@ jobs:
         if: matrix.suite == 'eros' && (steps.surface.outputs.eros == 'true' || steps.surface.outputs.full_ci == 'true')
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
-          context: https://github.com/etherfunlab/eros-engine.git#d1a140083321687212fb7b17c09cc0c3c9639f5e
+          context: https://github.com/etherfunlab/eros-engine.git#${{ env.EROS_UPSTREAM_SHA }}
           file: docker/Dockerfile
           platforms: linux/amd64
           load: true
           push: false
-          tags: gpoint-eros:stock-d1a140083321687212fb7b17c09cc0c3c9639f5e
+          tags: gpoint-eros:stock-${{ env.EROS_UPSTREAM_SHA }}
           labels: |
             org.opencontainers.image.source=https://github.com/etherfunlab/eros-engine
-            org.opencontainers.image.revision=d1a140083321687212fb7b17c09cc0c3c9639f5e
-            com.gpoint.eros.upstream-revision=d1a140083321687212fb7b17c09cc0c3c9639f5e
+            org.opencontainers.image.revision=${{ env.EROS_UPSTREAM_SHA }}
+            com.gpoint.eros.upstream-revision=${{ env.EROS_UPSTREAM_SHA }}
             com.gpoint.source.revision=${{ github.sha }}
             com.gpoint.eros.patch-set.sha256=none
-          cache-from: type=gha,scope=gpoint-eros-test,timeout=30s
+          cache-from: |
+            type=gha,scope=gpoint-eros-test,timeout=30s
+            type=gha,scope=gpoint-eros-release,timeout=30s
           # PRs may read main's cache. Only runs on main export layers for releases.
           cache-to: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && 'type=gha,scope=gpoint-eros-test,mode=max,timeout=45s,ignore-error=true' || '' }}
       - name: Run stock Eros SQLx and synthetic conversation E2E
         if: matrix.suite == 'eros' && (steps.surface.outputs.eros == 'true' || steps.surface.outputs.full_ci == 'true')
-        env:
-          EROS_UPSTREAM_SHA: d1a140083321687212fb7b17c09cc0c3c9639f5e
         run: |
           set -euo pipefail
           image="gpoint-eros:stock-$EROS_UPSTREAM_SHA"
@@ -293,7 +300,7 @@ jobs:
           curl --fail --silent --show-error --location \
             --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 60 \
             --header 'Accept: application/octet-stream' \
-            https://api.github.com/repos/oras-project/oras/releases/assets/290827355 \
+            https://github.com/oras-project/oras/releases/download/v1.3.0/oras_1.3.0_linux_amd64.tar.gz \
             --output "$archive"
           printf '%s  %s\n' \
             '6cdc692f929100feb08aa8de584d02f7bcc30ec7d88bc2adc2054d782db57c64' "$archive" \
@@ -386,7 +393,8 @@ jobs:
       !cancelled() && needs.tests.result == 'success' &&
       (needs.tests.outputs.mode == 'DEPLOY' ||
        needs.tests.outputs.mode == 'ARTIFACT_PREPARE' ||
-       needs.tests.outputs.mode == 'LAYER7_API')
+       needs.tests.outputs.mode == 'LAYER7_API' ||
+       needs.tests.outputs.mode == 'LAYER7_EROS')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -411,6 +419,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Read pinned Eros upstream source
+        shell: bash
+        run: |
+          set -euo pipefail
+          upstream="$(cat services/eros-engine/upstream.sha)"
+          [[ "$upstream" =~ ^[0-9a-f]{40}$ ]]
+          echo "EROS_UPSTREAM_SHA=$upstream" >> "$GITHUB_ENV"
       - name: Resolve exact production component build scope
         id: build_scope
         env:
@@ -418,6 +433,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          if [[ "$RELEASE_MODE" == LAYER7_EROS ]]; then
+            printf 'build_components=["EROS"]\ndeploy_scope=EROS\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [[ "$RELEASE_MODE" == LAYER7_API ]]; then
             # Narrow Layer7 API releases build only Core before the live state is
             # read. Deploy re-reads the VPS and refuses anything wider.
@@ -627,7 +646,7 @@ jobs:
         id: eros
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
-          context: https://github.com/etherfunlab/eros-engine.git#d1a140083321687212fb7b17c09cc0c3c9639f5e
+          context: https://github.com/etherfunlab/eros-engine.git#${{ env.EROS_UPSTREAM_SHA }}
           file: docker/Dockerfile
           platforms: linux/amd64
           push: true
@@ -636,9 +655,9 @@ jobs:
             ghcr.io/akhripunov/gpoint-eros:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           labels: |
             org.opencontainers.image.source=https://github.com/etherfunlab/eros-engine
-            org.opencontainers.image.revision=d1a140083321687212fb7b17c09cc0c3c9639f5e
+            org.opencontainers.image.revision=${{ env.EROS_UPSTREAM_SHA }}
             com.gpoint.source.revision=${{ github.sha }}
-            com.gpoint.eros.upstream-revision=d1a140083321687212fb7b17c09cc0c3c9639f5e
+            com.gpoint.eros.upstream-revision=${{ env.EROS_UPSTREAM_SHA }}
             com.gpoint.eros.patch-set.sha256=none
             service=gpoint-eros-pilot
           cache-from: |
@@ -1165,7 +1184,7 @@ jobs:
             test "$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .RepoDigests 0}}')" = "$repository@$digest"
             if [[ "$item" == eros ]]; then
               test "$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .Config.Labels "com.gpoint.source.revision"}}')" = "$CANDIDATE_SHA"
-              test "$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = d1a140083321687212fb7b17c09cc0c3c9639f5e
+              test "$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$(cat services/eros-engine/upstream.sha)"
             else
               test "$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$CANDIDATE_SHA"
             fi
@@ -1680,7 +1699,8 @@ jobs:
           test "$local_label_sha" = "$remote_label_sha"
           test -n "$EXPECTED_PRISMA_HEAD" && test -n "$EXPECTED_PRISMA_MIGRATIONS" && test -n "$EXPECTED_PRISMA_CHECKSUMS" && test -n "$EXPECTED_AGATA_HEAD"
           test -n "$BASELINE_PRISMA_HEAD" && test -n "$BASELINE_PRISMA_MIGRATIONS" && test -n "$BASELINE_PRISMA_CHECKSUMS"
-          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$EXPECTED_PRISMA_MIGRATIONS" "$EXPECTED_PRISMA_CHECKSUMS" "$EXPECTED_PRISMA_HEAD" "$EXPECTED_AGATA_HEAD" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "${PENDING_PRISMA_MIGRATIONS:--}" "${PENDING_PRISMA_CHECKSUMS:--}" "$BASELINE_AGATA_HEAD" "$EXPECTED_ROLE_IDENTITIES_B64" "$EROS_DIGEST" <<'REMOTE'
+          expected_eros_upstream="$(cat services/eros-engine/upstream.sha)"
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$AGATA_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$EXPECTED_PRISMA_MIGRATIONS" "$EXPECTED_PRISMA_CHECKSUMS" "$EXPECTED_PRISMA_HEAD" "$EXPECTED_AGATA_HEAD" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "${PENDING_PRISMA_MIGRATIONS:--}" "${PENDING_PRISMA_CHECKSUMS:--}" "$BASELINE_AGATA_HEAD" "$EXPECTED_ROLE_IDENTITIES_B64" "$EROS_DIGEST" "$expected_eros_upstream" <<'REMOTE'
           set -euo pipefail
           sha="$1"; version="$2"; app="$3"; agata="$4"; miniapp="$5"; db_id="$6"; redis_id="$7"; deployment_id="$8"; run_id="$9"; attempt="${10}"; writer="${11}"
           expected_prisma_migrations="${12}"; expected_prisma_checksums="${13}"; expected_prisma_head="${14}"; expected_agata_head="${15}"
@@ -1689,6 +1709,7 @@ jobs:
           pending_prisma_migrations="${21}"; pending_prisma_checksums="${22}"; baseline_agata_head="${23}"
           expected_role_identities_b64="${24}"
           eros_digest="${25}"
+          expected_eros_upstream="${26}"
           [[ "$pending_prisma_migrations" != "-" ]] || pending_prisma_migrations=""
           [[ "$pending_prisma_checksums" != "-" ]] || pending_prisma_checksums=""
           [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
@@ -1791,9 +1812,9 @@ jobs:
             docker exec "gpoint-eros-pilot-engine-$eros_version" curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null
             docker exec "gpoint-eros-pilot-engine-$eros_version" sh -c 'test "$EROS_PILOT_EMBEDDING_PROBE_URL" = "http://172.31.254.1:11434/api/embed" && curl --fail --silent --show-error --max-time 60 -H "Content-Type: application/json" --data "{\"model\":\"qwen3-embedding:0.6b\",\"input\":\"Synthetic Layer7 Eros network verification\",\"dimensions\":512}" "$EROS_PILOT_EMBEDDING_PROBE_URL" >/dev/null'
             docker exec "gpoint-eros-relay-relay-$relay_version" node -e "fetch('http://172.31.254.1:11434/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
-            python3 "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py" "gpoint-eros-pilot-engine-$eros_version" d1a140083321687212fb7b17c09cc0c3c9639f5e none
+            python3 "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py" "gpoint-eros-pilot-engine-$eros_version" "$expected_eros_upstream" none
             rm -f -- "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py"
-            echo "GPOINT_EROS_HEALTH=PASS UPSTREAM_SHA=d1a140083321687212fb7b17c09cc0c3c9639f5e DIGEST=$EROS_DIGEST"
+            echo "GPOINT_EROS_HEALTH=PASS UPSTREAM_SHA=$expected_eros_upstream DIGEST=$EROS_DIGEST"
           fi
           docker exec "gpoint-core-api-$core_version" node -e 'const fs=require("node:fs");const crypto=require("node:crypto");const p="/data/media/.gpoint-runtime-verify-"+crypto.randomUUID();let created=false;try{fs.writeFileSync(p,"gpoint-media-read-write-pass",{flag:"wx"});created=true;if(fs.readFileSync(p,"utf8")!=="gpoint-media-read-write-pass")process.exit(1)}finally{if(created)fs.unlinkSync(p)}'
           media_mounts="$(docker inspect "gpoint-core-api-$core_version" --format '{{json .Mounts}}')"

@@ -121,3 +121,21 @@ def test_prepared_run_rejects_a_normal_deploy_commit_without_artifact_marker():
     except ValueError:
         return
     raise AssertionError("accepted an unmarked ordinary main release")
+
+
+def test_layer7_eros_prepared_run_is_bound_to_one_image_and_skipped_production_deploy():
+    import pytest
+
+    run, jobs, _, sha, digests, _ = fixture()
+    commit = {"commit": {"message": "Eros update\n\nGPOINT-LAYER7-EROS"}}
+    eros_digest = {"EROS": digests["EROS"]}
+    logs = f"GPOINT_IMAGE_DIGEST EROS {MODULE.REPOSITORIES['EROS']}@{digests['EROS']}\n".encode()
+    deploy = {"name": "Kamal production Deploy and Verify", "conclusion": "skipped"}
+    jobs["jobs"].append(deploy)
+    assert MODULE.verify_prepared_run(run, jobs, logs, sha, eros_digest, 1234, commit,
+                                      layer7_eros=True) == (99, sha + "-1234-2")
+    with pytest.raises(ValueError, match="exactly the Eros"):
+        MODULE.verify_prepared_run(run, jobs, logs, sha, digests, 1234, commit, layer7_eros=True)
+    deploy["conclusion"] = "success"
+    with pytest.raises(ValueError, match="skipped production"):
+        MODULE.verify_prepared_run(run, jobs, logs, sha, eros_digest, 1234, commit, layer7_eros=True)

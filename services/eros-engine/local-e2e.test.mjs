@@ -53,14 +53,29 @@ test('local E2E topology has API, Eros, Worker and isolated PostgreSQL', () => {
 
 test('only the disposable Eros migrator receives database CREATE privilege', () => {
   const init = readFileSync(new URL('local-test-init.sql', directory), 'utf8');
+  const erosInit = init.split('\\connect gpoint_test')[0];
   assert.match(init, /GRANT CONNECT, CREATE ON DATABASE eros_test TO eros_migrator;/);
   assert.match(init, /GRANT USAGE, CREATE ON SCHEMA public TO eros_migrator;/);
   assert.match(init, /CREATE DATABASE gpoint_test OWNER eros_test_admin;/);
   assert.match(init, /CREATE ROLE eros_migrator LOGIN[\s\S]*?NOSUPERUSER NOCREATEDB NOBYPASSRLS;/);
   assert.match(init, /CREATE ROLE eros_runtime LOGIN[^;]*NOSUPERUSER NOCREATEDB BYPASSRLS;/);
   assert.match(init, /CREATE ROLE eros_runtime_nobypass LOGIN[^;]*NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;/);
-  assert.match(init, /ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eros_runtime_nobypass;/);
+  assert.doesNotMatch(erosInit, /CREATE SCHEMA engine/);
+  assert.doesNotMatch(erosInit, /ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine/);
   assert.doesNotMatch(init, /GRANT [^;]* ON DATABASE eros_test TO (?!eros_migrator\b)[a-z_]+;/);
+});
+
+test('stock Eros migration creates engine schema before test runtime grants', () => {
+  const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  const postgres = runner.indexOf('compose up -d --wait --wait-timeout 240 postgres');
+  const migration = runner.indexOf('compose up -d --no-deps eros-migrate');
+  const wait = runner.indexOf('migrator_status=$(docker_local wait "$migrator_container")');
+  const grants = runner.indexOf('GRANT USAGE ON SCHEMA engine TO eros_runtime, eros_runtime_nobypass;');
+  const stack = runner.indexOf('compose up -d --wait --wait-timeout 240', grants + 1);
+  assert.ok(postgres >= 0 && postgres < migration && migration < wait && wait < grants && grants < stack,
+    'wait for stock migration exit before grants and remaining services');
+  assert.match(runner, /ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eros_runtime_nobypass;/);
+  assert.match(runner, /\[ "\$migrator_status" = 0 \]/);
 });
 
 test('GPoint test API has no connection or data grants to the Eros database', () => {
@@ -121,7 +136,7 @@ test('GPoint consent and Eros mapping foreign keys preserve ownership records', 
   assert.doesNotMatch(runner, /MAPPING_ERASURE_GUARD|blocked_without_stock_eros_erase/);
 });
 
-test('model config routes chat, embeddings and synthetic memory extraction to the internal GPOINT bridge', () => {
+test('model config routes chat, embeddings and synthetic dreaming scan to the internal GPOINT bridge', () => {
   const config = readFileSync(new URL('test-model-config.toml', directory), 'utf8');
   const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
   const compose = readFileSync(new URL('compose.local-test.yml', directory), 'utf8');
@@ -130,12 +145,15 @@ test('model config routes chat, embeddings and synthetic memory extraction to th
   assert.match(config, /http:\/\/gpoint-api:3000\/eros-worker\/v1\/embeddings/);
   assert.match(compose, /GPOINT_API_KEY: \$\{EROS_TEST_GPOINT_API_KEY/);
   assert.doesNotMatch(config, /openrouter|openai\.com|anthropic\.com|gemini\.googleapis\.com/i);
-  assert.match(config, /^\[tasks\.memory_extraction\]/m);
-  assert.match(config, /filter_prompt\s*=\s*".*synthetic/i);
-  assert.doesNotMatch(config, /temperature\s*=\s*0(?:\.0)?/);
+  assert.match(config, /^\[tasks\.dreaming_scan\]/m);
+  assert.match(config, /^\[tasks\.arc_rewrite\]/m);
+  assert.doesNotMatch(config, /^\[tasks\.memory_extraction\]/m);
+  assert.match(config, /filter_prompt\s*=\s*"""[\s\S]*SYNTHETIC_DREAMING_SCAN_RESULT/i);
+  const dreaming = config.split('[tasks.dreaming_scan]')[1]?.split('\n[tasks.')[0] ?? '';
+  assert.match(dreaming, /temperature\s*=\s*1\.0/);
   assert.match(compose, /DREAMING_TICK_SECS/);
   assert.match(compose, /DREAMING_IDLE_SECS/);
-  assert.match(runner, /LOCAL_E2E_MEMORY_EXTRACTION=PASS/);
+  assert.match(runner, /LOCAL_E2E_DREAMING_SCAN=PASS/);
   assert.match(runner, /LOCAL_E2E_REAL_INFERENCE=NOT_RUN/);
   assert.match(runner, /LOCAL_E2E_GPOINT_QUEUE_RLS_TENANT_ISOLATION=PASS fixture_role=gpoint_worker_test/);
   assert.match(runner, /c\.relkind IN \('r','p'\)/);
@@ -144,10 +162,26 @@ test('model config routes chat, embeddings and synthetic memory extraction to th
   assert.match(runner, /LOCAL_E2E_EROS_DATABASE_USER_RLS=NOT_AVAILABLE stock_api_ownership_test=PASS/);
 });
 
-test('production stock Eros model config includes the required memory extraction filter prompt', () => {
-  const config = readFileSync(new URL('eros-pilot-model-config.toml', directory), 'utf8');
-  const memoryExtraction = config.split('[tasks.memory_extraction]')[1] ?? '';
-  assert.match(memoryExtraction, /filter_prompt\s*=\s*"[^"]+"/);
+test('all stock Eros profiles configure privacy-filtered dreaming scan and parameters-only arc rewrite', () => {
+  for (const name of ['eros-production-model-config.toml', 'eros-pilot-model-config.toml',
+    'eros-layer7-staging-model-config.toml', 'test-model-config.toml']) {
+    const config = readFileSync(new URL(name, directory), 'utf8');
+    const dreaming = config.split('[tasks.dreaming_scan]')[1]?.split('\n[tasks.')[0] ?? '';
+    const arc = config.split('[tasks.arc_rewrite]')[1] ?? '';
+    assert.match(config, /^\[tasks\.dreaming_scan\]/m, name);
+    assert.match(config, /^\[tasks\.arc_rewrite\]/m, name);
+    assert.doesNotMatch(config, /^\[tasks\.memory_extraction\]/m, name);
+    assert.match(dreaming, /filter_prompt\s*=\s*"""/, name);
+    assert.match(dreaming, /Never retain .*credentials.*health.*financial/i, name);
+    assert.doesNotMatch(arc, /filter_prompt\s*=/, name);
+    if (name === 'eros-layer7-staging-model-config.toml') {
+      assert.match(dreaming, /temperature\s*=\s*0\.2/, name);
+      assert.match(arc, /temperature\s*=\s*0\.3/, name);
+    } else {
+      assert.match(dreaming, /temperature\s*=\s*1\.0/, name);
+      assert.match(arc, /temperature\s*=\s*1\.0/, name);
+    }
+  }
 });
 
 test('Mac Ollama tunnel preserves its reverse forward and reconnects after SSH exits', () => {
@@ -213,7 +247,7 @@ test('local Worker fixture refuses non-isolated or non-local mode', () => {
   assert.match(worker, /GPOINT_EROS_WORKER_LOCAL_TEST/);
   assert.match(worker, /http:\/\/127\.0\.0\.1:3000\/gpoint-worker/);
   assert.match(worker, /DETERMINISTIC_LOCAL_E2E_REPLY/);
-  assert.match(worker, /SYNTHETIC_MEMORY_EXTRACTION_RESULT/);
+  assert.match(worker, /SYNTHETIC_DREAMING_SCAN_RESULT/);
   assert.match(worker, /purpose == 'eros_chat_completion'/);
   assert.match(worker, /SYNTH_CITY_ZEPHYRBAY/);
   const compose = readFileSync(new URL('compose.local-test.yml', directory), 'utf8');
@@ -330,28 +364,26 @@ test('GitHub Prepare accepts only its pinned setup-docker Unix socket context', 
   }), /unapproved_docker_socket/);
 });
 
-test('Prepare selects the pinned Docker action context without exporting DOCKER_HOST', () => {
-  const workflow = readFileSync(new URL('../../.github/workflows/gpoint-prepare.yml', directory), 'utf8');
-  const setup = workflow.slice(workflow.indexOf('uses: docker/setup-docker-action@'), workflow.indexOf('uses: crazy-max/ghaction-github-runtime@'));
-  assert.match(setup, /context: gpoint-setup-docker/);
-  assert.match(setup, /runtime-basedir: \$\{\{ runner\.temp \}\}\/gpoint-setup-docker/);
-  assert.match(setup, /set-host: false/);
-  assert.match(setup, /DOCKER_CONTEXT=gpoint-setup-docker/);
-  assert.match(setup, /GPOINT_DOCKER_RUNTIME_BASEDIR=.*gpoint-setup-docker/);
+test('Native release uses its pinned Buildx action and has no legacy Prepare workflow', () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/gpoint-native-release.yml', directory), 'utf8');
+  assert.match(workflow, /uses: docker\/setup-buildx-action@[0-9a-f]{40}/);
+  assert.match(workflow, /name: Build stock Eros test image/);
+  assert.doesNotMatch(workflow, /setup-docker-action|gpoint-setup-docker|gpoint-prepare\.yml/);
 });
 
 test('Eros image requires stock upstream provenance and rejects downstream patches', () => {
   const policy = readFileSync(new URL('local-test-policy.mjs', directory), 'utf8');
   assert.match(policy, /com\.gpoint\.integration\.revision/);
-  const reference = 'gpoint-eros:stock-d1a140083321687212fb7b17c09cc0c3c9639f5e';
+  const upstream = readFileSync(new URL('upstream.sha', directory), 'utf8').trim();
+  const reference = `gpoint-eros:stock-${upstream}`;
   const metadata = {
     id: `sha256:${'a'.repeat(64)}`,
     os: 'linux',
     architecture: 'amd64',
     source: 'https://github.com/etherfunlab/eros-engine',
-    upstreamRevision: 'd1a140083321687212fb7b17c09cc0c3c9639f5e',
+    upstreamRevision: upstream,
     patchSha256: 'none',
-    buildRevision: 'd1a140083321687212fb7b17c09cc0c3c9639f5e',
+    buildRevision: upstream,
   };
   assert.equal(validateErosImageInspection(reference, metadata), metadata.id);
   const candidateSha = 'b'.repeat(40);
@@ -375,7 +407,7 @@ test('the Eros patch applier is disabled and the stock builder pins a clean sour
   assert.match(applier, /fails closed|patches_disabled/i);
   assert.doesNotMatch(applier, /git .* apply/);
   assert.match(builder, /eros_source_not_clean/);
-  assert.match(builder, /d1a140083321687212fb7b17c09cc0c3c9639f5e/);
+  assert.match(builder, /upstream\.sha/);
   assert.match(builder, /patch-set\.sha256=none/);
 });
 
@@ -523,6 +555,8 @@ test('provider context ignores Eros system tasks whose latest user message is no
 test('cleanup path verifies the disposable Compose project is gone', () => {
   const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
   assert.ok(runner.indexOf('compose restart eros') < runner.indexOf('--history-only'), 'history pass must follow an Eros restart');
+  assert.match(runner, /docker_local logs --tail 100 "\$migrator_container"/);
+  assert.match(runner, /LOCAL_E2E_MIGRATOR_LOG_BEGIN/);
   assert.match(runner, /cleanup_failed/);
   assert.match(runner, /compose down --volumes --remove-orphans/);
   assert.match(runner, /for container in \$\{containers:-\}/);
@@ -537,14 +571,21 @@ test('cleanup path verifies the disposable Compose project is gone', () => {
   assert.match(runner, /LOCAL_E2E_CLEANUP=PASS/);
 });
 
-test('memory extraction, durable retrieval and provider context are checked by the runner', () => {
+test('dreaming scan, durable retrieval and provider context are checked by the runner', () => {
   const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
   assert.match(runner, /context_result=\$\(printf/);
   assert.match(runner, /LOCAL_E2E_PROVIDER_CONTEXT=PASS/);
-  assert.match(runner, /LOCAL_E2E_MEMORY_EXTRACTION=PASS/);
+  assert.match(runner, /LOCAL_E2E_DREAMING_SCAN=PASS/);
   assert.match(runner, /LOCAL_E2E_DURABLE_MEMORY=PASS/);
   assert.match(runner, /--recall-only/);
-  assert.match(runner, /classified_at IS NOT NULL/);
+  assert.doesNotMatch(runner, /classified_at/);
+  assert.match(runner, /SELECT count\(\*\) FROM engine\.companion_memories WHERE session_id =/);
+});
+
+test('dreaming idle fixture ages the stock Eros scan-state clock', () => {
+  const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  assert.match(runner, /WITH aged_scan_state AS \(UPDATE engine\.relationship_scan_state SET last_turn_at = now\(\) - interval '2 minutes' WHERE instance_id =/);
+  assert.match(runner, /AND pending_turns >= 3 RETURNING pending_turns\) SELECT pending_turns FROM aged_scan_state/);
 });
 
 test('standalone PostgreSQL integration container is owned by and cleaned with its project', () => {

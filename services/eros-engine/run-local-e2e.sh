@@ -11,7 +11,7 @@ docker_local(){ env -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH DOCK
 image_id=$(node "$repo/services/eros-engine/local-test-policy.mjs" image "$image") || exit 2
 printf 'LOCAL_E2E_DOCKER_CONTEXT=LOCAL_UNIX:%s\n' "$local_context"
 printf 'LOCAL_E2E_EROS_IMAGE_ID=%s\n' "$image_id"
-printf 'LOCAL_E2E_STOCK_EROS_IMAGE=PASS source_sha=d1a140083321687212fb7b17c09cc0c3c9639f5e\n'
+printf 'LOCAL_E2E_STOCK_EROS_IMAGE=PASS source_sha=%s\n' "$(cat "$(dirname -- "$0")/upstream.sha")"
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/me36-local-e2e.XXXXXX"); chmod 700 "$tmp"
 project="me36_$(python3 -c 'import secrets;print(secrets.token_hex(10))')"
@@ -49,6 +49,14 @@ cleanup(){
   trap - EXIT HUP INT TERM
   cleanup_failed=0
   if [ "$rc" -ne 0 ] && [ "$compose_started" -eq 1 ]; then
+    migrator_container=$(compose ps --all --quiet eros-migrate 2>/dev/null || true)
+    if [ -n "$migrator_container" ]; then
+      echo LOCAL_E2E_MIGRATOR_LOG_BEGIN >&2
+      docker_local logs --tail 100 "$migrator_container" 2>&1 \
+        | sed -E -e 's#(postgres(ql)?://)[^[:space:]@]+@#\1[REDACTED]@#g' \
+          -e 's/((password|token|secret)[=: ]+)[^[:space:]]+/\1[REDACTED]/Ig' >&2 || true
+      echo LOCAL_E2E_MIGRATOR_LOG_END >&2
+    fi
     compose logs --no-color postgres gpoint-api-migrate gpoint-api eros gpoint-worker 2>/dev/null | grep -Ei -C 2 "error|exception|failed|fatal|panic|denied|not found|refused" | tail -100 >&2 || true
   fi
   if [ "$compose_started" -eq 1 ]; then
@@ -194,6 +202,26 @@ for service in gpoint-api gpoint-api-migrate gpoint-worker; do
 done
 echo LOCAL_E2E_COMPOSE_START=BEGIN
 compose_started=1
+compose up -d --wait --wait-timeout 240 postgres
+compose up -d --no-deps eros-migrate
+migrator_container=$(compose ps --all --quiet eros-migrate)
+[ -n "$migrator_container" ] || { echo LOCAL_E2E_STOCK_MIGRATIONS=FAIL reason=container_missing >&2; exit 1; }
+migrator_status=$(docker_local wait "$migrator_container")
+[ "$migrator_status" = 0 ] || { echo "LOCAL_E2E_STOCK_MIGRATIONS=FAIL exit_code=$migrator_status" >&2; exit 1; }
+echo LOCAL_E2E_STOCK_MIGRATIONS=PASS
+compose exec -T postgres psql -U eros_test_admin -d eros_test -v ON_ERROR_STOP=1 <<'SQL'
+GRANT USAGE ON SCHEMA engine TO eros_runtime, eros_runtime_nobypass;
+GRANT ALL ON ALL TABLES IN SCHEMA engine TO eros_runtime;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA engine TO eros_runtime;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA engine TO eros_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine GRANT ALL ON TABLES TO eros_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine GRANT ALL ON SEQUENCES TO eros_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine GRANT EXECUTE ON FUNCTIONS TO eros_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA engine TO eros_runtime_nobypass;
+GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA engine TO eros_runtime_nobypass;
+ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eros_runtime_nobypass;
+ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO eros_runtime_nobypass;
+SQL
 compose up -d --wait --wait-timeout 240
 echo LOCAL_E2E_COMPOSE_START=PASS
 eros_api_privileges=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -At <<'SQL'
@@ -298,16 +326,20 @@ session_count=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -A
 session_id=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT id FROM engine.chat_sessions WHERE channel <> 'group' ORDER BY created_at DESC LIMIT 1;")
 [ -n "$session_id" ] || { echo LOCAL_E2E_MEMORY_FIXTURE_SESSION=FAIL >&2; exit 1; }
 session_id=$(python3 -c 'import sys,uuid; print(uuid.UUID(sys.argv[1]))' "$session_id") || { echo LOCAL_E2E_MEMORY_FIXTURE_SESSION=FAIL >&2; exit 1; }
-compose exec -T postgres psql -U eros_test_admin -d eros_test -v ON_ERROR_STOP=1 -Atc \
-  "UPDATE engine.chat_sessions SET last_active_at = now() - interval '2 minutes' WHERE id = '$session_id'::uuid;" >/dev/null
+scan_state_pending=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -v ON_ERROR_STOP=1 -Atc \
+  "WITH aged_scan_state AS (UPDATE engine.relationship_scan_state SET last_turn_at = now() - interval '2 minutes' WHERE instance_id = (SELECT instance_id FROM engine.chat_sessions WHERE id = '$session_id'::uuid) AND pending_turns >= 3 RETURNING pending_turns) SELECT pending_turns FROM aged_scan_state;")
+[[ "$scan_state_pending" =~ ^[0-9]+$ ]] && [ "$scan_state_pending" -ge 3 ] || {
+  echo "LOCAL_E2E_MEMORY_FIXTURE_SCAN_STATE=FAIL pending_turns=$scan_state_pending" >&2
+  exit 1
+}
 memory_state=
 for attempt in $(seq 1 60); do
   memory_state=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc \
-    "SELECT (SELECT classified_at IS NOT NULL FROM engine.chat_sessions WHERE id = '$session_id'::uuid)::text || ':' || (SELECT count(*) FROM engine.companion_memories WHERE session_id = '$session_id'::uuid AND category IS NOT NULL AND content LIKE 'SYNTH_%');")
-  [ "$memory_state" = "true:2" ] && break
+    "SELECT count(*) FROM engine.companion_memories WHERE session_id = '$session_id'::uuid AND category IS NOT NULL AND content LIKE 'SYNTH_%';")
+  [ "$memory_state" = "2" ] && break
   sleep 1
 done
-if [ "$memory_state" != "true:2" ]; then
+if [ "$memory_state" != "2" ]; then
   echo "LOCAL_E2E_DURABLE_MEMORY=FAIL state=$memory_state" >&2
   compose exec -T postgres psql -U eros_test_admin -d gpoint_test -Atc \
     "SELECT 'EROS_QUEUE_DIAGNOSTIC=' || job_type || ':' || status || ':' || coalesce(error_code, 'none') || ':attempts=' || attempts FROM engine.eros_inference_jobs ORDER BY created_at;" >&2 || true
@@ -319,7 +351,7 @@ if [ "$memory_state" != "true:2" ]; then
   fi
   exit 1
 fi
-echo LOCAL_E2E_MEMORY_EXTRACTION=PASS candidates=2
+echo LOCAL_E2E_DREAMING_SCAN=PASS candidates=2
 echo LOCAL_E2E_DURABLE_MEMORY=PASS candidates=2
 if ! compose exec -w /workspace/apps/api -T gpoint-api node --import tsx /workspace/services/eros-engine/local-test-e2e.mjs --recall-only >"$tmp/recall.out" 2>&1; then tail -40 "$tmp/recall.out" >&2; exit 1; fi
 cat "$tmp/recall.out"
