@@ -313,6 +313,7 @@ LAYER7_API_CONFIG_PATHS = frozenset({
     ".github/actions/layer7-deploy/action.yml",
     "scripts/layer7_release_scope.py",
     "scripts/native_release_intent.py",
+    "tests/test_native_release_intent.py",
     "tests/test_layer7_release_scope.py",
     "tests/test_layer7_staging_workflow.py",
 })

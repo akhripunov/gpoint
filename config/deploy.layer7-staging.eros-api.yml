@@ -13,6 +13,7 @@ servers:
     options:
       publish:
         - "127.0.0.1:13001:3000"
+      # Core API uses the internal relay on this isolated embeddings network.
       network:
         - shared_internal
         - gpoint_eros_api

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify and scope an API-prompt-only release against the running Layer7 roles."""
+"""Verify and scope a Core API release against the running Layer7 roles."""
 from __future__ import annotations
 
 import argparse
@@ -39,6 +39,14 @@ RELEASE_PATHS = {
     "docs/release/automation.md",
 }
 CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
+
+# ME-36: the independent Eros v2.7.0 release (run 43699423688) advanced
+# Layer7 main while Core and the other roles retained their earlier images.
+RECONCILED_LAYER7_RANGE = (
+    "96d6519e74d0850728c3f0c90bec76e13131476d",
+    "f3a43a875503f7c54a9301c3fc86ba1f675de88d",
+    "sha256:6b1110c155f5be67ea45ba22749c852b0b0ee6b809b34543e2190f0edfcca766",
+)
 
 
 def command(*args, cwd=None):
@@ -124,6 +132,11 @@ def validate(snapshot):
         raise ValueError("Layer7 database identity is malformed")
 
 
+def diff_paths(repo, before, after):
+    paths = command("git", "diff", "--name-only", "-z", "--no-renames", before, after, cwd=repo)
+    return set(paths.split("\0")) - {""}
+
+
 def plan(repo, candidate, snapshot, *, previous=None, verify_schema=False):
     from native_release_intent import LAYER7_API_CONFIG_PATH, LAYER7_API_PATHS
     from prisma_migration_checksums import build_inventory
@@ -137,10 +150,25 @@ def plan(repo, candidate, snapshot, *, previous=None, verify_schema=False):
         subprocess.run(["git", "merge-base", "--is-ancestor", previous, candidate], cwd=repo, check=True)
         if changed_paths(previous, candidate, repo=repo) - LAYER7_API_PATHS:
             raise ValueError("Layer7 push changed paths outside the Core API release scope")
+    historical_start, historical_end, engine_digest = RECONCILED_LAYER7_RANGE
+    engine = snapshot["roles"][ENGINE]
+    historical_paths = set()
+    if previous is not None and (engine["source"], engine["digest"]) == (historical_end, engine_digest):
+        subprocess.run(["git", "merge-base", "--is-ancestor", historical_end, previous], cwd=repo, check=True)
+        historical_paths = diff_paths(repo, historical_start, historical_end) - diff_paths(
+            repo, historical_end, candidate
+        )
     for source in sorted({row["source"] for row in snapshot["roles"].values()}):
         subprocess.run(["git", "merge-base", "--is-ancestor", source, candidate], cwd=repo, check=True)
-        paths = command("git", "diff", "--name-only", "-z", "--no-renames", source, candidate, cwd=repo)
-        if set(paths.split("\0")) - LAYER7_API_PATHS - RELEASE_PATHS - {""}:
+        outside_scope = diff_paths(repo, source, candidate) - LAYER7_API_PATHS - RELEASE_PATHS
+        if outside_scope and outside_scope <= historical_paths:
+            # Only reconcile a role that was already running at the start of that history.
+            ancestry = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", source, historical_start], cwd=repo
+            )
+            if ancestry.returncode == 0:
+                continue
+        if outside_scope:
             raise ValueError("Layer7 candidate includes paths outside the Core API release scope")
     if verify_schema:
         expected = [f"{name}={digest}" for name, digest in build_inventory(repo / "packages/db/prisma/migrations")]

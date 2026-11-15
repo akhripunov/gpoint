@@ -153,6 +153,29 @@ def test_exact_main_push_with_artifact_prepare_marker_builds_without_authorizing
         ) == "BLOCK"
 
 
+def test_layer7_api_route_change_cannot_fall_through_to_production_deploy():
+    paths = {
+        ".github/actions/layer7-deploy/action.yml",
+        "config/deploy.layer7-staging.eros-api.yml",
+        "scripts/layer7_release_scope.py",
+        "scripts/native_release_intent.py",
+        "tests/test_native_release_intent.py",
+        "tests/test_layer7_release_scope.py",
+        "tests/test_layer7_staging_workflow.py",
+    }
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths=paths,
+    ) == "BLOCK"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths=paths,
+        commit_message="ME-36 Layer7 Core API embeddings fix\n\nGPOINT-LAYER7-API",
+    ) == "LAYER7_API"
+    selector_only_paths = paths - {"config/deploy.layer7-staging.eros-api.yml"}
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths=selector_only_paths,
+    ) == "ARTIFACT_PREPARE"
+
+
 def test_artifact_prepare_marker_routes_main_push_to_build_only(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", [
         "native_release_intent.py", "--event", "push", "--ref", "refs/heads/main",

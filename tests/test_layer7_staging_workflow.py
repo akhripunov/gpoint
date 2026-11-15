@@ -317,7 +317,7 @@ def test_layer7_staging_runs_pinned_kamal_without_a_local_docker_engine():
     steps = _staging_steps()
     ruby = next(step for step in steps if step.get("uses", "").startswith("ruby/setup-ruby@"))
     assert ruby["uses"] == "ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f"
-    assert ruby["with"]["ruby-version"] == "3.3.6"
+    assert ruby["with"]["ruby-version"] == "3.3.13"
     assert "self-hosted" not in ruby["with"]
     installer = next(step for step in steps if step.get("name") == "Install pinned Kamal 2.12.0")
     assert "gem install kamal --version 2.12.0" in installer["run"]

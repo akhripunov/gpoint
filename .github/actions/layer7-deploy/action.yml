@@ -38,7 +38,7 @@ runs:
     - if: inputs.mode != 'eros-prepare'
       uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
       with:
-        ruby-version: 3.3.6
+        ruby-version: 3.3.13
     - name: Install pinned Kamal 2.12.0
       if: inputs.mode != 'eros-prepare'
       shell: bash
