@@ -110,6 +110,40 @@ def test_scope_uses_full_diff_from_every_running_role(tmp_path):
         plan(tmp_path, latest, mixed)
 
 
+def test_scope_reconciles_only_the_verified_historical_layer7_range(tmp_path, monkeypatch):
+    import layer7_release_scope as scope
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    api_path = "config/deploy.layer7-staging.eros-api.yml"
+    eros_path = "services/eros-engine/upstream.sha"
+    base = commit(tmp_path, "baseline", api_path, "before")
+    installed = commit(tmp_path, "Eros release", eros_path, "verified upstream")
+    candidate = commit(tmp_path, "Core API rollout", api_path, "after")
+    snapshot = inventory(base)
+    snapshot["roles"][scope.ENGINE] = inventory(installed)["roles"][scope.ENGINE]
+    digest = snapshot["roles"][scope.ENGINE]["digest"]
+    monkeypatch.setattr(scope, "RECONCILED_LAYER7_RANGE", (base, installed, digest), raising=False)
+
+    assert plan(tmp_path, candidate, snapshot, previous=installed) == ["CORE"]
+    with pytest.raises(ValueError, match="outside"):
+        plan(tmp_path, candidate, inventory(base), previous=installed)
+    with pytest.raises(ValueError, match="outside"):
+        plan(tmp_path, candidate, snapshot)
+    snapshot["roles"][scope.ENGINE]["digest"] = "sha256:" + "e" * 64
+    with pytest.raises(ValueError, match="outside"):
+        plan(tmp_path, candidate, snapshot, previous=installed)
+    snapshot["roles"][scope.ENGINE]["digest"] = digest
+
+    drift = commit(tmp_path, "Eros changed again", eros_path, "unverified upstream")
+    next_api = commit(tmp_path, "API rollout after drift", api_path, "next")
+    with pytest.raises(ValueError, match="outside"):
+        plan(tmp_path, next_api, snapshot, previous=drift)
+    with pytest.raises(ValueError, match="push changed paths outside"):
+        plan(tmp_path, next_api, snapshot, previous=candidate)
+
+
 def test_verification_refuses_changes_to_other_roles_and_database():
     candidate = "2" * 40
     before = inventory("1" * 40)
