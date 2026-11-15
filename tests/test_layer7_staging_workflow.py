@@ -212,6 +212,24 @@ def test_staging_network_isolation_probe_uses_actual_topology(tmp_path, leak):
     assert ('EROS_DATABASE_NETWORK_ISOLATION=PASS' in result.stdout) == (not leak)
 
 
+@pytest.mark.parametrize("api,worker,bot,expected", [
+    ({"gpoint_eros_embeddings": {}}, {}, {}, 0),
+    ({}, {}, {}, 1),
+    ({"gpoint_eros_embeddings": {}}, {"gpoint_eros_embeddings": {}}, {}, 1),
+    ({"gpoint_eros_embeddings": {}}, {}, {"gpoint_eros_embeddings": {}}, 1),
+])
+def test_staging_embeddings_network_is_exclusive_to_core_api(api, worker, bot, expected):
+    verify = next(s["run"] for s in _staging_steps()
+                  if s.get("name") == "Verify runtime roles, health, Eros embeddings, and API-to-engine route")
+    code = re.search(r"<<'PY_EMBEDDINGS_NET'\n(.*?)\nPY_EMBEDDINGS_NET", verify, re.S).group(1)
+    result = subprocess.run(
+        [sys.executable, "-c", code, json.dumps(api), json.dumps(worker), json.dumps(bot)],
+        text=True, capture_output=True,
+    )
+    assert result.returncode == expected
+    assert ("CORE_API_EMBEDDINGS_NETWORK=PASS" in result.stdout) == (expected == 0)
+
+
 @pytest.mark.parametrize('previous,raced,expected,actions', [
     ('', 'false', 0, []),
     ('gpoint-core-api-' + 'a' * 40 + '-1-1', 'false', 0, ['stop']),
@@ -427,6 +445,31 @@ def test_layer7_staging_can_run_core_and_eros_without_a_staging_telegram_bot():
     assert '[[ "$bot_enabled" == false && "$spec" == gpoint-core-bot\\|* ]]' in verify["run"]
     assert "STAGING_BOT_ENABLED" not in str(staging["env"])
     assert "secrets.GPOINT_PRODUCTION" not in yaml.safe_dump(staging)
+
+
+def test_layer7_eros_api_uses_embeddings_network_without_widening_worker_or_bot():
+    active_text = (ROOT / "config/deploy.layer7-staging.eros-api.yml").read_text()
+    active = yaml.safe_load(re.sub(r"<%=.*?%>", "rendered", active_text))
+    assert active["servers"]["api"]["options"]["network"] == [
+        "shared_internal",
+        "gpoint_eros_api",
+        "gpoint_eros_embeddings",
+    ]
+
+    shared_text = (ROOT / "config/deploy.layer7-staging.yml").read_text()
+    shared = yaml.safe_load(re.sub(r"<%=.*?%>", "rendered", shared_text))
+    assert "gpoint_eros_embeddings" not in shared["servers"]["worker"]["options"]["network"]
+    assert "gpoint_eros_embeddings" not in shared["servers"]["bot"]["options"]["network"]
+
+
+def test_scoped_layer7_runtime_verify_checks_embeddings_network_membership():
+    verify = next(s["run"] for s in _staging_steps()
+                  if s.get("name") == "Verify runtime roles, health, Eros embeddings, and API-to-engine route")
+    assert "gpoint-core-worker-" in verify
+    assert "gpoint-core-bot-" in verify
+    assert "gpoint_eros_embeddings" in verify
+    assert "http://172.31.254.1:11434/api/embed" in verify
+    assert "status=200 dimensions=512" in verify
 
 
 def test_staging_eros_engine_reaches_the_embedding_relay_on_its_trusted_network():

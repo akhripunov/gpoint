@@ -721,6 +721,24 @@ runs:
         if (!response.ok) throw new Error('Core API cannot reach the Eros engine health endpoint');
         console.log('CORE_API_EROS_ROUTE=PASS');
         JS
+        docker exec -i "$api" node --input-type=module - <<'JS'
+        const response = await fetch('http://172.31.254.1:11434/api/embed', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model: 'qwen3-embedding:0.6b',
+            input: 'Synthetic Layer7 Core API embedding verification',
+            dimensions: 512,
+          }),
+          signal: AbortSignal.timeout(60000),
+        });
+        if (!response.ok) throw new Error(`Core API embedding relay returned HTTP ${response.status}`);
+        const payload = await response.json();
+        const vector = payload?.embeddings?.[0];
+        if (!Array.isArray(vector) || vector.length !== 512 || vector.some(value => !Number.isFinite(value)))
+          throw new Error('Core API embedding relay did not return a finite 512D Qwen vector');
+        console.log('CORE_API_EMBEDDINGS=PASS status=200 dimensions=512');
+        JS
         python3 - "$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$api")" \
           "$(docker inspect --format '{{json .NetworkSettings.Networks}}' shared_postgres_1)" <<'PY_CORE_DB'
         import json, sys
@@ -734,6 +752,31 @@ runs:
                 raise SystemExit('Eros database alias is exposed on a Core API network')
         print('CORE_API_EROS_ROUTE=PASS EROS_DATABASE_NETWORK_ISOLATION=PASS')
         PY_CORE_DB
+        worker="$(docker ps --filter 'name=^/gpoint-core-worker-' --format '{{.Names}}')"
+        [[ -n "$worker" && "$worker" != *$'\n'* ]]
+        worker_networks="$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$worker")"
+        bot="$(docker ps --filter 'name=^/gpoint-core-bot-' --format '{{.Names}}')"
+        if [[ "$bot" == *$'\n'* ]]; then
+          echo 'Layer7 staging has multiple running Core Bot containers' >&2
+          exit 1
+        fi
+        bot_networks='{}'
+        if [[ -n "$bot" ]]; then
+          bot_networks="$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$bot")"
+        fi
+        python3 - "$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$api")" \
+          "$worker_networks" "$bot_networks" <<'PY_EMBEDDINGS_NET'
+        import json
+        import sys
+
+        api, worker, bot = (json.loads(value) for value in sys.argv[1:])
+        network = "gpoint_eros_embeddings"
+        if network not in api:
+            raise SystemExit("Core API is missing the private Eros embeddings network")
+        if network in worker or network in bot:
+            raise SystemExit("Eros embeddings network leaked to Worker or Bot")
+        print("CORE_API_EMBEDDINGS_NETWORK=PASS")
+        PY_EMBEDDINGS_NET
         docker exec "$engine" curl --fail --silent --show-error http://127.0.0.1:8080/healthz >/dev/null
         docker exec "$engine" curl --fail --silent --show-error -H 'Content-Type: application/json' \
           -d '{"model":"qwen3-embedding:0.6b","input":"Layer7 staging memory isolation probe","dimensions":512}' \

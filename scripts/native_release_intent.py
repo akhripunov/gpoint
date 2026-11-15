@@ -266,9 +266,13 @@ EXACT_VERSION = re.compile(r"^[0-9a-f]{40}-[0-9]+-[0-9]+$")
 EXACT_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 ARTIFACT_PREPARE_MARKER = "GPOINT-ARTIFACT-PREPARE"
 ARTIFACT_PREPARE_PATHS = frozenset({
+    ".github/actions/layer7-deploy/action.yml",
     ".github/workflows/gpoint-native-release.yml",
+    "scripts/layer7_release_scope.py",
     "scripts/native_release_intent.py",
     "scripts/prisma_migration_release_plan.py",
+    "tests/test_layer7_release_scope.py",
+    "tests/test_layer7_staging_workflow.py",
     "tests/test_native_prisma_apply_boundary.py",
     "tests/test_native_release_intent.py",
     "tests/test_prisma_migration_release_plan.py",
@@ -297,12 +301,22 @@ LAYER7_EROS_RELEASE_PATHS = frozenset({
     "tests/test_native_prepared_run.py",
 })
 LAYER7_API_MARKER = "GPOINT-LAYER7-API"
-LAYER7_API_PATHS = frozenset({
+LAYER7_API_PROMPT_PATHS = frozenset({
     "apps/api/src/eros-response-prompt.js",
     "apps/api/test/build-output.test.mjs",
     "apps/api/test/eros-adapter.test.ts",
     "services/eros-engine/eros-language-contract.test.mjs",
 })
+LAYER7_API_CONFIG_PATH = "config/deploy.layer7-staging.eros-api.yml"
+LAYER7_API_CONFIG_PATHS = frozenset({
+    LAYER7_API_CONFIG_PATH,
+    ".github/actions/layer7-deploy/action.yml",
+    "scripts/layer7_release_scope.py",
+    "scripts/native_release_intent.py",
+    "tests/test_layer7_release_scope.py",
+    "tests/test_layer7_staging_workflow.py",
+})
+LAYER7_API_PATHS = LAYER7_API_PROMPT_PATHS | LAYER7_API_CONFIG_PATHS
 
 
 def _path_kind(path: str) -> str:
@@ -360,9 +374,16 @@ def classify_push(*, event_name: str, ref: str,
     if ".github/workflows/gpoint-layer7-staging.yml" in changed_paths:
         return "BLOCK"
     if LAYER7_API_MARKER in markers:
-        if ARTIFACT_PREPARE_MARKER in markers or not changed_paths <= LAYER7_API_PATHS:
+        if ARTIFACT_PREPARE_MARKER in markers:
             return "BLOCK"
-        return "LAYER7_API"
+        if changed_paths <= LAYER7_API_PROMPT_PATHS:
+            return "LAYER7_API"
+        if (LAYER7_API_CONFIG_PATH in changed_paths and
+                changed_paths <= LAYER7_API_CONFIG_PATHS):
+            return "LAYER7_API"
+        return "BLOCK"
+    if LAYER7_API_CONFIG_PATH in changed_paths:
+        return "BLOCK"
     if ARTIFACT_PREPARE_MARKER in markers or changed_paths <= ARTIFACT_PREPARE_PATHS:
         if not changed_paths <= ARTIFACT_PREPARE_PATHS:
             return "BLOCK"

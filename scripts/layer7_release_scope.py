@@ -125,7 +125,7 @@ def validate(snapshot):
 
 
 def plan(repo, candidate, snapshot, *, previous=None, verify_schema=False):
-    from native_release_intent import LAYER7_API_PATHS
+    from native_release_intent import LAYER7_API_CONFIG_PATH, LAYER7_API_PATHS
     from prisma_migration_checksums import build_inventory
 
     validate(snapshot)
@@ -136,18 +136,19 @@ def plan(repo, candidate, snapshot, *, previous=None, verify_schema=False):
 
         subprocess.run(["git", "merge-base", "--is-ancestor", previous, candidate], cwd=repo, check=True)
         if changed_paths(previous, candidate, repo=repo) - LAYER7_API_PATHS:
-            raise ValueError("Layer7 push changed paths outside the API prompt release scope")
+            raise ValueError("Layer7 push changed paths outside the Core API release scope")
     for source in sorted({row["source"] for row in snapshot["roles"].values()}):
         subprocess.run(["git", "merge-base", "--is-ancestor", source, candidate], cwd=repo, check=True)
         paths = command("git", "diff", "--name-only", "-z", "--no-renames", source, candidate, cwd=repo)
         if set(paths.split("\0")) - LAYER7_API_PATHS - RELEASE_PATHS - {""}:
-            raise ValueError("Layer7 candidate includes paths outside the API prompt release scope")
+            raise ValueError("Layer7 candidate includes paths outside the Core API release scope")
     if verify_schema:
         expected = [f"{name}={digest}" for name, digest in build_inventory(repo / "packages/db/prisma/migrations")]
         if snapshot["prisma"] != expected:
             raise ValueError("Layer7 Prisma ledger differs from candidate migration inventory")
     source = snapshot["roles"][API]["source"]
-    changed = command("git", "diff", "--name-only", source, candidate, "--", "apps/api/src/eros-response-prompt.js", cwd=repo)
+    changed = command("git", "diff", "--name-only", source, candidate, "--",
+                       "apps/api/src/eros-response-prompt.js", LAYER7_API_CONFIG_PATH, cwd=repo)
     return ["CORE"] if changed else []
 
 
