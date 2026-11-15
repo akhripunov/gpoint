@@ -176,6 +176,29 @@ def test_layer7_api_route_change_cannot_fall_through_to_production_deploy():
     ) == "ARTIFACT_PREPARE"
 
 
+def test_layer7_eros_adapter_source_uses_only_the_explicit_api_route():
+    paths = {
+        "apps/api/src/eros-adapter.ts",
+        "apps/api/test/eros-adapter.test.ts",
+        "scripts/native_release_intent.py",
+        "scripts/layer7_release_scope.py",
+        "tests/test_native_release_intent.py",
+        "tests/test_layer7_release_scope.py",
+    }
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths=paths,
+        commit_message="ME-36 Layer7 adapter follow-up\n\nGPOINT-LAYER7-API",
+    ) == "LAYER7_API"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths=paths,
+    ) == "BLOCK"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        changed_paths=paths | {"apps/api/src/messages.ts"},
+        commit_message="ME-36 Layer7 adapter follow-up\n\nGPOINT-LAYER7-API",
+    ) == "BLOCK"
+
+
 def test_artifact_prepare_marker_routes_main_push_to_build_only(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", [
         "native_release_intent.py", "--event", "push", "--ref", "refs/heads/main",

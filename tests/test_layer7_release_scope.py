@@ -91,9 +91,11 @@ def test_scope_uses_full_diff_from_every_running_role(tmp_path):
     base = commit(tmp_path, "base", "apps/api/src/eros-response-prompt.js", "a")
     prompt = commit(tmp_path, "prompt", "apps/api/src/eros-response-prompt.js", "b")
     assert plan(tmp_path, prompt, inventory(base), previous=base) == ["CORE"]
+    adapter = commit(tmp_path, "Layer7 API Eros adapter", "apps/api/src/eros-adapter.ts", "adapter")
+    assert plan(tmp_path, adapter, inventory(prompt), previous=prompt) == ["CORE"]
     config = commit(tmp_path, "Layer7 API network config", "config/deploy.layer7-staging.eros-api.yml",
                    "network: [shared_internal, gpoint_eros_api, gpoint_eros_embeddings]\n")
-    assert plan(tmp_path, config, inventory(prompt), previous=prompt) == ["CORE"]
+    assert plan(tmp_path, config, inventory(adapter), previous=adapter) == ["CORE"]
     tooling = commit(tmp_path, "tooling", ".github/workflows/gpoint-native-release.yml", "updated")
     with pytest.raises(ValueError, match="outside"):
         plan(tmp_path, tooling, inventory(base), previous=base)

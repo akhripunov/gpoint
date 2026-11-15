@@ -176,7 +176,8 @@ def plan(repo, candidate, snapshot, *, previous=None, verify_schema=False):
             raise ValueError("Layer7 Prisma ledger differs from candidate migration inventory")
     source = snapshot["roles"][API]["source"]
     changed = command("git", "diff", "--name-only", source, candidate, "--",
-                       "apps/api/src/eros-response-prompt.js", LAYER7_API_CONFIG_PATH, cwd=repo)
+                       "apps/api/src/eros-response-prompt.js", "apps/api/src/eros-adapter.ts",
+                       LAYER7_API_CONFIG_PATH, cwd=repo)
     return ["CORE"] if changed else []
 
 
