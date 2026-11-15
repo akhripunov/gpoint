@@ -116,6 +116,9 @@ offline `print-openapi` command and full local Compose E2E passed. Evidence:
 `LOCAL_E2E_STOCK_API_USER_ISOLATION=PASS`,
 `LOCAL_E2E_GPOINT_QUEUE_RLS_TENANT_ISOLATION=PASS`,
 `LOCAL_E2E_MEMORY_RECALL=PASS`, and `LOCAL_E2E_CLEANUP=PASS`.
+That historical run used the v2.2.1 `memory_extraction` config. It does not
+validate the new v2.7.0 `dreaming_scan` and `arc_rewrite` configuration; the
+updated Docker/PostgreSQL E2E has not yet run.
 `OPENROUTER_API_KEY` was empty, with no credential; the inference test network
 had no egress. Real inference was not run. The GPoint queue tenant RLS test
 passed with a non-bypass worker role; Eros has no per-user RLS, and the API

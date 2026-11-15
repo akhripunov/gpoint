@@ -36,6 +36,10 @@ DB_NAME = re.compile(r"^eros_[a-z0-9_]{1,48}$")
 # stock Eros migrators, never by a local imitation of SQLx.
 EROS_V231_SHA = "fd72b0ff1c145d4bdd9cc27b731e9e6512dc038b"
 EROS_V231_IMAGE = "ghcr.io/etherfunlab/eros-engine@sha256:0b2b29a989e7795058e00956712bba0e4be037817253fb4ffe7f5194dc838bf8"
+# SHA-256 over canonical [version, description, SHA-384 checksum] triples from
+# the official v2.3.1 migration files, for the v2.2.1 and v2.3.1 checkpoints.
+EROS_V221_HISTORY_SHA256 = "8384fd67e6b280c3d6ca6683343516acaa1f60934363aea69d231fdc1393c207"
+EROS_V231_HISTORY_SHA256 = "00c0e0e461ca84095cae16ee3912649ab64f4796d5bd1fb74a2a3d8897548649"
 EROS_V250_SHA = "d12172de0e674b9f6fbe8cf78ebbb3338b746a7b"
 EROS_V250_IMAGE = "ghcr.io/etherfunlab/eros-engine@sha256:bf9a887f7a1a12816957eaf83b4ad0fde7d581e2795ad937d3ee33b95f3065a5"
 EROS_V270_SHA = "83a54d1dba57874d55ecaa9756473f126b62844f"
@@ -275,6 +279,29 @@ def _versions(rows: list[dict]) -> tuple[int, ...]:
     return tuple(row["version"] for row in rows)
 
 
+def _migration_history_digest(rows: list[dict]) -> str:
+    entries = [[row.get("version"), row.get("description"), row.get("checksum")] for row in rows]
+    return hashlib.sha256(json.dumps(entries, separators=(",", ":")).encode()).hexdigest()
+
+
+def _validate_v231_source_history(rows: list[dict], upstream_sha: str) -> list[dict]:
+    if upstream_sha != EROS_V231_SHA:
+        raise RuntimeError("Eros source SQLx history is not tied to the confirmed v2.3.1 upstream")
+    versions = _versions(rows)
+    if versions == tuple(range(72)):
+        expected = EROS_V221_HISTORY_SHA256
+    elif versions == tuple(range(78)):
+        expected = EROS_V231_HISTORY_SHA256
+    else:
+        raise RuntimeError("Eros source SQLx history is not an exact v2.2.1 or v2.3.1 checkpoint")
+    if any(row.get("success") is not True or not re.fullmatch(r"[0-9a-f]{96}", row.get("checksum", ""))
+           or not row.get("description") for row in rows):
+        raise RuntimeError("Eros source SQLx history contains failed or malformed migrations")
+    if _migration_history_digest(rows) != expected:
+        raise RuntimeError("Eros source SQLx history differs from the confirmed v2.3.1 upstream migrations")
+    return rows
+
+
 def _validate_exact_history(rows: list[dict], expected: dict[int, tuple[str, str]]) -> list[dict]:
     if _versions(rows) != tuple(expected):
         raise RuntimeError("Eros SQLx ledger does not match the exact upstream migration history")
@@ -329,6 +356,11 @@ def _migration_stage_images(before: list[dict], image: str, *, rollback: bool = 
 def _run_migration_chain(image: str, database: str, env: dict[str, str], before: list[dict],
                          *, rollback: bool = False) -> tuple[list[dict], list[dict], list[dict]]:
     stages = _migration_stage_images(before, image, rollback=rollback)
+    if (EROS_V270_SHA in {upstream_sha for _, upstream_sha in stages}
+            and _versions(before) in (tuple(range(72)), tuple(range(78)))):
+        # Check all source versions, descriptions and SHA-384 checksums before
+        # any stock migrator can change the rehearsal or live database.
+        _validate_v231_source_history(before, EROS_V231_SHA)
     current = before
     applied: list[dict] = []
     receipts: list[dict] = []

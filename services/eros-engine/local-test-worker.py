@@ -26,12 +26,13 @@ def deterministic_inference(job, **_kwargs):
         item.get('content', '') for item in messages
         if isinstance(item, dict) and isinstance(item.get('content'), str)
     )
-    if 'SYNTHETIC_MEMORY_EXTRACTION_RESULT' in content:
+    if 'SYNTHETIC_DREAMING_SCAN_RESULT' in content:
         memories = []
         if 'SYNTH_CITY_ZEPHYRBAY' in content:
             memories.append({
                 'content': 'SYNTH_CITY_ZEPHYRBAY',
                 'category': 'fact',
+                'domain': 'location_culture',
                 'confidence': 1.0,
             })
         old_meeting = 'SYNTH_OLD_2026-10-22_18:40'
@@ -40,13 +41,14 @@ def deterministic_inference(job, **_kwargs):
             memories.append({
                 'content': f'{old_meeting} (historical); {current_meeting} (current)',
                 'category': 'event',
+                'domain': 'lifestyle',
                 'confidence': 1.0,
             })
         print(json.dumps({
-            'event': 'LOCAL_TEST_MEMORY_EXTRACTION',
+            'event': 'LOCAL_TEST_DREAMING_SCAN',
             'candidate_count': len(memories),
         }, separators=(',', ':')), flush=True)
-        return json.dumps({'memories': memories}, separators=(',', ':'))
+        return json.dumps({'memories': memories, 'episode': '', 'journal': []}, separators=(',', ':'))
     if purpose == 'eros_chat_completion' and 'SYNTH_RECALL_PROBE' in content:
         memory_context = '\n'.join(
             item.get('content', '') for item in messages

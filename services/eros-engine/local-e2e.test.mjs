@@ -121,7 +121,7 @@ test('GPoint consent and Eros mapping foreign keys preserve ownership records', 
   assert.doesNotMatch(runner, /MAPPING_ERASURE_GUARD|blocked_without_stock_eros_erase/);
 });
 
-test('model config routes chat, embeddings and synthetic memory extraction to the internal GPOINT bridge', () => {
+test('model config routes chat, embeddings and synthetic dreaming scan to the internal GPOINT bridge', () => {
   const config = readFileSync(new URL('test-model-config.toml', directory), 'utf8');
   const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
   const compose = readFileSync(new URL('compose.local-test.yml', directory), 'utf8');
@@ -130,12 +130,15 @@ test('model config routes chat, embeddings and synthetic memory extraction to th
   assert.match(config, /http:\/\/gpoint-api:3000\/eros-worker\/v1\/embeddings/);
   assert.match(compose, /GPOINT_API_KEY: \$\{EROS_TEST_GPOINT_API_KEY/);
   assert.doesNotMatch(config, /openrouter|openai\.com|anthropic\.com|gemini\.googleapis\.com/i);
-  assert.match(config, /^\[tasks\.memory_extraction\]/m);
-  assert.match(config, /filter_prompt\s*=\s*".*synthetic/i);
-  assert.doesNotMatch(config, /temperature\s*=\s*0(?:\.0)?/);
+  assert.match(config, /^\[tasks\.dreaming_scan\]/m);
+  assert.match(config, /^\[tasks\.arc_rewrite\]/m);
+  assert.doesNotMatch(config, /^\[tasks\.memory_extraction\]/m);
+  assert.match(config, /filter_prompt\s*=\s*"""[\s\S]*SYNTHETIC_DREAMING_SCAN_RESULT/i);
+  const dreaming = config.split('[tasks.dreaming_scan]')[1]?.split('\n[tasks.')[0] ?? '';
+  assert.match(dreaming, /temperature\s*=\s*0\.2/);
   assert.match(compose, /DREAMING_TICK_SECS/);
   assert.match(compose, /DREAMING_IDLE_SECS/);
-  assert.match(runner, /LOCAL_E2E_MEMORY_EXTRACTION=PASS/);
+  assert.match(runner, /LOCAL_E2E_DREAMING_SCAN=PASS/);
   assert.match(runner, /LOCAL_E2E_REAL_INFERENCE=NOT_RUN/);
   assert.match(runner, /LOCAL_E2E_GPOINT_QUEUE_RLS_TENANT_ISOLATION=PASS fixture_role=gpoint_worker_test/);
   assert.match(runner, /c\.relkind IN \('r','p'\)/);
@@ -144,10 +147,19 @@ test('model config routes chat, embeddings and synthetic memory extraction to th
   assert.match(runner, /LOCAL_E2E_EROS_DATABASE_USER_RLS=NOT_AVAILABLE stock_api_ownership_test=PASS/);
 });
 
-test('production stock Eros model config includes the required memory extraction filter prompt', () => {
-  const config = readFileSync(new URL('eros-pilot-model-config.toml', directory), 'utf8');
-  const memoryExtraction = config.split('[tasks.memory_extraction]')[1] ?? '';
-  assert.match(memoryExtraction, /filter_prompt\s*=\s*"[^"]+"/);
+test('all stock Eros profiles configure privacy-filtered dreaming scan and parameters-only arc rewrite', () => {
+  for (const name of ['eros-production-model-config.toml', 'eros-pilot-model-config.toml',
+    'eros-layer7-staging-model-config.toml', 'test-model-config.toml']) {
+    const config = readFileSync(new URL(name, directory), 'utf8');
+    const dreaming = config.split('[tasks.dreaming_scan]')[1]?.split('\n[tasks.')[0] ?? '';
+    const arc = config.split('[tasks.arc_rewrite]')[1] ?? '';
+    assert.match(config, /^\[tasks\.dreaming_scan\]/m, name);
+    assert.match(config, /^\[tasks\.arc_rewrite\]/m, name);
+    assert.doesNotMatch(config, /^\[tasks\.memory_extraction\]/m, name);
+    assert.match(dreaming, /filter_prompt\s*=\s*"""/, name);
+    assert.match(dreaming, /Never retain .*credentials.*health.*financial/i, name);
+    assert.doesNotMatch(arc, /filter_prompt\s*=/, name);
+  }
 });
 
 test('Mac Ollama tunnel preserves its reverse forward and reconnects after SSH exits', () => {
@@ -213,7 +225,7 @@ test('local Worker fixture refuses non-isolated or non-local mode', () => {
   assert.match(worker, /GPOINT_EROS_WORKER_LOCAL_TEST/);
   assert.match(worker, /http:\/\/127\.0\.0\.1:3000\/gpoint-worker/);
   assert.match(worker, /DETERMINISTIC_LOCAL_E2E_REPLY/);
-  assert.match(worker, /SYNTHETIC_MEMORY_EXTRACTION_RESULT/);
+  assert.match(worker, /SYNTHETIC_DREAMING_SCAN_RESULT/);
   assert.match(worker, /purpose == 'eros_chat_completion'/);
   assert.match(worker, /SYNTH_CITY_ZEPHYRBAY/);
   const compose = readFileSync(new URL('compose.local-test.yml', directory), 'utf8');
@@ -537,11 +549,11 @@ test('cleanup path verifies the disposable Compose project is gone', () => {
   assert.match(runner, /LOCAL_E2E_CLEANUP=PASS/);
 });
 
-test('memory extraction, durable retrieval and provider context are checked by the runner', () => {
+test('dreaming scan, durable retrieval and provider context are checked by the runner', () => {
   const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
   assert.match(runner, /context_result=\$\(printf/);
   assert.match(runner, /LOCAL_E2E_PROVIDER_CONTEXT=PASS/);
-  assert.match(runner, /LOCAL_E2E_MEMORY_EXTRACTION=PASS/);
+  assert.match(runner, /LOCAL_E2E_DREAMING_SCAN=PASS/);
   assert.match(runner, /LOCAL_E2E_DURABLE_MEMORY=PASS/);
   assert.match(runner, /--recall-only/);
   assert.match(runner, /classified_at IS NOT NULL/);

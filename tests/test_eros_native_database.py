@@ -175,6 +175,23 @@ class ErosNativeDatabaseTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "confirmed upstream|exact upstream migration history"):
             DB._validate_baseline_transition(old[:-1], squashed, DB.EROS_V250_SHA)
 
+    def test_confirmed_v231_source_manifest_checks_versions_descriptions_and_checksums(self):
+        rows = [ledger(version, f"{version:096x}", f"migration_{version}")[0]
+                for version in range(72)]
+        digest = DB._migration_history_digest(rows)
+        with patch.object(DB, "EROS_V221_HISTORY_SHA256", digest):
+            self.assertEqual(DB._validate_v231_source_history(rows, DB.EROS_V231_SHA), rows)
+            for field, value in (("version", 99), ("description", "changed"),
+                                 ("checksum", "0" * 96)):
+                damaged = [dict(row) for row in rows]
+                damaged[5][field] = value
+                with self.subTest(field=field), self.assertRaisesRegex(RuntimeError, "source SQLx history"):
+                    DB._validate_v231_source_history(damaged, DB.EROS_V231_SHA)
+            with self.assertRaisesRegex(RuntimeError, "source SQLx history"):
+                DB._validate_v231_source_history(rows[:-1], DB.EROS_V231_SHA)
+            with self.assertRaisesRegex(RuntimeError, "confirmed v2.3.1 upstream"):
+                DB._validate_v231_source_history(rows, "f" * 40)
+
     def test_official_v270_history_requires_exact_versions_and_checksums(self):
         rows = [ledger(version, *reversed(DB.EROS_V270_HISTORY[version]))[0]
                 for version in DB.EROS_V270_HISTORY]
@@ -196,7 +213,8 @@ class ErosNativeDatabaseTests(unittest.TestCase):
         target = [ledger(version, *reversed(DB.EROS_V270_HISTORY[version]))[0]
                   for version in DB.EROS_V270_HISTORY]
         image = "ghcr.io/akhripunov/gpoint-eros@sha256:" + "b" * 64
-        with patch.object(DB, "_image_upstream_sha", return_value=DB.EROS_V270_SHA), \
+        with patch.object(DB, "EROS_V221_HISTORY_SHA256", DB._migration_history_digest(before)), \
+             patch.object(DB, "_image_upstream_sha", return_value=DB.EROS_V270_SHA), \
              patch.object(DB, "_run_migrator") as migrate, \
              patch.object(DB, "_ledger", side_effect=[through_v231, folded, target]):
             actual, pending, receipts = DB._run_migration_chain(image, "eros_check_1_1", {}, before)
@@ -215,7 +233,8 @@ class ErosNativeDatabaseTests(unittest.TestCase):
         target = [ledger(version, *reversed(DB.EROS_V270_HISTORY[version]))[0]
                   for version in DB.EROS_V270_HISTORY]
         image = "ghcr.io/akhripunov/gpoint-eros@sha256:" + "b" * 64
-        with patch.object(DB, "_image_upstream_sha", return_value=DB.EROS_V270_SHA), \
+        with patch.object(DB, "EROS_V231_HISTORY_SHA256", DB._migration_history_digest(before)), \
+             patch.object(DB, "_image_upstream_sha", return_value=DB.EROS_V270_SHA), \
              patch.object(DB, "_run_migrator") as migrate, \
              patch.object(DB, "_ledger", side_effect=[before, folded, target]):
             actual, pending, _ = DB._run_migration_chain(image, "eros_check_1_1", {}, before)
@@ -231,6 +250,16 @@ class ErosNativeDatabaseTests(unittest.TestCase):
              patch.object(DB, "_run_migrator") as migrate:
             with self.assertRaisesRegex(RuntimeError, "unknown or unsupported"):
                 DB._migration_stage_images(unsupported, image)
+        migrate.assert_not_called()
+
+    def test_v270_checks_full_source_checksum_manifest_before_any_migrator(self):
+        source = [ledger(version, f"{version:096x}", f"migration_{version}")[0]
+                  for version in range(72)]
+        image = "ghcr.io/akhripunov/gpoint-eros@sha256:" + "b" * 64
+        with patch.object(DB, "_image_upstream_sha", return_value=DB.EROS_V270_SHA), \
+             patch.object(DB, "_run_migrator") as migrate:
+            with self.assertRaisesRegex(RuntimeError, "confirmed v2.3.1 upstream"):
+                DB._run_migration_chain(image, "eros_check_1_1", {}, source)
         migrate.assert_not_called()
 
     def test_exact_image_run_identity_and_dsn_database_rewrite(self):

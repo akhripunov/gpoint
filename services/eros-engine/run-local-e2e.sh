@@ -319,7 +319,7 @@ if [ "$memory_state" != "true:2" ]; then
   fi
   exit 1
 fi
-echo LOCAL_E2E_MEMORY_EXTRACTION=PASS candidates=2
+echo LOCAL_E2E_DREAMING_SCAN=PASS candidates=2
 echo LOCAL_E2E_DURABLE_MEMORY=PASS candidates=2
 if ! compose exec -w /workspace/apps/api -T gpoint-api node --import tsx /workspace/services/eros-engine/local-test-e2e.mjs --recall-only >"$tmp/recall.out" 2>&1; then tail -40 "$tmp/recall.out" >&2; exit 1; fi
 cat "$tmp/recall.out"
