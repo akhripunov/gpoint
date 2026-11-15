@@ -37,6 +37,30 @@ def test_owner_main_marker_does_not_select_production():
     assert classify_push(**args, commit_message="GPOINT-LAYER7-API\nGPOINT-ARTIFACT-PREPARE") == "BLOCK"
 
 
+def test_me36_core_and_eros_config_changes_are_prepare_only():
+    paths = {
+        "apps/api/src/eros-response-prompt.js",
+        "apps/api/src/eros-worker-contract.ts",
+        "apps/api/test/eros-worker-contract.test.ts",
+        "services/eros-engine/eros-language-contract.test.mjs",
+        "services/eros-engine/eros-layer7-staging-model-config.toml",
+        "services/eros-engine/eros-pilot-model-config.toml",
+        "services/eros-engine/eros-production-model-config.toml",
+        "services/eros-engine/local-e2e.test.mjs",
+        "services/eros-engine/test-model-config.toml",
+        ".github/workflows/gpoint-layer7-staging.yml",
+        ".github/actions/layer7-deploy/action.yml",
+        "scripts/layer7_release_scope.py",
+        "scripts/native_release_intent.py",
+        "tests/test_layer7_release_scope.py",
+        "tests/test_native_release_intent.py",
+        "tests/test_layer7_staging_workflow.py",
+    }
+    args = dict(event_name="push", ref="refs/heads/main", changed_paths=paths)
+    assert classify_push(**args, commit_message="GPOINT-ARTIFACT-PREPARE") == "ARTIFACT_PREPARE"
+    assert classify_push(**args, commit_message="GPOINT-LAYER7-API") == "BLOCK"
+
+
 def test_layer7_core_api_config_rollout_requires_exact_marker_and_allowlisted_scope():
     config_path = "config/deploy.layer7-staging.eros-api.yml"
     scoped_paths = {
@@ -162,6 +186,24 @@ def test_verification_refuses_changes_to_other_roles_and_database():
         verify_runtime(before, after, candidate, candidate + "-4-1", "sha256:" + "c" * 64)
 
 
+def test_verification_allows_only_an_eros_container_restart_with_the_same_image():
+    candidate = "2" * 40
+    before = inventory("1" * 40)
+    after = inventory("1" * 40)
+    after["roles"][API] = {**after["roles"][API], "source": candidate,
+                            "container": "3" * 64, "version": candidate + "-4-1"}
+    after["roles"]["gpoint-eros-pilot-engine"] = {
+        **after["roles"]["gpoint-eros-pilot-engine"], "container": "4" * 64,
+        "restarts": "1",
+    }
+    verify_runtime(before, after, candidate, candidate + "-4-1", "sha256:" + "c" * 64,
+                   eros_config_update=True)
+    after["roles"]["gpoint-eros-pilot-engine"]["digest"] = "sha256:" + "d" * 64
+    with pytest.raises(ValueError, match="image changed"):
+        verify_runtime(before, after, candidate, candidate + "-4-1", "sha256:" + "c" * 64,
+                       eros_config_update=True)
+
+
 def test_auto_workflow_is_branch_restricted_and_only_mutates_api():
     import yaml
 
@@ -193,8 +235,10 @@ def test_auto_workflow_is_branch_restricted_and_only_mutates_api():
     assert "python3 scripts/layer7_release_scope.py plan" in scope
     assert all("python3 - collect" not in step.get("run", "") for step in deploy["steps"])
     for title in ("Apply isolated Prisma and SQLx migrations with recovery gates",
-                  "Install staging secrets and provision only the empty GPoint staging database"):
-        assert next(step for step in steps if step.get("name") == title)["if"] == "github.event_name == 'workflow_dispatch' && inputs.mode == 'full'"
+                  "Install staging secrets and provision only the empty GPoint staging database",
+                  "Layer7 staging preflight and isolated GPoint schema bootstrap"):
+        assert "steps.protected_scope.outputs.narrow != 'true'" in next(
+            step for step in steps if step.get("name") == title)["if"]
     pull = next(step for step in steps if step.get("name", "").startswith("Pull and verify exact private"))
     assert pull["run"].index('if [[ "$SCOPED" != true ]]') < pull["run"].index('images+=(')
     deploy = next(step["run"] for step in steps if step.get("name", "").startswith("Deploy exact immutable"))
@@ -218,7 +262,8 @@ def test_failed_kamal_switch_restores_only_verified_previous_api(tmp_path, verif
     step = next(step for step in action["runs"]["steps"]
                 if step.get("name", "").startswith("Deploy exact immutable"))
     body = step["run"]
-    recovery = body[body.index('if ! GPOINT_KAMAL_EXPECTED_DIGEST='):body.rindex('if [[ "$SCOPED" != true ]]')]
+    recovery_start = body.index('if ! GPOINT_KAMAL_EXPECTED_DIGEST="$CORE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core')
+    recovery = body[recovery_start:body.rindex('if [[ "$SCOPED" != true ]]')]
     snapshot = tmp_path / "layer7-verified-baseline.json"
     snapshot.write_text(json.dumps(inventory("1" * 40)))
     scripts = tmp_path / "scripts"
@@ -235,7 +280,7 @@ kamal() {
 check_queue_empty() { return 0; }
 ''' + recovery
     env = {
-        **os.environ, "GITHUB_WORKSPACE": str(tmp_path), "RUNNER_TEMP": str(tmp_path),
+        **os.environ, "GITHUB_WORKSPACE": str(tmp_path), "RUNNER_TEMP": str(tmp_path), "NARROW_SCOPE": "false",
         "GPOINT_LAYER7_STAGING_HOST": "example", "SCOPED": "true",
         "CORE_DIGEST": "sha256:" + "c" * 64, "IMAGE_VERSION": "2" * 40 + "-4-1",
         "previous_api": "gpoint-core-api-" + "1" * 40 + "-1-1",

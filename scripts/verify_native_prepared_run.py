@@ -78,8 +78,21 @@ def verify_prepared_run(run: Any, jobs_payload: Any, logs: bytes,
     commit = commit_payload.get("commit") if isinstance(commit_payload, dict) else None
     message = commit.get("message") if isinstance(commit, dict) else None
     marker = LAYER7_EROS_MARKER if layer7_eros else ARTIFACT_PREPARE_MARKER
-    if not isinstance(message, str) or marker not in message.splitlines():
-        raise ValueError("prepared run commit is not marked for artifact-only preparation")
+    marked = isinstance(message, str) and marker in message.splitlines()
+    if not marked:
+        if layer7_eros or not isinstance(commit_payload, dict):
+            raise ValueError("prepared run commit is not marked for artifact-only preparation")
+        files = commit_payload.get("files")
+        paths = {row.get("filename") for row in files or [] if isinstance(row, dict)}
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from native_release_intent import ARTIFACT_PREPARE_PATHS
+        required = {
+            "apps/api/src/eros-response-prompt.js",
+            "services/eros-engine/eros-layer7-staging-model-config.toml",
+        }
+        if (not files or not paths <= ARTIFACT_PREPARE_PATHS or not required <= paths
+                or set(digests) != {"CORE"}):
+            raise ValueError("unmarked prepared candidate is not the exact Core/config-only scope")
     if not isinstance(digests, dict) or not digests or any(
             component not in REPOSITORIES or not isinstance(digest, str)
             or not DIGEST.fullmatch(digest) for component, digest in digests.items()):

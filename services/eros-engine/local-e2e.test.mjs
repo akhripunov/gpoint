@@ -162,9 +162,9 @@ test('model config routes chat, embeddings and synthetic dreaming scan to the in
   assert.match(runner, /LOCAL_E2E_EROS_DATABASE_USER_RLS=NOT_AVAILABLE stock_api_ownership_test=PASS/);
 });
 
-test('all stock Eros profiles configure privacy-filtered dreaming scan and parameters-only arc rewrite', () => {
+test('runtime Eros profiles keep only the dreaming scan output contract and parameters-only arc rewrite', () => {
   for (const name of ['eros-production-model-config.toml', 'eros-pilot-model-config.toml',
-    'eros-layer7-staging-model-config.toml', 'test-model-config.toml']) {
+    'eros-layer7-staging-model-config.toml']) {
     const config = readFileSync(new URL(name, directory), 'utf8');
     const dreaming = config.split('[tasks.dreaming_scan]')[1]?.split('\n[tasks.')[0] ?? '';
     const arc = config.split('[tasks.arc_rewrite]')[1] ?? '';
@@ -172,7 +172,9 @@ test('all stock Eros profiles configure privacy-filtered dreaming scan and param
     assert.match(config, /^\[tasks\.arc_rewrite\]/m, name);
     assert.doesNotMatch(config, /^\[tasks\.memory_extraction\]/m, name);
     assert.match(dreaming, /filter_prompt\s*=\s*"""/, name);
-    assert.match(dreaming, /Never retain .*credentials.*health.*financial/i, name);
+    assert.match(dreaming, /memories must be an array of objects with string content and category fields/i, name);
+    assert.match(dreaming, /additional fields may be included and are stored by Eros as opaque metadata/i, name);
+    assert.doesNotMatch(dreaming, /privacy rules|never retain|non-sensitive|return only|0–10|0-10|sensitive data/i, name);
     assert.doesNotMatch(arc, /filter_prompt\s*=/, name);
     if (name === 'eros-layer7-staging-model-config.toml') {
       assert.match(dreaming, /temperature\s*=\s*0\.2/, name);
@@ -182,6 +184,22 @@ test('all stock Eros profiles configure privacy-filtered dreaming scan and param
       assert.match(arc, /temperature\s*=\s*1\.0/, name);
     }
   }
+  const fixture = readFileSync(new URL('test-model-config.toml', directory), 'utf8');
+  const fixtureDreaming = fixture.split('[tasks.dreaming_scan]')[1]?.split('\n[tasks.')[0] ?? '';
+  assert.match(fixtureDreaming, /SYNTHETIC_DREAMING_SCAN_RESULT/);
+  assert.match(fixtureDreaming, /local deterministic fixture recognizes only its marked synthetic test inputs/i);
+  assert.doesNotMatch(fixtureDreaming, /privacy rules|never retain .*credentials/i);
+});
+
+test('GPoint adapter and injected dialogue prompts do not control Eros memory scope or use', () => {
+  const adapter = readFileSync(new URL('../../apps/api/src/eros-adapter.ts', import.meta.url), 'utf8');
+  const responsePrompt = readFileSync(new URL('../../apps/api/src/eros-response-prompt.js', import.meta.url), 'utf8');
+  const workerContract = readFileSync(new URL('../../apps/api/src/eros-worker-contract.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(adapter, /memory_scope\s*:/);
+  assert.doesNotMatch(responsePrompt, /memories|memory/i);
+  const dialoguePrompt = workerContract.split('const GPOINT_EROS_DIALOGUE_ADAPTER = `')[1]?.split('`;')[0] ?? '';
+  assert.ok(dialoguePrompt, 'the GPoint dialogue adapter prompt is present');
+  assert.doesNotMatch(dialoguePrompt, /memories|memory/i);
 });
 
 test('Mac Ollama tunnel preserves its reverse forward and reconnects after SSH exits', () => {

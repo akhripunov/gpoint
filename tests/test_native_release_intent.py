@@ -50,6 +50,26 @@ def test_app_only_main_push_deploys_including_its_regression_tests():
     ) == "DEPLOY"
 
 
+def test_me36_active_eros_model_config_does_not_build_or_update_eros_image(tmp_path):
+    repo, baseline, _, _ = _component_repo(tmp_path, {
+        "services/eros-engine/eros-layer7-staging-model-config.toml": "old config\n",
+        "services/eros-engine/eros-production-model-config.toml": "old config\n",
+        "apps/api/src/eros-response-prompt.js": "old prompt\n",
+    })
+    (repo / "services/eros-engine/eros-layer7-staging-model-config.toml").write_text("new config\n")
+    (repo / "services/eros-engine/eros-production-model-config.toml").write_text("new config\n")
+    (repo / "apps/api/src/eros-response-prompt.js").write_text("new prompt\n")
+    _git(repo, "add", "--all")
+    _git(repo, "commit", "-qm", "ME-36 memory prompt and model config")
+    candidate = _git(repo, "rev-parse", "HEAD")
+    plan = MODULE.classify_component_build_plan(
+        repo, candidate, {**{component: baseline for component in MODULE.COMPONENT_ROLES},
+                          "EROS": baseline}
+    )
+    assert plan["deploy_scope"] == "CORE"
+    assert plan["build_components"] == ["CORE"]
+
+
 def test_normal_app_paths_cover_miniapp_bot_worker_agata_and_runtime_packages():
     for path in (
         "apps/miniapp/src/main.tsx",

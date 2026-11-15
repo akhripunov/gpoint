@@ -15,6 +15,28 @@ def _staging_steps():
     return action['runs']['steps']
 
 
+def test_protected_full_mode_can_apply_only_exact_core_and_active_eros_config():
+    steps = _staging_steps()
+    action = yaml.safe_load((ROOT / '.github/actions/layer7-deploy/action.yml').read_text())
+    scope = next(step for step in steps if step.get('id') == 'protected_scope')
+    assert "workflow_dispatch" in scope["if"]
+    assert "eros-layer7-staging-model-config.toml" in scope["run"]
+    assert "layer7_release_scope.py plan" in scope["run"]
+    assert "GITHUB_SHA" in scope["run"]
+    apply = next(step for step in steps if step.get('id') == 'deployment')
+    assert "steps.protected_scope.outputs.narrow" in apply["env"]["NARROW_SCOPE"]
+    assert "sha256sum" in apply["run"]
+    assert "mv -T" in apply["run"]
+    assert "backups" in apply["run"]
+    assert "kamal redeploy --skip-push --version" in apply["run"]
+    verify = next(step for step in steps if step.get('id') == 'runtime_verify')
+    assert "/etc/eros-engine/model_config.toml" in verify["run"]
+    rollback = next(step for step in steps if step.get('id') == 'me36_config_rollback')
+    assert "steps.runtime_verify.outcome == 'failure'" in rollback["if"]
+    assert "kamal app start" in rollback["run"]
+    assert "deploy_scope" not in action["inputs"]
+
+
 def test_staging_ssh_keeps_silent_transfers_alive_without_weakening_host_keys():
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
     text = '\n'.join(s.get('run', '') for s in _staging_steps())
@@ -118,7 +140,7 @@ def test_staging_preserves_legacy_and_builds_kamal_compatible_eros_image():
     assert '\"$expected_service\"' in readback
     deploy = next(s['run'] for s in _staging_steps() if s.get('name') == 'Deploy exact immutable images with stock Kamal 2 to Layer7 staging')
     assert 'kamal deploy ' not in deploy
-    assert deploy.count('kamal redeploy --skip-push') == 4
+    assert deploy.count('kamal redeploy --skip-push') == 6
     assert deploy.index('kamal accessory boot relay') < deploy.index('kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles engine')
     assert 'kamal prune' not in deploy
 
@@ -436,11 +458,11 @@ def test_layer7_staging_can_run_core_and_eros_without_a_staging_telegram_bot():
     assert "TELEGRAM_BOT_TOKEN" not in validation["env"].get("TELEGRAM_BOT_TOKEN", "")
     assert "${{ inputs.staging_env_bundle }}" in validation["env"]["STAGING_ENV_BUNDLE"]
     deploy = next(step for step in steps if step.get("name") == "Deploy exact immutable images with stock Kamal 2 to Layer7 staging")
-    assert deploy["env"]["STAGING_BOT_ENABLED"] == "${{ steps.staging_env.outputs.bot_enabled || steps.scoped.outputs.bot_enabled }}"
+    assert "steps.protected_scope.outputs.bot_enabled" in deploy["env"]["STAGING_BOT_ENABLED"]
     assert 'if [[ "$role" == bot && "$STAGING_BOT_ENABLED" != true ]]' in deploy["run"]
     assert 'kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles api' in deploy["run"]
     verify = next(step for step in steps if step.get("name") == "Verify runtime roles, health, Eros embeddings, and API-to-engine route")
-    assert verify["env"]["STAGING_BOT_ENABLED"] == "${{ steps.staging_env.outputs.bot_enabled || steps.scoped.outputs.bot_enabled }}"
+    assert "steps.protected_scope.outputs.bot_enabled" in verify["env"]["STAGING_BOT_ENABLED"]
     assert '[[ "$bot_enabled" == true || "$bot_enabled" == false ]]' in verify["run"]
     assert '[[ "$bot_enabled" == false && "$spec" == gpoint-core-bot\\|* ]]' in verify["run"]
     assert "STAGING_BOT_ENABLED" not in str(staging["env"])

@@ -266,16 +266,34 @@ EXACT_VERSION = re.compile(r"^[0-9a-f]{40}-[0-9]+-[0-9]+$")
 EXACT_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 ARTIFACT_PREPARE_MARKER = "GPOINT-ARTIFACT-PREPARE"
 ARTIFACT_PREPARE_PATHS = frozenset({
+    "apps/api/src/eros-response-prompt.js",
+    "apps/api/src/eros-worker-contract.ts",
+    "apps/api/test/eros-worker-contract.test.ts",
     ".github/actions/layer7-deploy/action.yml",
+    ".github/workflows/gpoint-layer7-staging.yml",
     ".github/workflows/gpoint-native-release.yml",
+    "services/eros-engine/eros-language-contract.test.mjs",
+    "services/eros-engine/eros-layer7-staging-model-config.toml",
+    "services/eros-engine/eros-pilot-model-config.toml",
+    "services/eros-engine/eros-production-model-config.toml",
+    "services/eros-engine/local-e2e.test.mjs",
+    "services/eros-engine/test-model-config.toml",
     "scripts/layer7_release_scope.py",
     "scripts/native_release_intent.py",
     "scripts/prisma_migration_release_plan.py",
+    "scripts/verify_native_prepared_run.py",
     "tests/test_layer7_release_scope.py",
     "tests/test_layer7_staging_workflow.py",
     "tests/test_native_prisma_apply_boundary.py",
     "tests/test_native_release_intent.py",
+    "tests/test_native_prepared_run.py",
     "tests/test_prisma_migration_release_plan.py",
+})
+EROS_MODEL_CONFIG_PATHS = frozenset({
+    "services/eros-engine/eros-layer7-staging-model-config.toml",
+    "services/eros-engine/eros-pilot-model-config.toml",
+    "services/eros-engine/eros-production-model-config.toml",
+    "services/eros-engine/test-model-config.toml",
 })
 LAYER7_EROS_MARKER = "GPOINT-LAYER7-EROS"
 EROS_UPSTREAM_PIN = "services/eros-engine/upstream.sha"
@@ -303,9 +321,12 @@ LAYER7_EROS_RELEASE_PATHS = frozenset({
 LAYER7_API_MARKER = "GPOINT-LAYER7-API"
 LAYER7_API_PROMPT_PATHS = frozenset({
     "apps/api/src/eros-response-prompt.js",
+    "apps/api/src/eros-worker-contract.ts",
     "apps/api/test/build-output.test.mjs",
     "apps/api/test/eros-adapter.test.ts",
+    "apps/api/test/eros-worker-contract.test.ts",
     "services/eros-engine/eros-language-contract.test.mjs",
+    "services/eros-engine/local-e2e.test.mjs",
 })
 LAYER7_API_ADAPTER_PATHS = frozenset({
     "apps/api/src/eros-adapter.ts",
@@ -327,7 +348,8 @@ LAYER7_API_CONFIG_PATHS = frozenset({
     "tests/test_layer7_release_scope.py",
     "tests/test_layer7_staging_workflow.py",
 })
-LAYER7_API_PATHS = LAYER7_API_PROMPT_PATHS | LAYER7_API_ADAPTER_PATHS | LAYER7_API_CONFIG_PATHS
+LAYER7_API_PATHS = (LAYER7_API_PROMPT_PATHS | LAYER7_API_ADAPTER_PATHS
+                    | LAYER7_API_CONFIG_PATHS | EROS_MODEL_CONFIG_PATHS)
 
 
 def _path_kind(path: str) -> str:
@@ -335,6 +357,8 @@ def _path_kind(path: str) -> str:
     parts = normalized.split("/")
     if not normalized or normalized.startswith("../") or "/../" in normalized:
         return "unknown"
+    if normalized in EROS_MODEL_CONFIG_PATHS:
+        return "ops"
     if normalized == "packages/db/prisma/schema.prisma":
         return "prisma_schema"
     if normalized.startswith("packages/db/prisma/migrations/"):
@@ -367,6 +391,16 @@ def classify_push(*, event_name: str, ref: str,
     if "schema" in kinds or "unknown" in kinds:
         return "BLOCK"
     markers = set(commit_message.splitlines())
+    if (".github/workflows/gpoint-layer7-staging.yml" in changed_paths
+            and LAYER7_EROS_MARKER not in markers
+            and not ({"apps/api/src/eros-response-prompt.js",
+                      "services/eros-engine/eros-layer7-staging-model-config.toml"}
+                     <= changed_paths)):
+        return "BLOCK"
+    if ARTIFACT_PREPARE_MARKER in markers:
+        if markers & {LAYER7_API_MARKER, LAYER7_EROS_MARKER}:
+            return "BLOCK"
+        return "ARTIFACT_PREPARE" if changed_paths <= ARTIFACT_PREPARE_PATHS else "BLOCK"
     if LAYER7_EROS_MARKER in markers:
         if markers & {ARTIFACT_PREPARE_MARKER, LAYER7_API_MARKER}:
             return "BLOCK"
@@ -382,7 +416,8 @@ def classify_push(*, event_name: str, ref: str,
         return "LAYER7_EROS"
     if changed_paths & {EROS_UPSTREAM_PIN, EROS_MIGRATION_HELPER}:
         return "BLOCK"
-    if ".github/workflows/gpoint-layer7-staging.yml" in changed_paths:
+    if (".github/workflows/gpoint-layer7-staging.yml" in changed_paths
+            and not changed_paths <= ARTIFACT_PREPARE_PATHS):
         return "BLOCK"
     if ("apps/api/src/eros-adapter.ts" in changed_paths
             and LAYER7_API_MARKER not in markers):
@@ -533,6 +568,8 @@ def _component_paths(path: str) -> set[str]:
         return {"MINIAPP"}
     if path.startswith("services/agata/"):
         return {"AGATA"}
+    if path in EROS_MODEL_CONFIG_PATHS:
+        return set()
     if path.startswith(("services/eros-engine/", "config/deploy.eros")):
         return {"EROS"}
     if path in {"infra/production/Gpoint.Dockerfile", "infra/production/nginx-miniapp.conf"}:
@@ -554,6 +591,7 @@ def _non_runtime_documentation_path(path: str) -> bool:
 def _known_non_runtime_path(path: str) -> bool:
     """Recognize only verified release/test metadata outside application images."""
     return (_non_runtime_documentation_path(path)
+            or path in EROS_MODEL_CONFIG_PATHS
             or path in KNOWN_NON_RUNTIME_FILES
             or PRISMA_MIGRATION.fullmatch(path) is not None
             or path.startswith("tests/")
