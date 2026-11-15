@@ -429,6 +429,20 @@ def test_layer7_staging_can_run_core_and_eros_without_a_staging_telegram_bot():
     assert "secrets.GPOINT_PRODUCTION" not in yaml.safe_dump(staging)
 
 
+def test_layer7_core_api_reaches_eros_embedding_relay_without_expanding_other_roles():
+    text = (ROOT / "config/deploy.layer7-staging.yml").read_text()
+    config = yaml.safe_load(re.sub(r"<%=.*?%>", "rendered", text))
+
+    assert config["servers"]["api"]["options"]["network"] == [
+        "gpoint_app",
+        "shared_internal",
+        "gpoint_eros_api",
+        "gpoint_eros_embeddings",
+    ]
+    assert "gpoint_eros_embeddings" not in config["servers"]["worker"]["options"]["network"]
+    assert "gpoint_eros_embeddings" not in config["servers"]["bot"]["options"]["network"]
+
+
 def test_staging_eros_engine_reaches_the_embedding_relay_on_its_trusted_network():
     # The relay authorises peers on 172.31.254.0/29 only. The engine has to be
     # attached to that dedicated network, otherwise its embed call arrives from

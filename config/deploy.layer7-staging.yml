@@ -15,6 +15,7 @@ servers:
         - gpoint_app
         - shared_internal
         - gpoint_eros_api
+        - gpoint_eros_embeddings
       network-alias: gpoint-core-api
       env-file:
         - /opt/gpoint/env/staging.env
