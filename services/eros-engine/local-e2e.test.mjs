@@ -580,6 +580,12 @@ test('dreaming scan, durable retrieval and provider context are checked by the r
   assert.match(runner, /classified_at IS NOT NULL/);
 });
 
+test('dreaming idle fixture ages the stock Eros scan-state clock', () => {
+  const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  assert.match(runner, /UPDATE engine\.relationship_scan_state SET last_turn_at = now\(\) - interval '2 minutes' WHERE instance_id =/);
+  assert.match(runner, /AND pending_turns >= 3 RETURNING pending_turns/);
+});
+
 test('standalone PostgreSQL integration container is owned by and cleaned with its project', () => {
   const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
   assert.match(runner, /integration_container="\$\{project\}-worker-integration"/);

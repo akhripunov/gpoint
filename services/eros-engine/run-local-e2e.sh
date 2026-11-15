@@ -326,8 +326,12 @@ session_count=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -A
 session_id=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT id FROM engine.chat_sessions WHERE channel <> 'group' ORDER BY created_at DESC LIMIT 1;")
 [ -n "$session_id" ] || { echo LOCAL_E2E_MEMORY_FIXTURE_SESSION=FAIL >&2; exit 1; }
 session_id=$(python3 -c 'import sys,uuid; print(uuid.UUID(sys.argv[1]))' "$session_id") || { echo LOCAL_E2E_MEMORY_FIXTURE_SESSION=FAIL >&2; exit 1; }
-compose exec -T postgres psql -U eros_test_admin -d eros_test -v ON_ERROR_STOP=1 -Atc \
-  "UPDATE engine.chat_sessions SET last_active_at = now() - interval '2 minutes' WHERE id = '$session_id'::uuid;" >/dev/null
+scan_state_pending=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -v ON_ERROR_STOP=1 -Atc \
+  "UPDATE engine.relationship_scan_state SET last_turn_at = now() - interval '2 minutes' WHERE instance_id = (SELECT instance_id FROM engine.chat_sessions WHERE id = '$session_id'::uuid) AND pending_turns >= 3 RETURNING pending_turns;")
+[[ "$scan_state_pending" =~ ^[0-9]+$ ]] && [ "$scan_state_pending" -ge 3 ] || {
+  echo "LOCAL_E2E_MEMORY_FIXTURE_SCAN_STATE=FAIL pending_turns=$scan_state_pending" >&2
+  exit 1
+}
 memory_state=
 for attempt in $(seq 1 60); do
   memory_state=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc \
