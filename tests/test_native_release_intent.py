@@ -975,3 +975,12 @@ def test_layer7_eros_migration_gate_correction_cannot_route_to_old_production():
     assert MODULE.classify_push(**context, changed_paths=paths,
                                 commit_message="GPOINT-LAYER7-EROS") == "LAYER7_EROS"
     assert MODULE.classify_push(**context, changed_paths=paths) == "BLOCK"
+
+
+def test_layer7_runner_compatibility_fix_keeps_explicit_eros_route():
+    paths = {".github/workflows/gpoint-layer7-staging.yml",
+             "tests/test_layer7_staging_workflow.py"}
+    context = {"event_name": "push", "ref": "refs/heads/main"}
+    assert MODULE.classify_push(**context, changed_paths=paths,
+                                commit_message="GPOINT-LAYER7-EROS") == "LAYER7_EROS"
+    assert MODULE.classify_push(**context, changed_paths=paths) == "BLOCK"

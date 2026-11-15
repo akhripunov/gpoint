@@ -345,15 +345,19 @@ def classify_push(*, event_name: str, ref: str,
     if LAYER7_EROS_MARKER in markers:
         if markers & {ARTIFACT_PREPARE_MARKER, LAYER7_API_MARKER}:
             return "BLOCK"
-        if EROS_MIGRATION_HELPER not in changed_paths and not any(
+        has_eros_scope = EROS_MIGRATION_HELPER in changed_paths or any(
             path.startswith("services/eros-engine/") for path in changed_paths
-        ):
+        )
+        staging_workflow_changed = ".github/workflows/gpoint-layer7-staging.yml" in changed_paths
+        if not has_eros_scope and not staging_workflow_changed:
             return "BLOCK"
         if any(not path.startswith("services/eros-engine/")
                for path in changed_paths - LAYER7_EROS_RELEASE_PATHS):
             return "BLOCK"
         return "LAYER7_EROS"
     if changed_paths & {EROS_UPSTREAM_PIN, EROS_MIGRATION_HELPER}:
+        return "BLOCK"
+    if ".github/workflows/gpoint-layer7-staging.yml" in changed_paths:
         return "BLOCK"
     if LAYER7_API_MARKER in markers:
         if ARTIFACT_PREPARE_MARKER in markers or not changed_paths <= LAYER7_API_PATHS:
