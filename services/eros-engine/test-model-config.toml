@@ -18,7 +18,7 @@ model = "qwen3-embedding:0.6b@gpoint"
 
 [tasks.dreaming_scan]
 model = "gpoint-codex@gpoint"
-temperature = 0.2
+temperature = 1.0
 max_tokens = 1024
 filter_prompt = """
 SYNTHETIC_DREAMING_SCAN_RESULT. Return only one JSON object with memories, episode, and journal. Use only the marked synthetic facts; no real user data.
@@ -28,5 +28,5 @@ Return the test markers as memories and empty episode and journal arrays when no
 
 [tasks.arc_rewrite]
 model = "gpoint-codex@gpoint"
-temperature = 0.3
+temperature = 1.0
 max_tokens = 1500

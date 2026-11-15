@@ -150,7 +150,7 @@ test('model config routes chat, embeddings and synthetic dreaming scan to the in
   assert.doesNotMatch(config, /^\[tasks\.memory_extraction\]/m);
   assert.match(config, /filter_prompt\s*=\s*"""[\s\S]*SYNTHETIC_DREAMING_SCAN_RESULT/i);
   const dreaming = config.split('[tasks.dreaming_scan]')[1]?.split('\n[tasks.')[0] ?? '';
-  assert.match(dreaming, /temperature\s*=\s*0\.2/);
+  assert.match(dreaming, /temperature\s*=\s*1\.0/);
   assert.match(compose, /DREAMING_TICK_SECS/);
   assert.match(compose, /DREAMING_IDLE_SECS/);
   assert.match(runner, /LOCAL_E2E_DREAMING_SCAN=PASS/);
@@ -174,6 +174,13 @@ test('all stock Eros profiles configure privacy-filtered dreaming scan and param
     assert.match(dreaming, /filter_prompt\s*=\s*"""/, name);
     assert.match(dreaming, /Never retain .*credentials.*health.*financial/i, name);
     assert.doesNotMatch(arc, /filter_prompt\s*=/, name);
+    if (name === 'eros-layer7-staging-model-config.toml') {
+      assert.match(dreaming, /temperature\s*=\s*0\.2/, name);
+      assert.match(arc, /temperature\s*=\s*0\.3/, name);
+    } else {
+      assert.match(dreaming, /temperature\s*=\s*1\.0/, name);
+      assert.match(arc, /temperature\s*=\s*1\.0/, name);
+    }
   }
 });
 

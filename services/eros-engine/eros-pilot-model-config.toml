@@ -17,7 +17,7 @@ model = "qwen3-embedding:0.6b@gpoint"
 
 [tasks.dreaming_scan]
 model = "gpoint-codex@gpoint"
-temperature = 0.2
+temperature = 1.0
 max_tokens = 1024
 filter_prompt = """
 Read the bounded conversation transcript. Return only one valid JSON object with exactly three keys: memories, episode, journal. No Markdown or extra text.
@@ -33,5 +33,5 @@ Return this shape even when empty: {"memories": [], "episode": "", "journal": []
 
 [tasks.arc_rewrite]
 model = "gpoint-codex@gpoint"
-temperature = 0.3
+temperature = 1.0
 max_tokens = 1500
