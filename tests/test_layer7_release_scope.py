@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from layer7_release_scope import API, REQUIRED_ROLES, plan, verify_runtime
-from native_release_intent import classify_push
+from native_release_intent import ARTIFACT_PREPARE_PATHS, classify_push
 
 
 def commit(repo, message, path, content):
@@ -37,6 +37,53 @@ def test_owner_main_marker_does_not_select_production():
     assert classify_push(**args, commit_message="GPOINT-LAYER7-API\nGPOINT-ARTIFACT-PREPARE") == "BLOCK"
 
 
+def test_layer7_core_api_config_rollout_requires_exact_marker_and_allowlisted_scope():
+    config_path = "config/deploy.layer7-staging.eros-api.yml"
+    scoped_paths = {
+        config_path,
+        ".github/actions/layer7-deploy/action.yml",
+        "tests/test_layer7_staging_workflow.py",
+        "scripts/native_release_intent.py",
+        "scripts/layer7_release_scope.py",
+        "tests/test_layer7_release_scope.py",
+    }
+    assert classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths=scoped_paths,
+        commit_message="ME-36 exact Core API scope\nGPOINT-LAYER7-API",
+    ) == "LAYER7_API"
+    assert classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths={config_path},
+    ) == "BLOCK"
+    assert classify_push(
+        event_name="push", ref="refs/heads/main",
+        changed_paths=scoped_paths | {"apps/worker/src/main.ts"},
+        commit_message="GPOINT-LAYER7-API",
+    ) == "BLOCK"
+    assert classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths={config_path},
+        commit_message="GPOINT-LAYER7-API\nGPOINT-ARTIFACT-PREPARE",
+    ) == "BLOCK"
+
+
+def test_native_selector_bootstrap_is_build_only_and_not_layer7_deploy():
+    tooling_only = {
+        ".github/actions/layer7-deploy/action.yml",
+        "scripts/native_release_intent.py",
+        "tests/test_native_release_intent.py",
+        "scripts/layer7_release_scope.py",
+        "tests/test_layer7_release_scope.py",
+        "tests/test_layer7_staging_workflow.py",
+    }
+    assert tooling_only <= ARTIFACT_PREPARE_PATHS
+    assert classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths=tooling_only,
+    ) == "ARTIFACT_PREPARE"
+    assert classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths=tooling_only,
+        commit_message="GPOINT-LAYER7-API",
+    ) == "BLOCK"
+
+
 def test_scope_uses_full_diff_from_every_running_role(tmp_path):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
@@ -44,6 +91,9 @@ def test_scope_uses_full_diff_from_every_running_role(tmp_path):
     base = commit(tmp_path, "base", "apps/api/src/eros-response-prompt.js", "a")
     prompt = commit(tmp_path, "prompt", "apps/api/src/eros-response-prompt.js", "b")
     assert plan(tmp_path, prompt, inventory(base), previous=base) == ["CORE"]
+    config = commit(tmp_path, "Layer7 API network config", "config/deploy.layer7-staging.eros-api.yml",
+                   "network: [shared_internal, gpoint_eros_api, gpoint_eros_embeddings]\n")
+    assert plan(tmp_path, config, inventory(prompt), previous=prompt) == ["CORE"]
     tooling = commit(tmp_path, "tooling", ".github/workflows/gpoint-native-release.yml", "updated")
     with pytest.raises(ValueError, match="outside"):
         plan(tmp_path, tooling, inventory(base), previous=base)
