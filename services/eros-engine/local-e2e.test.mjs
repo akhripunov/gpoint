@@ -53,14 +53,25 @@ test('local E2E topology has API, Eros, Worker and isolated PostgreSQL', () => {
 
 test('only the disposable Eros migrator receives database CREATE privilege', () => {
   const init = readFileSync(new URL('local-test-init.sql', directory), 'utf8');
+  const erosInit = init.split('\\connect gpoint_test')[0];
   assert.match(init, /GRANT CONNECT, CREATE ON DATABASE eros_test TO eros_migrator;/);
   assert.match(init, /GRANT USAGE, CREATE ON SCHEMA public TO eros_migrator;/);
   assert.match(init, /CREATE DATABASE gpoint_test OWNER eros_test_admin;/);
   assert.match(init, /CREATE ROLE eros_migrator LOGIN[\s\S]*?NOSUPERUSER NOCREATEDB NOBYPASSRLS;/);
   assert.match(init, /CREATE ROLE eros_runtime LOGIN[^;]*NOSUPERUSER NOCREATEDB BYPASSRLS;/);
   assert.match(init, /CREATE ROLE eros_runtime_nobypass LOGIN[^;]*NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;/);
-  assert.match(init, /ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eros_runtime_nobypass;/);
+  assert.doesNotMatch(erosInit, /CREATE SCHEMA engine/);
+  assert.doesNotMatch(erosInit, /ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine/);
   assert.doesNotMatch(init, /GRANT [^;]* ON DATABASE eros_test TO (?!eros_migrator\b)[a-z_]+;/);
+});
+
+test('stock Eros migration creates engine schema before test runtime grants', () => {
+  const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  const migrations = runner.indexOf('compose up -d --wait --wait-timeout 240 postgres eros-migrate');
+  const grants = runner.indexOf('GRANT USAGE ON SCHEMA engine TO eros_runtime, eros_runtime_nobypass;');
+  const stack = runner.indexOf('compose up -d --wait --wait-timeout 240', migrations + 1);
+  assert.ok(migrations >= 0 && migrations < grants && grants < stack, 'run stock migration before grants and remaining services');
+  assert.match(runner, /ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eros_runtime_nobypass;/);
 });
 
 test('GPoint test API has no connection or data grants to the Eros database', () => {

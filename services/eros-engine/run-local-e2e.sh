@@ -202,6 +202,21 @@ for service in gpoint-api gpoint-api-migrate gpoint-worker; do
 done
 echo LOCAL_E2E_COMPOSE_START=BEGIN
 compose_started=1
+compose up -d --wait --wait-timeout 240 postgres eros-migrate
+echo LOCAL_E2E_STOCK_MIGRATIONS=PASS
+compose exec -T postgres psql -U eros_test_admin -d eros_test -v ON_ERROR_STOP=1 <<'SQL'
+GRANT USAGE ON SCHEMA engine TO eros_runtime, eros_runtime_nobypass;
+GRANT ALL ON ALL TABLES IN SCHEMA engine TO eros_runtime;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA engine TO eros_runtime;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA engine TO eros_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine GRANT ALL ON TABLES TO eros_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine GRANT ALL ON SEQUENCES TO eros_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine GRANT EXECUTE ON FUNCTIONS TO eros_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA engine TO eros_runtime_nobypass;
+GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA engine TO eros_runtime_nobypass;
+ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eros_runtime_nobypass;
+ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO eros_runtime_nobypass;
+SQL
 compose up -d --wait --wait-timeout 240
 echo LOCAL_E2E_COMPOSE_START=PASS
 eros_api_privileges=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -At <<'SQL'
