@@ -160,6 +160,79 @@ class ErosNativeDatabaseTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "behind the live SQLx head"):
             DB._migration_delta(existing, [existing[0], ledger(2, "b" * 64, "late-old")[0], existing[1]])
 
+    def test_official_v250_baseline_fold_requires_exact_upstream_and_history(self):
+        old = [ledger(version, f"{version:096x}", f"migration_{version}")[0]
+               for version in range(78)]
+        squashed = [ledger(version, *reversed(DB.EROS_V270_HISTORY[version]))[0]
+                    for version in (0, 78, 79, 80, 81)]
+        self.assertEqual(DB._validate_baseline_transition(old, squashed, DB.EROS_V250_SHA), squashed)
+        with self.assertRaisesRegex(RuntimeError, "confirmed upstream"):
+            DB._validate_baseline_transition(old, squashed, "f" * 40)
+        damaged = [dict(row) for row in squashed]
+        damaged[1]["checksum"] = "0" * 96
+        with self.assertRaisesRegex(RuntimeError, "exact upstream migration history"):
+            DB._validate_baseline_transition(old, damaged, DB.EROS_V250_SHA)
+        with self.assertRaisesRegex(RuntimeError, "confirmed upstream|exact upstream migration history"):
+            DB._validate_baseline_transition(old[:-1], squashed, DB.EROS_V250_SHA)
+
+    def test_official_v270_history_requires_exact_versions_and_checksums(self):
+        rows = [ledger(version, *reversed(DB.EROS_V270_HISTORY[version]))[0]
+                for version in DB.EROS_V270_HISTORY]
+        self.assertEqual(DB._validate_v270_history(rows), rows)
+        with self.assertRaisesRegex(RuntimeError, "exact upstream migration history"):
+            DB._validate_v270_history(rows[:-1])
+        damaged = [dict(row) for row in rows]
+        damaged[-1]["description"] = "unconfirmed"
+        with self.assertRaisesRegex(RuntimeError, "exact upstream migration history"):
+            DB._validate_v270_history(damaged)
+
+    def test_v221_to_v270_rehearsal_uses_only_pinned_official_migrators_in_order(self):
+        before = [ledger(version, f"{version:096x}", f"migration_{version}")[0]
+                  for version in range(72)]
+        through_v231 = before + [ledger(version, f"{version:096x}", f"migration_{version}")[0]
+                                 for version in range(72, 78)]
+        folded = [ledger(version, *reversed(DB.EROS_V270_HISTORY[version]))[0]
+                  for version in (0, 78, 79, 80, 81)]
+        target = [ledger(version, *reversed(DB.EROS_V270_HISTORY[version]))[0]
+                  for version in DB.EROS_V270_HISTORY]
+        image = "ghcr.io/akhripunov/gpoint-eros@sha256:" + "b" * 64
+        with patch.object(DB, "_image_upstream_sha", return_value=DB.EROS_V270_SHA), \
+             patch.object(DB, "_run_migrator") as migrate, \
+             patch.object(DB, "_ledger", side_effect=[through_v231, folded, target]):
+            actual, pending, receipts = DB._run_migration_chain(image, "eros_check_1_1", {}, before)
+        self.assertEqual(actual, target)
+        self.assertEqual([row["version"] for row in pending], list(range(72, 86)))
+        self.assertEqual([call.args[0] for call in migrate.call_args_list],
+                         [DB.EROS_V231_IMAGE, DB.EROS_V250_IMAGE, image])
+        self.assertEqual([receipt["upstreamSha"] for receipt in receipts],
+                         [DB.EROS_V231_SHA, DB.EROS_V250_SHA, DB.EROS_V270_SHA])
+
+    def test_existing_v231_history_is_checksum_checked_before_baseline_fold(self):
+        before = [ledger(version, f"{version:096x}", f"migration_{version}")[0]
+                  for version in range(78)]
+        folded = [ledger(version, *reversed(DB.EROS_V270_HISTORY[version]))[0]
+                  for version in (0, 78, 79, 80, 81)]
+        target = [ledger(version, *reversed(DB.EROS_V270_HISTORY[version]))[0]
+                  for version in DB.EROS_V270_HISTORY]
+        image = "ghcr.io/akhripunov/gpoint-eros@sha256:" + "b" * 64
+        with patch.object(DB, "_image_upstream_sha", return_value=DB.EROS_V270_SHA), \
+             patch.object(DB, "_run_migrator") as migrate, \
+             patch.object(DB, "_ledger", side_effect=[before, folded, target]):
+            actual, pending, _ = DB._run_migration_chain(image, "eros_check_1_1", {}, before)
+        self.assertEqual(actual, target)
+        self.assertEqual([row["version"] for row in pending], list(range(78, 86)))
+        self.assertEqual([call.args[0] for call in migrate.call_args_list],
+                         [DB.EROS_V231_IMAGE, DB.EROS_V250_IMAGE, image])
+
+    def test_v270_rehearsal_rejects_unknown_prebaseline_history_before_running_migrator(self):
+        unsupported = ledger(0) + ledger(2, "b" * 96, "gap")
+        image = "ghcr.io/akhripunov/gpoint-eros@sha256:" + "b" * 64
+        with patch.object(DB, "_image_upstream_sha", return_value=DB.EROS_V270_SHA), \
+             patch.object(DB, "_run_migrator") as migrate:
+            with self.assertRaisesRegex(RuntimeError, "unknown or unsupported"):
+                DB._migration_stage_images(unsupported, image)
+        migrate.assert_not_called()
+
     def test_exact_image_run_identity_and_dsn_database_rewrite(self):
         with self.assertRaisesRegex(ValueError, "exact Eros candidate"):
             DB.lifecycle("prepare", "main", "ghcr.io/akhripunov/gpoint-eros@sha256:" + "a" * 64, "1-1")
@@ -243,6 +316,7 @@ class ErosNativeDatabaseTests(unittest.TestCase):
              patch.object(DB, "_ledger", side_effect=[before, before, after]), \
              patch.object(DB, "_prepare_backup_and_restore", return_value=(Path("/opt/gpoint/backups/eros/native-123-1.dump.age"), "c" * 64)), \
              patch.object(DB, "_run_migrator") as migrate, \
+             patch.object(DB, "_image_upstream_sha", return_value="a" * 40), \
              patch.object(DB, "_safe_write_plan", side_effect=lambda path, plan: written.append(plan)), \
              patch.object(DB, "_drop_database") as drop:
             if mode == "rollback-check":
@@ -269,6 +343,7 @@ class ErosNativeDatabaseTests(unittest.TestCase):
              patch.object(DB, "_ledger", side_effect=[ledger(), ledger(), ledger()]), \
              patch.object(DB, "_prepare_backup_and_restore", return_value=(Path("/opt/gpoint/backups/eros/native-123-1.dump.age"), "c" * 64)), \
              patch.object(DB, "_run_migrator"), \
+             patch.object(DB, "_image_upstream_sha", return_value="a" * 40), \
              patch.object(DB, "_safe_write_plan", side_effect=lambda path, plan: written.append(plan)), \
              patch.object(DB, "_drop_database") as drop:
             with self.assertRaisesRegex(RuntimeError, "identity or ACL gate failed"):
@@ -289,7 +364,11 @@ class ErosNativeDatabaseTests(unittest.TestCase):
                 "backupSha256": hashlib.sha256(b"exact backup").hexdigest(),
                 "baselineLedger": old, "baselineLedgerSha256": DB._ledger_digest(old),
                 "targetLedger": target, "targetLedgerSha256": DB._ledger_digest(target),
-                "pendingMigrations": added, "schemaApply": True, "rollbackCheck": False}
+                "pendingMigrations": added,
+                "migrationStages": [{"image": "ghcr.io/akhripunov/gpoint-eros@sha256:" + "b" * 64,
+                                     "upstreamSha": "a" * 40,
+                                     "ledgerSha256": DB._ledger_digest(target)}],
+                "schemaApply": True, "rollbackCheck": False}
         with patch.object(DB, "_read_env", return_value={"EROS_DATABASE_IDENTITY": "a" * 48}), \
              patch.object(DB, "_postgres_identity", return_value=plan["postgresIdentity"]), \
              patch.object(DB, "_database_facts", side_effect=[facts(), facts()]), \
@@ -297,10 +376,37 @@ class ErosNativeDatabaseTests(unittest.TestCase):
              patch.object(DB, "BACKUP_DIR", Path("/opt/gpoint/backups/eros")), \
              patch.object(DB, "_load_plan", return_value=plan), \
              patch.object(DB, "_file_digest", return_value=plan["backupSha256"]), \
+             patch.object(DB, "_image_upstream_sha", return_value="a" * 40), \
              patch.object(DB, "_run_migrator") as migrate:
             result = DB.lifecycle("apply", "a" * 40, plan["image"], "123-1")
         self.assertEqual(result["targetLedger"], target)
         migrate.assert_called_once_with(plan["image"], "eros", {"EROS_DATABASE_IDENTITY": "a" * 48})
+
+    def test_live_apply_blocks_changed_stage_plan_before_any_migration(self):
+        old = ledger()
+        target = old + ledger(2, "b" * 96, "next")
+        image = "ghcr.io/akhripunov/gpoint-eros@sha256:" + "b" * 64
+        plan = {"schema": "gpoint-eros-native-db-plan/v1", "candidateSha": "a" * 40,
+                "image": image, "runId": "123-1", "databaseIdentity": "a" * 48,
+                "postgresIdentity": {"containerId": "d" * 64, "imageId": "sha256:" + "e" * 64,
+                                     "mountsSha256": "f" * 64}, "clusterSystemIdentifier": "742001",
+                "backupPath": "/opt/gpoint/backups/eros/native-123-1.dump.age",
+                "backupSha256": "c" * 64, "baselineLedger": old,
+                "baselineLedgerSha256": DB._ledger_digest(old), "targetLedger": target,
+                "targetLedgerSha256": DB._ledger_digest(target),
+                "pendingMigrations": [target[-1]], "migrationStages": [], "rollbackCheck": False}
+        with patch.object(DB, "_read_env", return_value={"EROS_DATABASE_IDENTITY": "a" * 48}), \
+             patch.object(DB, "_postgres_identity", return_value=plan["postgresIdentity"]), \
+             patch.object(DB, "_database_facts", return_value=facts()), \
+             patch.object(DB, "_ledger", return_value=old), \
+             patch.object(DB, "BACKUP_DIR", Path("/opt/gpoint/backups/eros")), \
+             patch.object(DB, "_load_plan", return_value=plan), \
+             patch.object(DB, "_file_digest", return_value=plan["backupSha256"]), \
+             patch.object(DB, "_image_upstream_sha", return_value="a" * 40), \
+             patch.object(DB, "_run_migrator") as migrate:
+            with self.assertRaisesRegex(RuntimeError, "stage plan differs"):
+                DB.lifecycle("apply", "a" * 40, image, "123-1")
+        migrate.assert_not_called()
 
     def test_live_apply_rejects_database_drift_or_changed_backup_before_migration(self):
         old = ledger()
