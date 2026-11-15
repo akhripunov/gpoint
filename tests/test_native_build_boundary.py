@@ -457,7 +457,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         text = WORKFLOW.read_text()
         self.assertNotIn("[self-hosted, macOS, gpoint-production]", text)
         staging_text = (ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text()
-        self.assertIn("runs-on: ubuntu-latest", staging_text)
+        self.assertIn("runs-on: ubuntu-24.04", staging_text)
         self.assertNotIn("[self-hosted, macOS]", staging_text)
         self.assertNotIn("gpoint-owner-mac", text + staging_text)
         self.assertNotIn("release:gpoint", text)
