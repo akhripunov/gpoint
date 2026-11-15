@@ -37,21 +37,22 @@ DB_NAME = re.compile(r"^eros_[a-z0-9_]{1,48}$")
 EROS_V231_SHA = "fd72b0ff1c145d4bdd9cc27b731e9e6512dc038b"
 EROS_V231_IMAGE = "ghcr.io/etherfunlab/eros-engine@sha256:0b2b29a989e7795058e00956712bba0e4be037817253fb4ffe7f5194dc838bf8"
 # SHA-256 over canonical [version, description, SHA-384 checksum] triples from
-# the official v2.3.1 migration files, for the v2.2.1 and v2.3.1 checkpoints.
-EROS_V221_HISTORY_SHA256 = "8384fd67e6b280c3d6ca6683343516acaa1f60934363aea69d231fdc1393c207"
-EROS_V231_HISTORY_SHA256 = "00c0e0e461ca84095cae16ee3912649ab64f4796d5bd1fb74a2a3d8897548649"
+# the official v2.3.1 SQL, using the descriptions stored by SQLx (spaces
+# instead of filename underscores). Covers the v2.2.1 and v2.3.1 checkpoints.
+EROS_V221_HISTORY_SHA256 = "191bc7096249009abb8b4ab28987758663682af0f872f25e6b5d88740960d687"
+EROS_V231_HISTORY_SHA256 = "eb3911a64ca49c666cc7ac3f30e965fbeca39de1f25a326d17deb35e8431f55f"
 EROS_V250_SHA = "d12172de0e674b9f6fbe8cf78ebbb3338b746a7b"
 EROS_V250_IMAGE = "ghcr.io/etherfunlab/eros-engine@sha256:bf9a887f7a1a12816957eaf83b4ad0fde7d581e2795ad937d3ee33b95f3065a5"
 EROS_V270_SHA = "83a54d1dba57874d55ecaa9756473f126b62844f"
 EROS_V270_HISTORY = {
     0: ("baseline", "36dee22457e174da8003b5efe9730bd877745eef9334d275eb8ae40662863d9d02880c73185e5f672a5da8f589f141c2"),
-    78: ("chat_images_events_event", "e1d7b3a625212c58ec2c462a8f6e37685b52e38eb13bfb8b7655a9d516cefd4df30ef9876344b31908b5a8c37a50aba1"),
-    79: ("human_facts", "7da3303ed9cf36ee261fdc225876ad849b3c6dd389cf7ffe4dd54b173a506e495fb061503f6b1c8436231c5b6392e449"),
-    80: ("human_facts_backfill", "b4514743964b097b8c9c7b6be0b72208a02386bc1ce35ee30dd69428989bd05c27e2a74bca02a1df0c0f559cdbb59347"),
-    81: ("insights_2_cleanup", "6e4d48bb0c167b1429c013363df46d58ec21ed648b0f0405e27aacac32941d9d8aec8914fdfcf6baf24ead5ca69ac768"),
-    82: ("relationship_memory", "5d63b454a5a8e43a5021fda22031e60c340f8bd6ecca497a2c322d4dd4dfc1756484265654b53b607f8ebca1dc64d8d7"),
-    83: ("life_choices_romantic_kinds", "b6716f71621c33c859a61b4cfbdb94d0a5d97f795ca6483e8a16774582e5ca4575f9d0c656bc2d0780bae95152629fdb"),
-    84: ("row_deletions", "e8ce20d4b600254cc513d056cd6efeddef391d081916c1ef4d4b3632e9e74595abd9aae3832937e92e29b0d9e919f430"),
+    78: ("chat images events event", "e1d7b3a625212c58ec2c462a8f6e37685b52e38eb13bfb8b7655a9d516cefd4df30ef9876344b31908b5a8c37a50aba1"),
+    79: ("human facts", "7da3303ed9cf36ee261fdc225876ad849b3c6dd389cf7ffe4dd54b173a506e495fb061503f6b1c8436231c5b6392e449"),
+    80: ("human facts backfill", "b4514743964b097b8c9c7b6be0b72208a02386bc1ce35ee30dd69428989bd05c27e2a74bca02a1df0c0f559cdbb59347"),
+    81: ("insights 2 cleanup", "6e4d48bb0c167b1429c013363df46d58ec21ed648b0f0405e27aacac32941d9d8aec8914fdfcf6baf24ead5ca69ac768"),
+    82: ("relationship memory", "5d63b454a5a8e43a5021fda22031e60c340f8bd6ecca497a2c322d4dd4dfc1756484265654b53b607f8ebca1dc64d8d7"),
+    83: ("life choices romantic kinds", "b6716f71621c33c859a61b4cfbdb94d0a5d97f795ca6483e8a16774582e5ca4575f9d0c656bc2d0780bae95152629fdb"),
+    84: ("row deletions", "e8ce20d4b600254cc513d056cd6efeddef391d081916c1ef4d4b3632e9e74595abd9aae3832937e92e29b0d9e919f430"),
     85: ("activities", "ee3d6ea0b6e30a3a74c89c0cff6d55365923bfe089b6295076efc12ab173f03bfcfa384a0a5ac7192d595a90a776442b"),
 }
 

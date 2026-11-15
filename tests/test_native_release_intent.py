@@ -967,3 +967,11 @@ def test_layer7_eros_push_requires_explicit_isolated_artifact_route():
     assert MODULE.classify_push(
         **context, changed_paths=paths, commit_message=marker + "\nGPOINT-ARTIFACT-PREPARE"
     ) == "BLOCK"
+
+
+def test_layer7_eros_migration_gate_correction_cannot_route_to_old_production():
+    paths = {"scripts/eros-native-database.py", "tests/test_eros_native_database.py"}
+    context = {"event_name": "push", "ref": "refs/heads/main"}
+    assert MODULE.classify_push(**context, changed_paths=paths,
+                                commit_message="GPOINT-LAYER7-EROS") == "LAYER7_EROS"
+    assert MODULE.classify_push(**context, changed_paths=paths) == "BLOCK"
