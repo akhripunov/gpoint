@@ -292,6 +292,7 @@ LAYER7_EROS_RELEASE_PATHS = frozenset({
     "tests/test_layer7_staging_workflow.py",
     "tests/test_native_build_boundary.py",
     "tests/test_native_release_intent.py",
+    "tests/test_native_prisma_apply_boundary.py",
     "tests/test_native_prepared_run.py",
 })
 LAYER7_API_MARKER = "GPOINT-LAYER7-API"
