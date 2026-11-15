@@ -298,7 +298,7 @@ test('Eros client uses mapped JWT identity and reuses GPoint clientMessageId as 
   assert.deepEqual(reply, { id: messageId, text: 'Привет!' });
   assert.equal(calls.length, 2);
   assert.equal(calls[1].body.client_msg_id, messageId);
-  assert.equal(calls[1].body.memory_scope, 'neutral_and_relationship');
+  assert.equal('memory_scope' in calls[1].body, false);
   assert.deepEqual(calls[1].body.prompt_traits, GPOINT_EROS_RESPONSE_PROMPT_TRAITS);
   const audit = calls[1].body.audit as { user?: string };
   assert.equal(typeof audit?.user, 'string');
