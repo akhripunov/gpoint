@@ -67,11 +67,15 @@ test('only the disposable Eros migrator receives database CREATE privilege', () 
 
 test('stock Eros migration creates engine schema before test runtime grants', () => {
   const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
-  const migrations = runner.indexOf('compose up -d --wait --wait-timeout 240 postgres eros-migrate');
+  const postgres = runner.indexOf('compose up -d --wait --wait-timeout 240 postgres');
+  const migration = runner.indexOf('compose up -d --no-deps eros-migrate');
+  const wait = runner.indexOf('migrator_status=$(docker_local wait "$migrator_container")');
   const grants = runner.indexOf('GRANT USAGE ON SCHEMA engine TO eros_runtime, eros_runtime_nobypass;');
-  const stack = runner.indexOf('compose up -d --wait --wait-timeout 240', migrations + 1);
-  assert.ok(migrations >= 0 && migrations < grants && grants < stack, 'run stock migration before grants and remaining services');
+  const stack = runner.indexOf('compose up -d --wait --wait-timeout 240', grants + 1);
+  assert.ok(postgres >= 0 && postgres < migration && migration < wait && wait < grants && grants < stack,
+    'wait for stock migration exit before grants and remaining services');
   assert.match(runner, /ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eros_runtime_nobypass;/);
+  assert.match(runner, /\[ "\$migrator_status" = 0 \]/);
 });
 
 test('GPoint test API has no connection or data grants to the Eros database', () => {

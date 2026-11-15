@@ -202,7 +202,12 @@ for service in gpoint-api gpoint-api-migrate gpoint-worker; do
 done
 echo LOCAL_E2E_COMPOSE_START=BEGIN
 compose_started=1
-compose up -d --wait --wait-timeout 240 postgres eros-migrate
+compose up -d --wait --wait-timeout 240 postgres
+compose up -d --no-deps eros-migrate
+migrator_container=$(compose ps --all --quiet eros-migrate)
+[ -n "$migrator_container" ] || { echo LOCAL_E2E_STOCK_MIGRATIONS=FAIL reason=container_missing >&2; exit 1; }
+migrator_status=$(docker_local wait "$migrator_container")
+[ "$migrator_status" = 0 ] || { echo "LOCAL_E2E_STOCK_MIGRATIONS=FAIL exit_code=$migrator_status" >&2; exit 1; }
 echo LOCAL_E2E_STOCK_MIGRATIONS=PASS
 compose exec -T postgres psql -U eros_test_admin -d eros_test -v ON_ERROR_STOP=1 <<'SQL'
 GRANT USAGE ON SCHEMA engine TO eros_runtime, eros_runtime_nobypass;
