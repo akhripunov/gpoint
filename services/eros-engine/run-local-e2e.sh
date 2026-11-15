@@ -49,7 +49,15 @@ cleanup(){
   trap - EXIT HUP INT TERM
   cleanup_failed=0
   if [ "$rc" -ne 0 ] && [ "$compose_started" -eq 1 ]; then
-    compose logs --no-color postgres eros-migrate gpoint-api-migrate gpoint-api eros gpoint-worker 2>/dev/null | grep -Ei -C 2 "error|exception|failed|fatal|panic|denied|not found|refused" | tail -100 >&2 || true
+    migrator_container=$(compose ps --all --quiet eros-migrate 2>/dev/null || true)
+    if [ -n "$migrator_container" ]; then
+      echo LOCAL_E2E_MIGRATOR_LOG_BEGIN >&2
+      docker_local logs --tail 100 "$migrator_container" 2>&1 \
+        | sed -E -e 's#(postgres(ql)?://)[^[:space:]@]+@#\1[REDACTED]@#g' \
+          -e 's/((password|token|secret)[=: ]+)[^[:space:]]+/\1[REDACTED]/Ig' >&2 || true
+      echo LOCAL_E2E_MIGRATOR_LOG_END >&2
+    fi
+    compose logs --no-color postgres gpoint-api-migrate gpoint-api eros gpoint-worker 2>/dev/null | grep -Ei -C 2 "error|exception|failed|fatal|panic|denied|not found|refused" | tail -100 >&2 || true
   fi
   if [ "$compose_started" -eq 1 ]; then
     compose down --volumes --remove-orphans >/dev/null 2>&1 || cleanup_failed=1

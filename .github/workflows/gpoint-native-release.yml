@@ -293,7 +293,7 @@ jobs:
           curl --fail --silent --show-error --location \
             --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 60 \
             --header 'Accept: application/octet-stream' \
-            https://api.github.com/repos/oras-project/oras/releases/assets/290827355 \
+            https://github.com/oras-project/oras/releases/download/v1.3.0/oras_1.3.0_linux_amd64.tar.gz \
             --output "$archive"
           printf '%s  %s\n' \
             '6cdc692f929100feb08aa8de584d02f7bcc30ec7d88bc2adc2054d782db57c64' "$archive" \
