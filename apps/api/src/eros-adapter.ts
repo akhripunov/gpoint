@@ -488,6 +488,7 @@ export class ErosEngineClient {
     }, this.workerSecret);
     const response = await this.request(`/comp/chat/${encodeURIComponent(sessionId)}/message/stream`, userId,
       {
+        // Memory scope belongs to Eros; the GPoint adapter leaves it at the engine default.
         content,
         client_msg_id: clientMessageId,
         prompt_traits: GPOINT_EROS_RESPONSE_PROMPT_TRAITS,

@@ -307,6 +307,16 @@ LAYER7_API_PROMPT_PATHS = frozenset({
     "apps/api/test/eros-adapter.test.ts",
     "services/eros-engine/eros-language-contract.test.mjs",
 })
+LAYER7_API_ADAPTER_PATHS = frozenset({
+    "apps/api/src/eros-adapter.ts",
+    "apps/api/test/eros-adapter.test.ts",
+})
+LAYER7_API_ADAPTER_ROUTE_SUPPORT_PATHS = frozenset({
+    "scripts/native_release_intent.py",
+    "scripts/layer7_release_scope.py",
+    "tests/test_native_release_intent.py",
+    "tests/test_layer7_release_scope.py",
+})
 LAYER7_API_CONFIG_PATH = "config/deploy.layer7-staging.eros-api.yml"
 LAYER7_API_CONFIG_PATHS = frozenset({
     LAYER7_API_CONFIG_PATH,
@@ -317,7 +327,7 @@ LAYER7_API_CONFIG_PATHS = frozenset({
     "tests/test_layer7_release_scope.py",
     "tests/test_layer7_staging_workflow.py",
 })
-LAYER7_API_PATHS = LAYER7_API_PROMPT_PATHS | LAYER7_API_CONFIG_PATHS
+LAYER7_API_PATHS = LAYER7_API_PROMPT_PATHS | LAYER7_API_ADAPTER_PATHS | LAYER7_API_CONFIG_PATHS
 
 
 def _path_kind(path: str) -> str:
@@ -374,8 +384,19 @@ def classify_push(*, event_name: str, ref: str,
         return "BLOCK"
     if ".github/workflows/gpoint-layer7-staging.yml" in changed_paths:
         return "BLOCK"
+    if ("apps/api/src/eros-adapter.ts" in changed_paths
+            and LAYER7_API_MARKER not in markers):
+        return "BLOCK"
     if LAYER7_API_MARKER in markers:
         if ARTIFACT_PREPARE_MARKER in markers:
+            return "BLOCK"
+        if LAYER7_API_ADAPTER_PATHS & changed_paths:
+            allowed_adapter_change = (
+                LAYER7_API_ADAPTER_PATHS | LAYER7_API_ADAPTER_ROUTE_SUPPORT_PATHS
+            )
+            if (LAYER7_API_ADAPTER_PATHS <= changed_paths
+                    and changed_paths <= allowed_adapter_change):
+                return "LAYER7_API"
             return "BLOCK"
         if changed_paths <= LAYER7_API_PROMPT_PATHS:
             return "LAYER7_API"
