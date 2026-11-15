@@ -30,9 +30,11 @@ RELEASE_PATHS = {
     ".github/workflows/gpoint-layer7-staging.yml",
     "scripts/layer7_release_scope.py",
     "scripts/native_release_intent.py",
+    "scripts/verify_native_prepared_run.py",
     "tests/test_layer7_release_scope.py",
     "tests/test_layer7_staging_workflow.py",
     "tests/test_native_build_boundary.py",
+    "tests/test_native_prepared_run.py",
     "tests/test_kamal_native_automatic_release.py",
     "tests/test_kamal_release_config.py",
     "tests/test_native_prisma_apply_boundary.py",
@@ -138,7 +140,7 @@ def diff_paths(repo, before, after):
 
 
 def plan(repo, candidate, snapshot, *, previous=None, verify_schema=False):
-    from native_release_intent import LAYER7_API_CONFIG_PATH, LAYER7_API_PATHS
+    from native_release_intent import EROS_MODEL_CONFIG_PATHS, LAYER7_API_CONFIG_PATH, LAYER7_API_PATHS
     from prisma_migration_checksums import build_inventory
 
     validate(snapshot)
@@ -148,7 +150,7 @@ def plan(repo, candidate, snapshot, *, previous=None, verify_schema=False):
         from native_release_intent import changed_paths
 
         subprocess.run(["git", "merge-base", "--is-ancestor", previous, candidate], cwd=repo, check=True)
-        if changed_paths(previous, candidate, repo=repo) - LAYER7_API_PATHS:
+        if changed_paths(previous, candidate, repo=repo) - LAYER7_API_PATHS - EROS_MODEL_CONFIG_PATHS:
             raise ValueError("Layer7 push changed paths outside the Core API release scope")
     historical_start, historical_end, engine_digest = RECONCILED_LAYER7_RANGE
     engine = snapshot["roles"][ENGINE]
@@ -160,7 +162,8 @@ def plan(repo, candidate, snapshot, *, previous=None, verify_schema=False):
         )
     for source in sorted({row["source"] for row in snapshot["roles"].values()}):
         subprocess.run(["git", "merge-base", "--is-ancestor", source, candidate], cwd=repo, check=True)
-        outside_scope = diff_paths(repo, source, candidate) - LAYER7_API_PATHS - RELEASE_PATHS
+        outside_scope = (diff_paths(repo, source, candidate) - LAYER7_API_PATHS
+                         - EROS_MODEL_CONFIG_PATHS - RELEASE_PATHS)
         if outside_scope and outside_scope <= historical_paths:
             # Only reconcile a role that was already running at the start of that history.
             ancestry = subprocess.run(
@@ -177,11 +180,13 @@ def plan(repo, candidate, snapshot, *, previous=None, verify_schema=False):
     source = snapshot["roles"][API]["source"]
     changed = command("git", "diff", "--name-only", source, candidate, "--",
                        "apps/api/src/eros-response-prompt.js", "apps/api/src/eros-adapter.ts",
-                       LAYER7_API_CONFIG_PATH, cwd=repo)
+                       LAYER7_API_CONFIG_PATH,
+                       "services/eros-engine/eros-layer7-staging-model-config.toml", cwd=repo)
     return ["CORE"] if changed else []
 
 
-def verify_runtime(before, after, candidate, version, digest, *, eros=False):
+def verify_runtime(before, after, candidate, version, digest, *, eros=False,
+                   eros_config_update=False):
     validate(before)
     validate(after)
     database_keys = ("database", "prisma") if eros else ("database", "prisma", "sqlx")
@@ -190,6 +195,14 @@ def verify_runtime(before, after, candidate, version, digest, *, eros=False):
     target = ENGINE if eros else API
     before_roles = {role: row for role, row in before["roles"].items() if role != target}
     after_roles = {role: row for role, row in after["roles"].items() if role != target}
+    if eros_config_update:
+        previous_engine = before_roles.pop(ENGINE, None)
+        running_engine = after_roles.pop(ENGINE, None)
+        if not previous_engine or not running_engine:
+            raise ValueError("Layer7 Eros engine identity is missing during config update")
+        immutable_fields = ("source", "image", "digest", "version")
+        if any(previous_engine[field] != running_engine[field] for field in immutable_fields):
+            raise ValueError("Layer7 Eros image changed during a model config-only update")
     if before_roles != after_roles:
         raise ValueError("Layer7 untouched roles changed during the scoped release")
     running = after["roles"][target]
@@ -208,6 +221,7 @@ def main():
     planning.add_argument("--previous", required=True)
     verify = sub.add_parser("verify")
     verify.add_argument("--eros", action="store_true")
+    verify.add_argument("--eros-config-update", action="store_true")
     verify.add_argument("before", type=Path)
     verify.add_argument("after", type=Path)
     verify.add_argument("candidate")
@@ -221,7 +235,8 @@ def main():
                               previous=args.previous, verify_schema=True)))
     else:
         verify_runtime(json.loads(args.before.read_text()), json.loads(args.after.read_text()),
-                       args.candidate, args.version, args.digest, eros=args.eros)
+                       args.candidate, args.version, args.digest, eros=args.eros,
+                       eros_config_update=args.eros_config_update)
 
 
 if __name__ == "__main__":

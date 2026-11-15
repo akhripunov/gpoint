@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import pytest
 from pathlib import Path
 
 
@@ -121,6 +122,24 @@ def test_prepared_run_rejects_a_normal_deploy_commit_without_artifact_marker():
     except ValueError:
         return
     raise AssertionError("accepted an unmarked ordinary main release")
+
+
+def test_unmarked_commit_is_accepted_only_for_exact_core_and_active_config_candidate():
+    run, jobs, logs, sha, digests, _ = fixture()
+    core_digest = {"CORE": digests["CORE"]}
+    files = [
+        {"filename": "apps/api/src/eros-response-prompt.js"},
+        {"filename": "services/eros-engine/eros-layer7-staging-model-config.toml"},
+        {"filename": "tests/test_layer7_staging_workflow.py"},
+    ]
+    commit = {"commit": {"message": "fix(eros): release ME-36"}, "files": files}
+    core_logs = f"GPOINT_IMAGE_DIGEST CORE {MODULE.REPOSITORIES['CORE']}@{digests['CORE']}\n".encode()
+    assert MODULE.verify_prepared_run(run, jobs, core_logs, sha, core_digest, 1234, commit) == (
+        99, sha + "-1234-2"
+    )
+    commit["files"].append({"filename": "apps/worker/src/main.ts"})
+    with pytest.raises(ValueError, match="Core/config-only"):
+        MODULE.verify_prepared_run(run, jobs, core_logs, sha, core_digest, 1234, commit)
 
 
 def test_layer7_eros_prepared_run_is_bound_to_one_image_and_skipped_production_deploy():
