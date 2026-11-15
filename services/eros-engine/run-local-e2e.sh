@@ -49,7 +49,7 @@ cleanup(){
   trap - EXIT HUP INT TERM
   cleanup_failed=0
   if [ "$rc" -ne 0 ] && [ "$compose_started" -eq 1 ]; then
-    compose logs --no-color postgres gpoint-api-migrate gpoint-api eros gpoint-worker 2>/dev/null | grep -Ei -C 2 "error|exception|failed|fatal|panic|denied|not found|refused" | tail -100 >&2 || true
+    compose logs --no-color postgres eros-migrate gpoint-api-migrate gpoint-api eros gpoint-worker 2>/dev/null | grep -Ei -C 2 "error|exception|failed|fatal|panic|denied|not found|refused" | tail -100 >&2 || true
   fi
   if [ "$compose_started" -eq 1 ]; then
     compose down --volumes --remove-orphans >/dev/null 2>&1 || cleanup_failed=1

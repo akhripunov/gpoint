@@ -532,6 +532,7 @@ test('provider context ignores Eros system tasks whose latest user message is no
 test('cleanup path verifies the disposable Compose project is gone', () => {
   const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
   assert.ok(runner.indexOf('compose restart eros') < runner.indexOf('--history-only'), 'history pass must follow an Eros restart');
+  assert.match(runner, /compose logs --no-color postgres eros-migrate gpoint-api-migrate/);
   assert.match(runner, /cleanup_failed/);
   assert.match(runner, /compose down --volumes --remove-orphans/);
   assert.match(runner, /for container in \$\{containers:-\}/);
