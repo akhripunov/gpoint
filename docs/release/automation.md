@@ -7,11 +7,14 @@
 >
 > | Workflow | Jobs | Назначение |
 > |---|---|---|
-> | `gpoint-native-release.yml` | Tests → Build → Deploy | обычный push-релиз, защищённый rollback и выборочная выкладка API на Layer7 |
+> | `gpoint-native-release.yml` | Tests → Build → Deploy | обычный push-релиз и защищённый rollback |
 > | `gpoint-operations.yml` | migration_rehearsal | dispatch-операция с `deployment: false`: свои approvals и общий lock `gpoint-production-release` |
 > | `gpoint-layer7-staging.yml` | layer7_staging | изолированный staging на self-hosted macOS, environment `layer7-staging` |
 >
-> Выборочная выкладка API использует защищённый job Layer7 после Build.
+> All three release types use automatic `Tests → Build → Deploy → Runtime Verify`
+> after an authorized main push. Target-specific Deploy uses its existing GitHub
+> Environment and concurrency group; `gpoint-layer7-staging.yml` remains the
+> protected manual readiness, broader-staging and recovery path.
 
 ### Layer7 stock Eros update
 
@@ -37,36 +40,48 @@ forward with the approved artifact. A pre-migration image may be restarted only
 after independently proving the source ledger and runtime configuration are
 still compatible. Record the verified Layer7 runtime and conversation checks.
 
-### Layer7 API prompt release
+### Layer7 Core API and model config release
 
-Use the owner-authorized main commit marker `GPOINT-LAYER7-API` for changes to
-the Eros response prompt and its tests. GitHub Tests run first. A trusted Mac
-runner reads the current Layer7 role versions, image identities and migration
-ledgers. The Build job publishes the Core image when the running API's prompt
-differs. The same workflow deploys automatically through `layer7-api-auto`,
-an environment limited to the `main` branch. Configure it before publishing the
-workflow, with a custom deployment branch rule for `main` and no environment
-secrets. Full Layer7 deployments retain the reviewer gate in `layer7-staging`.
-The Deploy job rechecks main and the exact live snapshot before
-switching the API with Kamal. Runtime Verify checks the API and Eros route,
-and compares the identities of untouched roles and both database ledgers.
+Use the owner-authorized `GPOINT-LAYER7-API` commit marker for a Layer7 Core
+release. The standard Native route runs Tests, then Build selects only CORE,
+without consulting public-production history or `BOOTSTRAP_FULL`. After a
+successful exact-SHA Build, the Native Deploy job automatically targets the
+existing `layer7-api-auto` GitHub Environment, serialized by the
+`gpoint-layer7-staging` concurrency group. The job requires the repository owner
+as actor and triggering actor. The environment must remain limited to `main`
+with the existing branch policy and no release secrets; the Deploy step checks
+that policy before accessing Layer7.
 
-The marker blocks a mixed push. If the cumulative diff, database history or
-live baseline cannot be verified, the scoped run stops before deployment.
-Use the existing protected full Layer7 procedure for broader changes and
-migration work. Keep the previous API version for recovery if Kamal fails
-during the switch. If Kamal fails and no API is running, the job attempts to
-start the verified previous container and checks its loopback health. The
-release still fails. If the job reports `LAYER7_API_RECOVERY_REQUIRED`, inspect
-the currently running API and retained versions on Layer7. If the candidate
-is absent, the old container still has the verified image ID/digest, the
-database ledgers are unchanged and the inference queue is empty, restore the
-previous API through stock Kamal `app start --version <previous-version>
---roles api --config-file config/deploy.layer7-staging.eros-api.yml` under the
-existing Layer7 release lock and approval. Recheck the loopback health and
-API-to-Eros route. If either version or queue state is ambiguous, stop for
-recovery review.
+The shared Layer7 deploy action reads current Core and Eros versions with
+pinned Kamal 2, collects Docker image/digest and DB identity only where Kamal
+cannot provide the required provenance, and derives the complete Git path set
+from installed Core source SHA through exact candidate SHA. It never uses
+`github.event.before` or the latest squash commit as a substitute. The plan
+must resolve to Core-only; extra Worker, Bot, Mini App, AGATA, Eros Engine or
+migration changes block. It verifies current main, exact image version/digest,
+active TOML hash and the external-config backup/rollback prerequisites before
+applying anything.
 
+When both the response prompt and active Layer7 TOML changed, the same
+automatic Layer7 scope backs up the TOML, atomically installs the candidate
+config, redeploys only the existing Eros engine version when needed to reload
+it, then uses Kamal to switch only Core API. Runtime Verify compares untouched
+roles and DB ledgers, checks health and the API-to-Eros route, and restores the
+verified TOML and prior engine/API versions if a switch fails. Prompt-only
+Core releases do not restart Eros. No Layer7 Build or Deploy passes AGATA,
+Mini App, Worker, Bot or Eros Engine image digests.
+
+The protected `gpoint-layer7-staging.yml` workflow remains available as an
+additional read-only `core-config-prepare` route and for broader staging,
+rehearsal and recovery. It is not a prerequisite for the automatic narrow
+release. Unknown inventory, source ancestry, repository digest, TOML hash,
+database ledger or rollback state fails closed.
+
+Changes limited to this Layer7 release tooling still run the Core-only Build
+for exact-SHA readiness, but do not authorize Apply. The automatic Layer7
+Deploy additionally requires a runtime prompt, adapter, deployment-config or
+active model-config path in the candidate diff. The GitHub Environment gate and
+the live scope checks remain required for that runtime release.
 
 ### Резервное копирование (не является релизным job)
 

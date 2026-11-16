@@ -35,12 +35,12 @@ inputs:
 runs:
   using: composite
   steps:
-    - if: inputs.mode != 'eros-prepare' && inputs.mode != 'core-config-prepare'
+    - if: inputs.mode != 'eros-prepare'
       uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
       with:
         ruby-version: 3.3.13
     - name: Install pinned Kamal 2.12.0
-      if: inputs.mode != 'eros-prepare' && inputs.mode != 'core-config-prepare'
+      if: inputs.mode != 'eros-prepare'
       shell: bash
       run: |
         set -euo pipefail
@@ -52,6 +52,32 @@ runs:
         echo "$gem_root/bin" >> "$GITHUB_PATH"
         GEM_HOME="$gem_root" GEM_PATH="$gem_root" ruby -e 'abort unless Gem::Specification.find_by_name("kamal").version.to_s == "2.12.0"'
         GEM_HOME="$gem_root" GEM_PATH="$gem_root" "$gem_root/bin/kamal" help >/dev/null
+    - name: Read Layer7 API and Eros versions with stock Kamal
+      id: kamal_inventory
+      if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.mode == 'full' || inputs.mode == 'core-config-prepare'))
+      shell: bash
+      run: |
+        set -euo pipefail
+        read_service() {
+          local service="$1" role="$2" config="$3" output version details containers
+          output="$(GPOINT_KAMAL_SERVICE="$service" KAMAL_ROLES="$role" \
+            kamal app version --roles "$role" --config-file "$config")"
+          mapfile -t versions < <(grep -Eo '[0-9a-f]{40}-[0-9]+-[0-9]+' <<< "$output" | sort -u)
+          if [[ "${#versions[@]}" != 1 ]]; then
+            echo "Kamal could not resolve one current $service/$role version" >&2
+            exit 1
+          fi
+          version="${versions[0]}"
+          details="$(GPOINT_KAMAL_SERVICE="$service" KAMAL_ROLES="$role" \
+            kamal app details --config-file "$config")"
+          containers="$(GPOINT_KAMAL_SERVICE="$service" KAMAL_ROLES="$role" \
+            kamal app containers --config-file "$config")"
+          grep -F -- "$service-$role-$version" <<< "$details" >/dev/null
+          grep -F -- "$service-$role-$version" <<< "$containers" >/dev/null
+          printf '%s=%s\n' "${service//-/_}_${role}_version" "$version" >> "$GITHUB_OUTPUT"
+        }
+        read_service gpoint-core api config/deploy.layer7-staging.eros-api.yml
+        read_service gpoint-eros-pilot engine config/deploy.layer7-staging.eros.yml
     - name: Recheck owner dispatch, current main, and prepared image ancestry
       if: github.event_name == 'workflow_dispatch'
       env:
@@ -92,37 +118,123 @@ runs:
           "$STAGING_IMAGE_SHA" <<< "$comparison"
     - name: Detect the narrow Core and active Eros config scope
       id: protected_scope
-      if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'full' || inputs.mode == 'core-config-prepare')
+      if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.mode == 'full' || inputs.mode == 'core-config-prepare'))
       env:
-        IMAGE_BASE_SHA: ${{ inputs.staging_image_sha }}
+        GH_TOKEN: ${{ github.token }}
+        REQUESTED_SHA: ${{ inputs.candidate_sha || github.sha }}
+        IMAGE_BASE_SHA: ${{ inputs.staging_image_sha || github.sha }}
+        SCOPED_IMAGE_VERSION: ${{ inputs.scoped_image_version }}
+        MODE: ${{ inputs.mode }}
+        KAMAL_API_VERSION: ${{ steps.kamal_inventory.outputs.gpoint_core_api_version }}
+        KAMAL_ENGINE_VERSION: ${{ steps.kamal_inventory.outputs.gpoint_eros_pilot_engine_version }}
       shell: bash
       run: |
         set -euo pipefail
+        if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+          test "$GITHUB_REF" = refs/heads/main
+          test "$REQUESTED_SHA" = "$GITHUB_SHA"
+          test "$IMAGE_BASE_SHA" = "$GITHUB_SHA"
+          [[ "$SCOPED_IMAGE_VERSION" == "$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" ]]
+          current_main="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)"
+          test "$current_main" = "$GITHUB_SHA"
+          environment="repos/$GITHUB_REPOSITORY/environments/layer7-api-auto"
+          gh api "$environment" | python3 -c '
+        import json, sys
+        env = json.load(sys.stdin)
+        policy = env["deployment_branch_policy"]
+        rules = [rule["type"] for rule in env["protection_rules"]]
+        if policy != {"protected_branches": False, "custom_branch_policies": True} or rules != ["branch_policy"]:
+            raise SystemExit("Layer7 auto environment requires branch policy as its only protection rule")
+        '
+          gh api "$environment/deployment-branch-policies" | python3 -c '
+        import json, sys
+        result = json.load(sys.stdin)
+        if result["total_count"] != 1 or [(p["name"], p["type"]) for p in result["branch_policies"]] != [("main", "branch")]:
+            raise SystemExit("Layer7 auto environment must allow only the main branch")
+        '
+        fi
         baseline="$RUNNER_TEMP/layer7-verified-baseline.json"
         scripts/layer7-transport.sh ssh "root@$GPOINT_LAYER7_STAGING_HOST" python3 - collect \
           < scripts/layer7_release_scope.py > "$baseline"
         api_source="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["roles"]["gpoint-core-api"]["source"])' "$baseline")"
         [[ "$api_source" =~ ^[0-9a-f]{40}$ ]]
-        paths="$RUNNER_TEMP/layer7-candidate-paths.txt"
-        git diff --name-only "$api_source" "$GITHUB_SHA" -- > "$paths"
         active_config=services/eros-engine/eros-layer7-staging-model-config.toml
-        if ! grep -Fxq "$active_config" "$paths"; then
-          echo 'narrow=false' >> "$GITHUB_OUTPUT"
+        test "$IMAGE_BASE_SHA" = "$GITHUB_SHA"
+        paths="$RUNNER_TEMP/layer7-git-range-paths.json"
+        python3 scripts/layer7_release_scope.py paths "$api_source" "$GITHUB_SHA" > "$paths"
+        python3 - "$paths" <<'PY'
+        import json,sys
+        changed=set(json.load(open(sys.argv[1],encoding="utf-8")))
+        required={"apps/api/src/eros-response-prompt.js",
+                  "services/eros-engine/eros-layer7-staging-model-config.toml"}
+        present=required & changed
+        if present and present != required:
+            raise SystemExit("Layer7 Core/config range must include both the prompt and active TOML")
+        PY
+        if ! python3 - "$paths" <<'PY'
+        import json,sys
+        changed=set(json.load(open(sys.argv[1],encoding="utf-8")))
+        required={"apps/api/src/eros-response-prompt.js",
+                  "services/eros-engine/eros-layer7-staging-model-config.toml"}
+        raise SystemExit(0 if required <= changed else 1)
+        PY
+        then
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            test "$(python3 scripts/layer7_release_scope.py plan "$GITHUB_SHA" "$baseline" --previous "$api_source")" = '["CORE"]'
+            test "$KAMAL_API_VERSION" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["roles"]["gpoint-core-api"]["version"])' "$baseline")"
+            test "$KAMAL_ENGINE_VERSION" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["roles"]["gpoint-eros-pilot-engine"]["version"])' "$baseline")"
+            bot_enabled="$(python3 -c 'import json,sys; print(str("gpoint-core-bot" in json.load(open(sys.argv[1]))["roles"]).lower())' "$baseline")"
+            printf 'narrow=false\nscoped=true\nimage_version=%s\nbot_enabled=%s\n' \
+              "$SCOPED_IMAGE_VERSION" "$bot_enabled" >> "$GITHUB_OUTPUT"
+          else
+            if [[ "$MODE" == core-config-prepare ]]; then
+              echo 'Core/config readiness candidate must change both the prompt and active TOML' >&2
+              exit 1
+            fi
+            printf 'narrow=false\nscoped=false\n' >> "$GITHUB_OUTPUT"
+          fi
           exit 0
         fi
-        grep -Fxq apps/api/src/eros-response-prompt.js "$paths"
-        test "$IMAGE_BASE_SHA" = "$GITHUB_SHA"
-        test "$(python3 scripts/layer7_release_scope.py plan "$GITHUB_SHA" "$baseline" --previous "$api_source")" = '["CORE"]'
+        plan="$RUNNER_TEMP/layer7-core-config-plan.json"
+        python3 scripts/layer7_release_scope.py plan "$GITHUB_SHA" "$baseline" \
+          --previous "$api_source" --core-config-details > "$plan"
+        python3 - "$plan" "$api_source" "$GITHUB_SHA" <<'PY'
+        import json,sys
+        value=json.load(open(sys.argv[1],encoding="utf-8"))
+        required={"apps/api/src/eros-response-prompt.js",
+                  "services/eros-engine/eros-layer7-staging-model-config.toml"}
+        if value.get("scope") != ["CORE"] or value.get("installed_core_sha") != sys.argv[2] or value.get("candidate_sha") != sys.argv[3]:
+            raise SystemExit("Layer7 plan is not bound to the live Core SHA and exact candidate")
+        if not required.issubset(value.get("changed_paths", [])):
+            raise SystemExit("Layer7 candidate range omits the Core prompt or active Eros TOML")
+        print("LAYER7_GIT_RANGE=PASS paths=" + str(len(value["changed_paths"])))
+        PY
         expected="$(git show "$api_source:$active_config" | sha256sum | cut -d ' ' -f 1)"
         actual="$(scripts/layer7-transport.sh ssh "root@$GPOINT_LAYER7_STAGING_HOST" \
           sha256sum /opt/gpoint/env/eros-layer7-staging-model-config.toml | awk '{print $1}')"
         test "$actual" = "$expected"
         engine_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["roles"]["gpoint-eros-pilot-engine"]["version"])' "$baseline")"
+        test "$engine_version" = "$KAMAL_ENGINE_VERSION"
+        api_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["roles"]["gpoint-core-api"]["version"])' "$baseline")"
+        test "$api_version" = "$KAMAL_API_VERSION"
         engine_digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["roles"]["gpoint-eros-pilot-engine"]["digest"])' "$baseline")"
         [[ "$engine_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
         bot_enabled="$(python3 -c 'import json,sys; print(str("gpoint-core-bot" in json.load(open(sys.argv[1]))["roles"]).lower())' "$baseline")"
-        printf 'narrow=true\nengine_version=%s\nengine_digest=%s\nprevious_config_sha=%s\nbot_enabled=%s\n' \
+        printf 'narrow=true\nscoped=true\nimage_version=%s\nengine_version=%s\nengine_digest=%s\nprevious_config_sha=%s\nbot_enabled=%s\n' \
+          "$SCOPED_IMAGE_VERSION" \
           "$engine_version" "$engine_digest" "$actual" "$bot_enabled" >> "$GITHUB_OUTPUT"
+        echo "plan_file=$plan" >> "$GITHUB_OUTPUT"
+        scripts/layer7-transport.sh ssh "root@$GPOINT_LAYER7_STAGING_HOST" bash -s <<'BACKUP_PREFLIGHT'
+        set -euo pipefail
+        target=/opt/gpoint/env/eros-layer7-staging-model-config.toml
+        backup_dir=/opt/gpoint/backups/eros-model-config
+        test -f "$target" && test ! -L "$target"
+        if test -e "$backup_dir"; then
+          test -d "$backup_dir" && test ! -L "$backup_dir" && test -w "$backup_dir"
+        else
+          test -d /opt/gpoint/backups && test -w /opt/gpoint/backups
+        fi
+        BACKUP_PREFLIGHT
     - name: Verify exact successful Build run and immutable component digests
       if: github.event_name == 'workflow_dispatch'
       id: prepared
@@ -135,24 +247,22 @@ runs:
         PREPARED_MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
         PREPARED_EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
         NARROW_SCOPE: ${{ steps.protected_scope.outputs.narrow }}
+        LAYER7_BASELINE: ${{ runner.temp }}/layer7-verified-baseline.json
       shell: bash
       run: |
         set -euo pipefail
         [[ "$PREPARED_RUN_ID" =~ ^[1-9][0-9]*$ ]]
         scope_args=()
-        scope_paths_args=()
         if [[ "$MODE" == core-config-prepare ]]; then
           [[ "$NARROW_SCOPE" == true ]]
           [[ "$PREPARED_APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ -z "$PREPARED_MINIAPP_DIGEST$PREPARED_EROS_DIGEST$PREPARED_AGATA_DIGEST" ]]
-          scope_args=(--layer7-core-config)
-          scope_paths_args=(--layer7-scope-paths "$RUNNER_TEMP/layer7-candidate-paths.txt")
+          scope_args=(--layer7-core-config --layer7-inventory "$LAYER7_BASELINE")
         elif [[ "$MODE" == full ]]; then
           [[ "$PREPARED_APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           if [[ "$NARROW_SCOPE" == true ]]; then
             [[ -z "$PREPARED_MINIAPP_DIGEST$PREPARED_EROS_DIGEST$PREPARED_AGATA_DIGEST" ]]
-            scope_args=(--layer7-core-config)
-            scope_paths_args=(--layer7-scope-paths "$RUNNER_TEMP/layer7-candidate-paths.txt")
+            scope_args=(--layer7-core-config --layer7-inventory "$LAYER7_BASELINE")
           else
             [[ "$PREPARED_MINIAPP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
             [[ "$PREPARED_EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
@@ -218,7 +328,7 @@ runs:
         python3 scripts/verify_native_prepared_run.py \
           --run "$run_json" --jobs "$jobs_json" --commit "$commit_json" --logs "$log_file" \
           --candidate-sha "$CANDIDATE_SHA" --run-id "$PREPARED_RUN_ID" --digests "$digests" \
-          --output "$GITHUB_OUTPUT" "${scope_args[@]}" "${scope_paths_args[@]}"
+          --output "$GITHUB_OUTPUT" "${scope_args[@]}"
         rm -f "$run_json" "$jobs_json" "$commit_json" "$log_headers" "$log_file"
     - name: Verify pinned Layer7 host key and existing SSH access
       shell: bash
@@ -242,6 +352,10 @@ runs:
         ACTIVE_CONFIG_SHA: ${{ steps.protected_scope.outputs.previous_config_sha }}
         CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         BUILD_RUN_ID: ${{ inputs.prepared_run_id }}
+        BASELINE_PATH: ${{ runner.temp }}/layer7-verified-baseline.json
+        PLAN_PATH: ${{ steps.protected_scope.outputs.plan_file }}
+        ENGINE_VERSION: ${{ steps.protected_scope.outputs.engine_version }}
+        ENGINE_DIGEST: ${{ steps.protected_scope.outputs.engine_digest }}
       shell: bash
       run: |
         set -euo pipefail
@@ -250,14 +364,57 @@ runs:
         [[ "$CORE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
         [[ "$ACTIVE_CONFIG_SHA" =~ ^[0-9a-f]{64}$ ]]
         candidate_config_sha="$(sha256sum services/eros-engine/eros-layer7-staging-model-config.toml | awk '{print $1}')"
-        echo "LAYER7_CORE_CONFIG_READINESS=PASS SHA=$CANDIDATE_SHA BUILD_RUN_ID=$BUILD_RUN_ID CORE_DIGEST=$CORE_DIGEST ACTIVE_CONFIG_SHA=$ACTIVE_CONFIG_SHA CANDIDATE_CONFIG_SHA=$candidate_config_sha VPS_MUTATION=NONE APPLY=NOT_RUN" >> "$GITHUB_STEP_SUMMARY"
+        python3 - "$BASELINE_PATH" "$PLAN_PATH" "$CANDIDATE_SHA" "$BUILD_RUN_ID" \
+          "$CORE_DIGEST" "$ACTIVE_CONFIG_SHA" "$candidate_config_sha" \
+          "$ENGINE_VERSION" "$ENGINE_DIGEST" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+        import json,re,sys
+        baseline=json.load(open(sys.argv[1],encoding="utf-8"))
+        paths=json.load(open(sys.argv[2],encoding="utf-8"))
+        candidate,run_id,core_digest,active_sha,candidate_config,engine_version,engine_digest=sys.argv[3:]
+        roles=baseline["roles"]
+        api=roles["gpoint-core-api"]
+        engine=roles["gpoint-eros-pilot-engine"]
+        if (paths.get("scope") != ["CORE"] or paths.get("candidate_sha") != candidate
+                or paths.get("installed_core_sha") != api["source"]):
+            raise SystemExit("readiness plan and live inventory disagree")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}",core_digest):
+            raise SystemExit("readiness Core digest is invalid")
+        if (engine["version"] != engine_version or engine["digest"] != engine_digest
+                or not re.fullmatch(r"[0-9a-f]{40}",engine["source"])
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}",engine_digest)):
+            raise SystemExit("readiness Eros engine rollback identity is invalid")
+        plan={
+          "target":"Layer7",
+          "candidate_sha":candidate,
+          "build_run_id":int(run_id),
+          "deploy_scope":["CORE"],
+          "live_core":{"source_sha":api["source"],"version":api["version"],"digest":api["digest"]},
+          "candidate_core":{"source_sha":candidate,"digest":core_digest},
+          "external_config":{"path":"/opt/gpoint/env/eros-layer7-staging-model-config.toml",
+                             "active_sha256":active_sha,"candidate_sha256":candidate_config,
+                             "backup_directory":"/opt/gpoint/backups/eros-model-config",
+                             "backup_preflight":"PASS","apply":"NOT_RUN"},
+          "eros_engine":{"source_sha":engine["source"],"version":engine_version,
+                          "digest":engine_digest,"image_update":"NONE"},
+          "other_roles_unchanged":sorted(role for role in roles if role != "gpoint-core-api"),
+          "database":{"prisma_migrations":"NONE","sqlx_migrations":"NONE",
+                      "prisma_rows":len(baseline["prisma"]),"sqlx_rows":len(baseline["sqlx"])},
+          "git_paths":paths["changed_paths"],
+          "rollback":{"core_version":api["version"],"core_digest":api["digest"],
+                      "eros_engine_version":engine_version,"eros_engine_digest":engine_digest,
+                      "restore_active_toml_sha256":active_sha},
+          "vps_mutation":"NONE",
+        }
+        print("LAYER7_CORE_CONFIG_READINESS=PASS exact_plan="+
+              json.dumps(plan,sort_keys=True,separators=(",",":")))
+        PY
     - name: Rehearse or release only the Eros engine on Layer7
       if: inputs.mode == 'eros-prepare' || inputs.mode == 'eros-deploy'
       env:
         MODE: ${{ inputs.mode }}
         PREVIOUS_REHEARSAL: ${{ inputs.eros_rehearsal }}
         EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
-        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version }}
+        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.protected_scope.outputs.image_version }}
         GH_TOKEN: ${{ inputs.github_token }}
       shell: bash
       run: |
@@ -393,59 +550,6 @@ runs:
         with open(__import__("os").environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
             output.write("bot_enabled=" + str(bot_enabled).lower() + "\n")
         '
-    - name: Recheck scoped release before changing Layer7
-      if: github.event_name == 'push'
-      id: scoped
-      env:
-        GH_TOKEN: ${{ github.token }}
-        OWNER: ${{ github.repository_owner }}
-        PREVIOUS_SHA: ${{ github.event.before }}
-        REQUESTED_SHA: ${{ inputs.candidate_sha }}
-        IMAGE_VERSION: ${{ inputs.scoped_image_version }}
-        CORE_DIGEST: ${{ inputs.prepared_app_digest }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        test "$GITHUB_ACTOR" = "$OWNER"
-        test "$GITHUB_TRIGGERING_ACTOR" = "$OWNER"
-        test "$REQUESTED_SHA" = "$GITHUB_SHA"
-        test "$CANDIDATE_SHA" = "$GITHUB_SHA"
-        test "$IMAGE_VERSION" = "$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-        [[ "$CORE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-        test "$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)" = "$GITHUB_SHA"
-        git log -1 --format=%B | grep -Fx GPOINT-LAYER7-API >/dev/null
-        environment="repos/$GITHUB_REPOSITORY/environments/layer7-api-auto"
-        gh api "$environment" | python3 -c '
-        import json, sys
-        env = json.load(sys.stdin)
-        policy = env["deployment_branch_policy"]
-        rules = [rule["type"] for rule in env["protection_rules"]]
-        if policy != {"protected_branches": False, "custom_branch_policies": True} or rules != ["branch_policy"]:
-            raise SystemExit("Layer7 auto environment requires branch policy as its only protection rule")
-        '
-        gh api "$environment/deployment-branch-policies" | python3 -c '
-        import json, sys
-        result = json.load(sys.stdin)
-        if result["total_count"] != 1 or [(p["name"], p["type"]) for p in result["branch_policies"]] != [("main", "branch")]:
-            raise SystemExit("Layer7 auto environment must allow only the main branch")
-        '
-        before="$RUNNER_TEMP/layer7-verified-baseline.json"
-        scripts/layer7-transport.sh ssh "root@$GPOINT_LAYER7_STAGING_HOST" python3 - collect \
-          < scripts/layer7_release_scope.py > "$before"
-        test "$(python3 scripts/layer7_release_scope.py plan "$GITHUB_SHA" "$before" --previous "$PREVIOUS_SHA")" = '["CORE"]'
-        bot_enabled="$(python3 -c 'import json,sys; print(str("gpoint-core-bot" in json.load(open(sys.argv[1]))["roles"]).lower())' "$before")"
-        printf 'bot_enabled=%s\n' "$bot_enabled" >> "$GITHUB_OUTPUT"
-        # The API switch uses Kamal's digest-verifying pre-app-boot hook.
-        # Check for pre-existing credentials before Kamal can change them.
-        scripts/layer7-transport.sh ssh "root@$GPOINT_LAYER7_STAGING_HOST" python3 - <<'PYTHON'
-        import json
-        from pathlib import Path
-        config = Path("/root/.docker/config.json")
-        value = json.loads(config.read_text()) if config.exists() else {}
-        if value.get("credsStore") or "ghcr.io" in value.get("credHelpers", {}) or "ghcr.io" in value.get("auths", {}):
-            raise SystemExit("Layer7 already has Docker registry credentials")
-        PYTHON
-        printf 'image_version=%s\n' "$IMAGE_VERSION" >> "$GITHUB_OUTPUT"
     - name: Install staging secrets and provision only the empty GPoint staging database
       if: github.event_name == 'workflow_dispatch' && inputs.mode == 'full' && steps.protected_scope.outputs.narrow != 'true'
       env:
@@ -485,7 +589,7 @@ runs:
       id: staging_preflight
       env:
         CORE_DIGEST: ${{ inputs.prepared_app_digest }}
-        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version }}
+        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.protected_scope.outputs.image_version }}
       shell: bash
       run: |
         set -euo pipefail
@@ -528,8 +632,8 @@ runs:
         CORE_DIGEST: ${{ inputs.prepared_app_digest }}
         MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
         EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
-        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.scoped.outputs.image_version }}
-        SCOPED: ${{ github.event_name == 'push' || steps.protected_scope.outputs.narrow == 'true' }}
+        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.protected_scope.outputs.image_version }}
+        SCOPED: ${{ steps.protected_scope.outputs.scoped == 'true' }}
         NARROW_SCOPE: ${{ steps.protected_scope.outputs.narrow }}
         GHCR_TOKEN: ${{ inputs.github_token }}
       shell: bash
@@ -577,7 +681,7 @@ runs:
       env:
         CORE_DIGEST: ${{ inputs.prepared_app_digest }}
         EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
-        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version }}
+        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.protected_scope.outputs.image_version }}
       shell: bash
       run: |
         set -euo pipefail
@@ -599,16 +703,16 @@ runs:
       if: inputs.mode == 'full'
       id: deployment
       env:
-        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.scoped.outputs.image_version }}
+        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.protected_scope.outputs.image_version }}
         CORE_DIGEST: ${{ inputs.prepared_app_digest }}
         MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
         EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
-        SCOPED: ${{ github.event_name == 'push' || steps.protected_scope.outputs.narrow == 'true' }}
+        SCOPED: ${{ steps.protected_scope.outputs.scoped == 'true' }}
         NARROW_SCOPE: ${{ steps.protected_scope.outputs.narrow }}
         ENGINE_VERSION: ${{ steps.protected_scope.outputs.engine_version }}
         ENGINE_DIGEST: ${{ steps.protected_scope.outputs.engine_digest }}
         PREVIOUS_CONFIG_SHA: ${{ steps.protected_scope.outputs.previous_config_sha }}
-        STAGING_BOT_ENABLED: ${{ steps.staging_env.outputs.bot_enabled || steps.scoped.outputs.bot_enabled || steps.protected_scope.outputs.bot_enabled }}
+        STAGING_BOT_ENABLED: ${{ steps.staging_env.outputs.bot_enabled || steps.protected_scope.outputs.bot_enabled }}
       shell: bash
       run: |
         set -euo pipefail
@@ -812,13 +916,13 @@ runs:
       if: inputs.mode == 'full'
       id: runtime_verify
       env:
-        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.scoped.outputs.image_version }}
+        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.protected_scope.outputs.image_version }}
         CORE_DIGEST: ${{ inputs.prepared_app_digest }}
         MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
         EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
-        SCOPED: ${{ github.event_name == 'push' || steps.protected_scope.outputs.narrow == 'true' }}
+        SCOPED: ${{ steps.protected_scope.outputs.scoped == 'true' }}
         NARROW_SCOPE: ${{ steps.protected_scope.outputs.narrow }}
-        STAGING_BOT_ENABLED: ${{ steps.staging_env.outputs.bot_enabled || steps.scoped.outputs.bot_enabled || steps.protected_scope.outputs.bot_enabled }}
+        STAGING_BOT_ENABLED: ${{ steps.staging_env.outputs.bot_enabled || steps.protected_scope.outputs.bot_enabled }}
       shell: bash
       run: |
         set -euo pipefail
@@ -1011,7 +1115,7 @@ runs:
           curl --fail --silent --show-error --max-time 5 http://127.0.0.1:13001/health/live
         echo 'LAYER7_ME36_ROLLBACK=PASS prior_Core_API_and_Eros_config_restored' >> "$GITHUB_STEP_SUMMARY"
     - name: Remove temporary Kamal GHCR authorization from Layer7
-      if: always() && inputs.mode != 'core-config-prepare' && (steps.staging_preflight.outcome == 'success' || steps.scoped.outcome == 'success' || steps.protected_scope.outputs.narrow == 'true')
+      if: always() && inputs.mode != 'core-config-prepare' && (steps.staging_preflight.outcome == 'success' || steps.protected_scope.outputs.narrow == 'true')
       shell: bash
       run: |
         set -euo pipefail

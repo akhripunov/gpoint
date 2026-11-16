@@ -540,10 +540,15 @@ def test_core_config_readiness_mode_is_read_only_and_still_uses_protected_narrow
     action = (ROOT / ".github/actions/layer7-deploy/action.yml").read_text()
     assert "inputs.mode == 'core-config-prepare'" in action
     assert "--layer7-core-config" in action
-    assert "--layer7-scope-paths" in action
-    assert "layer7-candidate-paths.txt" in action
+    assert "--layer7-inventory" in action
+    assert "layer7-git-range-paths.json" in action
+    assert "layer7-candidate-paths.txt" not in action
+    assert "kamal app version --roles" in action
+    assert "kamal app details --config-file" in action
+    assert "kamal app containers --config-file" in action
     assert "LAYER7_CORE_CONFIG_READINESS=PASS" in action
-    assert "VPS_MUTATION=NONE APPLY=NOT_RUN" in action
+    assert '"vps_mutation":"NONE"' in action
+    assert '"apply":"NOT_RUN"' in action
     assert "NARROW_SCOPE" in serialized
     assert "sha256sum /opt/gpoint/env/eros-layer7-staging-model-config.toml" in action
     assert "docker logout ghcr.io" in action
@@ -555,3 +560,20 @@ def test_core_config_readiness_mode_is_read_only_and_still_uses_protected_narrow
         assert "core-config-prepare" not in step.get("if", "")
     verify = next(step for step in steps if step.get("name") == "Verify exact successful Build run and immutable component digests")
     assert "--layer7-core-config" in verify["run"]
+    assert "--layer7-inventory" in verify["run"]
+
+
+def test_core_config_readiness_uses_kamal_inventory_and_has_no_apply_commands():
+    action = yaml.safe_load((ROOT / ".github/actions/layer7-deploy/action.yml").read_text())
+    steps = action["runs"]["steps"]
+    inventory = next(step for step in steps if step.get("id") == "kamal_inventory")
+    assert "inputs.mode == 'core-config-prepare'" in inventory["if"]
+    assert "kamal app version" in inventory["run"]
+    assert "kamal app details" in inventory["run"]
+    assert "kamal app containers" in inventory["run"]
+    readiness = next(step for step in steps if "LAYER7_CORE_CONFIG_READINESS=PASS" in step.get("run", ""))
+    assert "docker ps" not in readiness["run"]
+    assert "docker inspect" not in readiness["run"]
+    assert "kamal redeploy" not in readiness["run"]
+    assert "kamal app stop" not in readiness["run"]
+    assert "docker pull" not in readiness["run"]

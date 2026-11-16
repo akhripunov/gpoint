@@ -289,13 +289,6 @@ ARTIFACT_PREPARE_PATHS = frozenset({
     "tests/test_native_prepared_run.py",
     "tests/test_prisma_migration_release_plan.py",
 })
-LAYER7_RELEASE_TOOLING_PREPARE_PATHS = frozenset({
-    ".github/actions/layer7-deploy/action.yml",
-    ".github/workflows/gpoint-layer7-staging.yml",
-    "scripts/verify_native_prepared_run.py",
-    "tests/test_layer7_staging_workflow.py",
-    "tests/test_native_prepared_run.py",
-})
 EROS_MODEL_CONFIG_PATHS = frozenset({
     "services/eros-engine/eros-layer7-staging-model-config.toml",
     "services/eros-engine/eros-pilot-model-config.toml",
@@ -335,6 +328,10 @@ LAYER7_API_PROMPT_PATHS = frozenset({
     "services/eros-engine/eros-language-contract.test.mjs",
     "services/eros-engine/local-e2e.test.mjs",
 })
+LAYER7_CORE_CONFIG_REQUIRED_PATHS = frozenset({
+    "apps/api/src/eros-response-prompt.js",
+    "services/eros-engine/eros-layer7-staging-model-config.toml",
+})
 LAYER7_API_ADAPTER_PATHS = frozenset({
     "apps/api/src/eros-adapter.ts",
     "apps/api/test/eros-adapter.test.ts",
@@ -355,8 +352,46 @@ LAYER7_API_CONFIG_PATHS = frozenset({
     "tests/test_layer7_release_scope.py",
     "tests/test_layer7_staging_workflow.py",
 })
+LAYER7_CORE_CONFIG_TOOLING_PATHS = frozenset({
+    ".github/actions/layer7-deploy/action.yml",
+    ".github/workflows/gpoint-layer7-staging.yml",
+    ".github/workflows/gpoint-native-release.yml",
+    "docs/release/automation.md",
+    "scripts/layer7_release_scope.py",
+    "scripts/native_change_surface.py",
+    "scripts/native_release_intent.py",
+    "scripts/verify_native_prepared_run.py",
+    "tests/test_kamal_native_automatic_release.py",
+    "tests/test_kamal_release_config.py",
+    "tests/test_layer7_release_scope.py",
+    "tests/test_layer7_staging_workflow.py",
+    "tests/test_native_build_boundary.py",
+    "tests/test_native_change_surface.py",
+    "tests/test_native_prepared_run.py",
+    "tests/test_native_prisma_apply_boundary.py",
+    "tests/test_native_release_intent.py",
+})
+LAYER7_RELEASE_TOOLING_PREPARE_PATHS = frozenset({
+    ".github/actions/layer7-deploy/action.yml",
+    ".github/workflows/gpoint-layer7-staging.yml",
+    "scripts/verify_native_prepared_run.py",
+    "tests/test_layer7_staging_workflow.py",
+    "tests/test_native_prepared_run.py",
+})
 LAYER7_API_PATHS = (LAYER7_API_PROMPT_PATHS | LAYER7_API_ADAPTER_PATHS
                     | LAYER7_API_CONFIG_PATHS | EROS_MODEL_CONFIG_PATHS)
+LAYER7_API_RUNTIME_PATHS = frozenset({
+    "apps/api/src/eros-response-prompt.js",
+    "apps/api/src/eros-adapter.ts",
+    LAYER7_API_CONFIG_PATH,
+}) | EROS_MODEL_CONFIG_PATHS
+
+
+def push_deploy_authorized(*, mode: str, changed_paths: set[str] | frozenset[str]) -> bool:
+    """Keep tooling-only Core builds available without applying them to Layer7."""
+    if mode == "DEPLOY":
+        return True
+    return mode == "LAYER7_API" and bool(LAYER7_API_RUNTIME_PATHS & changed_paths)
 
 
 def _path_kind(path: str) -> str:
@@ -403,6 +438,9 @@ def classify_push(*, event_name: str, ref: str,
             and not ({"apps/api/src/eros-response-prompt.js",
                       "services/eros-engine/eros-layer7-staging-model-config.toml"}
                      <= changed_paths)
+            and not (changed_paths <= LAYER7_CORE_CONFIG_TOOLING_PATHS
+                     and {".github/workflows/gpoint-native-release.yml",
+                          "scripts/verify_native_prepared_run.py"} <= changed_paths)
             and changed_paths != LAYER7_RELEASE_TOOLING_PREPARE_PATHS):
         return "BLOCK"
     if ARTIFACT_PREPARE_MARKER in markers:
@@ -422,6 +460,10 @@ def classify_push(*, event_name: str, ref: str,
                for path in changed_paths - LAYER7_EROS_RELEASE_PATHS):
             return "BLOCK"
         return "LAYER7_EROS"
+    if (changed_paths <= LAYER7_CORE_CONFIG_TOOLING_PATHS
+            and {".github/workflows/gpoint-native-release.yml",
+                 "scripts/verify_native_prepared_run.py"} <= changed_paths):
+        return "LAYER7_API"
     if changed_paths & {EROS_UPSTREAM_PIN, EROS_MIGRATION_HELPER}:
         return "BLOCK"
     if (".github/workflows/gpoint-layer7-staging.yml" in changed_paths
@@ -441,6 +483,10 @@ def classify_push(*, event_name: str, ref: str,
                     and changed_paths <= allowed_adapter_change):
                 return "LAYER7_API"
             return "BLOCK"
+        if (LAYER7_CORE_CONFIG_REQUIRED_PATHS <= changed_paths
+                and changed_paths <= (LAYER7_API_PROMPT_PATHS
+                                      | {"services/eros-engine/eros-layer7-staging-model-config.toml"})):
+            return "LAYER7_API"
         if changed_paths <= LAYER7_API_PROMPT_PATHS:
             return "LAYER7_API"
         if (LAYER7_API_CONFIG_PATH in changed_paths and
@@ -511,10 +557,20 @@ def classify_dispatch(*, ref: str, candidate_sha: str, github_sha: str, actor: s
 
 
 def changed_paths(before: str, sha: str, *, repo: Path = Path.cwd()) -> set[str]:
+    return {path for _status, path in git_diff_entries(before, sha, repo=repo)}
+
+
+def git_diff_entries(before: str, sha: str, *, repo: Path = Path.cwd()) -> list[tuple[str, str]]:
+    """Return the complete exact commit-range file inventory using Git's NUL format."""
     if (not re.fullmatch(r"[0-9a-f]{40}", before)
             or not re.fullmatch(r"[0-9a-f]{40}", sha)
             or before == "0" * 40):
         raise ValueError("push range must contain exact nonzero commit SHAs")
+    for revision in (before, sha):
+        resolved = subprocess.run(["git", "rev-parse", "--verify", f"{revision}^{{commit}}"],
+                                  cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+        if resolved != revision:
+            raise ValueError("push range revision does not resolve to its exact commit SHA")
     result = subprocess.run(
         ["git", "diff", "--name-status", "-z", "--no-renames", f"{before}..{sha}"],
         cwd=repo, check=True, capture_output=True, text=True,
@@ -522,14 +578,18 @@ def changed_paths(before: str, sha: str, *, repo: Path = Path.cwd()) -> set[str]
     entries = result.stdout.split("\0")
     if not entries or entries.pop() != "" or len(entries) % 2:
         raise ValueError("push diff path inventory is malformed")
-    paths = set()
+    parsed: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for status, path in zip(entries[::2], entries[1::2]):
+        if status not in {"A", "M", "D"} or not path or path in seen:
+            raise ValueError("push diff path inventory contains an unsupported or duplicate entry")
+        seen.add(path)
         if status.startswith("D") and (path.startswith("packages/db/prisma/") or "migrations" in Path(path).parts):
             raise ValueError("deleting or moving a migration/schema path is blocked")
-        paths.add(path)
-    if not paths:
+        parsed.append((status, path))
+    if not parsed:
         raise ValueError("push range contains no changed paths")
-    return paths
+    return parsed
 
 
 def _validate_role_inventory(inventory: dict) -> dict[str, dict[str, str]]:
@@ -636,12 +696,7 @@ def classify_component_build_plan(repo: Path, candidate: str,
                                   cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if ancestor.returncode:
             raise ValueError("component production source is not an ancestor of the candidate")
-        raw = subprocess.check_output(["git", "diff", "--name-status", "-z", "--no-renames",
-                                       f"{baseline}..{candidate}", "--"], cwd=repo)
-        parts = raw.decode("utf8").split("\x00")
-        if not parts or parts.pop() != "" or len(parts) % 2:
-            raise ValueError("component scope diff is malformed")
-        entries = list(zip(parts[::2], parts[1::2]))
+        entries = git_diff_entries(baseline, candidate, repo=repo)
         paths = set()
         for status, path in entries:
             if status == "D" and path in KNOWN_RETIRED_NON_RUNTIME_FILES:
@@ -808,7 +863,7 @@ def main() -> int:
             paths = changed_paths(args.before, args.sha)
             mode = classify_push(event_name=args.event, ref=args.ref, changed_paths=paths,
                                  commit_message=args.commit_message)
-            deploy = mode == "DEPLOY"
+            deploy = push_deploy_authorized(mode=mode, changed_paths=paths)
         elif args.event == "workflow_dispatch":
             owner = args.repository_owner.lower()
             if not owner or args.triggering_actor.lower() != owner:

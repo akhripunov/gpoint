@@ -44,6 +44,73 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert deploy["needs"] == ["tests", "build"]
 
 
+def test_three_native_release_scenarios_auto_route_test_build_kamal_and_runtime_verify():
+    sys_path = str(ROOT / "scripts")
+    import sys
+    sys.path.insert(0, sys_path)
+    from native_release_intent import classify_push, push_deploy_authorized
+
+    native = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    jobs = native["jobs"]
+    layer7_paths = {
+        "apps/api/src/eros-response-prompt.js",
+        "services/eros-engine/eros-layer7-staging-model-config.toml",
+    }
+    ordinary = classify_push(event_name="push", ref="refs/heads/main",
+                             changed_paths={"apps/api/src/main.ts"})
+    migration = classify_push(event_name="push", ref="refs/heads/main",
+                              changed_paths={"packages/db/prisma/migrations/20261116000000_fixture/migration.sql"})
+    layer7 = classify_push(event_name="push", ref="refs/heads/main",
+                           changed_paths=layer7_paths,
+                           commit_message="ME-59 Layer7 Core config\nGPOINT-LAYER7-API")
+
+    assert (ordinary, migration, layer7) == ("DEPLOY", "DEPLOY", "LAYER7_API")
+    assert push_deploy_authorized(mode=ordinary, changed_paths={"apps/api/src/main.ts"})
+    assert push_deploy_authorized(
+        mode=migration,
+        changed_paths={"packages/db/prisma/migrations/20261116000000_fixture/migration.sql"},
+    )
+    assert push_deploy_authorized(mode=layer7, changed_paths=layer7_paths)
+    assert jobs["tests"]["outputs"]["deploy"] == "${{ steps.intent.outputs.deploy }}"
+    assert "needs.tests.result == 'success'" in jobs["build"]["if"]
+    build_scope = next(step for step in jobs["build"]["steps"] if step.get("id") == "build_scope")
+    assert 'if [[ "$RELEASE_MODE" == LAYER7_API ]]' in build_scope["run"]
+    assert 'build_components=["CORE"]' in build_scope["run"]
+    assert "resolve_native_build_scope.py" in build_scope["run"]
+
+    deploy = jobs["deploy"]
+    condition = deploy["if"]
+    assert "needs.tests.outputs.mode == 'LAYER7_API'" in condition
+    assert "needs.tests.outputs.deploy == 'true'" in condition
+    assert "github.actor == github.repository_owner" in condition
+    assert "github.triggering_actor == github.repository_owner" in condition
+    assert deploy["environment"]["name"] == "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}"
+    assert deploy["concurrency"]["group"] == "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'gpoint-layer7-staging' || 'gpoint-production-release' }}"
+    action = next(step for step in deploy["steps"]
+                  if step.get("uses") == "./.github/actions/layer7-deploy")
+    assert action["if"] == "needs.tests.outputs.mode == 'LAYER7_API'"
+    assert action["with"]["prepared_app_digest"] == "${{ needs.build.outputs.app_digest }}"
+    assert action["with"]["scoped_image_version"] == "${{ needs.build.outputs.image_version }}"
+
+    layer7_action = yaml.safe_load((ROOT / ".github/actions/layer7-deploy/action.yml").read_text())
+    steps = layer7_action["runs"]["steps"]
+    scope = next(step for step in steps if step.get("id") == "protected_scope")
+    assert "github.event_name == 'push'" in scope["if"]
+    assert "layer7_release_scope.py paths" in scope["run"]
+    assert "roles.*.source" in scope["run"] or '"roles"]["gpoint-core-api"]["source"]' in scope["run"]
+    assert "GITHUB_EVENT_BEFORE" not in scope.get("env", {})
+    assert "layer7-candidate-paths.txt" not in scope["run"]
+    assert "PREVIOUS_SHA: ${{ github.event.before }}" not in "\n".join(step.get("env", {}).get("PREVIOUS_SHA", "") for step in steps)
+
+    migrations = next(step for step in deploy["steps"] if step.get("id") == "migration_apply")
+    assert "prisma migrate deploy" in migrations["run"]
+    assert "stock" in deploy["name"].lower() or any(
+        "Deploy exact immutable images with stock Kamal" in step.get("name", "") for step in deploy["steps"]
+    )
+    assert any("Verify public routes and exact running services" in step.get("name", "")
+               for step in deploy["steps"])
+
+
 def test_eros_builds_share_layers_without_publishing_the_test_image():
     jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
     test_steps = jobs["tests"]["steps"]

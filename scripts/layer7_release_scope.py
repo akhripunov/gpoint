@@ -40,15 +40,6 @@ RELEASE_PATHS = {
     "tests/test_native_prisma_apply_boundary.py",
     "docs/release/automation.md",
 }
-LAYER7_CORE_CONFIG_RELEASE_PATHS = {
-    ".github/actions/layer7-deploy/action.yml",
-    ".github/workflows/gpoint-layer7-staging.yml",
-    "scripts/native_release_intent.py",
-    "scripts/verify_native_prepared_run.py",
-    "tests/test_layer7_staging_workflow.py",
-    "tests/test_native_prepared_run.py",
-    "tests/test_native_release_intent.py",
-}
 CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
 
 # ME-36: the independent Eros v2.7.0 release (run 43699423688) advanced
@@ -144,12 +135,36 @@ def validate(snapshot):
 
 
 def diff_paths(repo, before, after):
-    paths = command("git", "diff", "--name-only", "-z", "--no-renames", before, after, cwd=repo)
-    return set(paths.split("\0")) - {""}
+    from native_release_intent import git_diff_entries
+
+    if not EXACT_SHA.fullmatch(before or "") or not EXACT_SHA.fullmatch(after or ""):
+        raise ValueError("Layer7 Git range must use exact commit SHAs")
+    subprocess.run(["git", "merge-base", "--is-ancestor", before, after], cwd=repo, check=True)
+    if before == after:
+        return set()
+    return {path for _status, path in git_diff_entries(before, after, repo=repo)}
+
+
+def core_config_plan_details(repo, candidate, snapshot, *, installed_core_sha, verify_schema=False):
+    """Build the Layer7 Core/config plan from the live Core SHA to this candidate."""
+    from native_release_intent import LAYER7_CORE_CONFIG_REQUIRED_PATHS
+
+    paths = diff_paths(repo, installed_core_sha, candidate)
+    if not LAYER7_CORE_CONFIG_REQUIRED_PATHS <= paths:
+        raise ValueError("Layer7 Core/config Git range is missing the prompt or active TOML")
+    scope = plan(repo, candidate, snapshot, previous=installed_core_sha,
+                 verify_schema=verify_schema)
+    if scope != ["CORE"]:
+        raise ValueError("Layer7 live Core/config Git range is not exactly Core-only")
+    return {"scope": scope, "installed_core_sha": installed_core_sha,
+            "candidate_sha": candidate, "changed_paths": sorted(paths)}
 
 
 def plan(repo, candidate, snapshot, *, previous=None, verify_schema=False):
-    from native_release_intent import EROS_MODEL_CONFIG_PATHS, LAYER7_API_CONFIG_PATH, LAYER7_API_PATHS
+    from native_release_intent import (
+        EROS_MODEL_CONFIG_PATHS, LAYER7_API_CONFIG_PATH, LAYER7_API_PATHS,
+        LAYER7_CORE_CONFIG_TOOLING_PATHS,
+    )
     from prisma_migration_checksums import build_inventory
 
     validate(snapshot)
@@ -158,9 +173,8 @@ def plan(repo, candidate, snapshot, *, previous=None, verify_schema=False):
     if previous is not None:
         from native_release_intent import changed_paths
 
-        subprocess.run(["git", "merge-base", "--is-ancestor", previous, candidate], cwd=repo, check=True)
-        if (changed_paths(previous, candidate, repo=repo) - LAYER7_API_PATHS
-                - EROS_MODEL_CONFIG_PATHS - LAYER7_CORE_CONFIG_RELEASE_PATHS):
+        if (diff_paths(repo, previous, candidate) - LAYER7_API_PATHS
+                - EROS_MODEL_CONFIG_PATHS - LAYER7_CORE_CONFIG_TOOLING_PATHS):
             raise ValueError("Layer7 push changed paths outside the Core API release scope")
     historical_start, historical_end, engine_digest = RECONCILED_LAYER7_RANGE
     engine = snapshot["roles"][ENGINE]
@@ -173,7 +187,8 @@ def plan(repo, candidate, snapshot, *, previous=None, verify_schema=False):
     for source in sorted({row["source"] for row in snapshot["roles"].values()}):
         subprocess.run(["git", "merge-base", "--is-ancestor", source, candidate], cwd=repo, check=True)
         outside_scope = (diff_paths(repo, source, candidate) - LAYER7_API_PATHS
-                         - EROS_MODEL_CONFIG_PATHS - RELEASE_PATHS)
+                         - EROS_MODEL_CONFIG_PATHS - RELEASE_PATHS
+                         - LAYER7_CORE_CONFIG_TOOLING_PATHS)
         if outside_scope and outside_scope <= historical_paths:
             # Only reconcile a role that was already running at the start of that history.
             ancestry = subprocess.run(
@@ -225,10 +240,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
     sub.add_parser("collect")
+    path_query = sub.add_parser("paths")
+    path_query.add_argument("before")
+    path_query.add_argument("after")
     planning = sub.add_parser("plan")
     planning.add_argument("candidate")
     planning.add_argument("snapshot", type=Path)
     planning.add_argument("--previous", required=True)
+    planning.add_argument("--core-config-details", action="store_true")
     verify = sub.add_parser("verify")
     verify.add_argument("--eros", action="store_true")
     verify.add_argument("--eros-config-update", action="store_true")
@@ -240,9 +259,18 @@ def main():
     args = parser.parse_args()
     if args.mode == "collect":
         print(json.dumps(collect(), sort_keys=True, separators=(",", ":")))
+    elif args.mode == "paths":
+        print(json.dumps(sorted(diff_paths(Path.cwd(), args.before, args.after)),
+                          separators=(",", ":")))
     elif args.mode == "plan":
-        print(json.dumps(plan(Path.cwd(), args.candidate, json.loads(args.snapshot.read_text()),
-                              previous=args.previous, verify_schema=True)))
+        snapshot = json.loads(args.snapshot.read_text())
+        if args.core_config_details:
+            result = core_config_plan_details(Path.cwd(), args.candidate, snapshot,
+                                              installed_core_sha=args.previous, verify_schema=True)
+        else:
+            result = plan(Path.cwd(), args.candidate, snapshot, previous=args.previous,
+                          verify_schema=True)
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     else:
         verify_runtime(json.loads(args.before.read_text()), json.loads(args.after.read_text()),
                        args.candidate, args.version, args.digest, eros=args.eros,
