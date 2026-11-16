@@ -26,7 +26,7 @@ def fixture():
     }
     jobs = {"jobs": [{"id": 99, "name": "Build and publish immutable images",
                       "status": "completed", "conclusion": "success"}]}
-    commit = {"commit": {"message": "ME-36 candidate\n\nGPOINT-ARTIFACT-PREPARE"}}
+    commit = {"sha": sha, "commit": {"message": "ME-36 candidate\n\nGPOINT-ARTIFACT-PREPARE"}}
     digests = {"CORE": "sha256:" + "b" * 64, "EROS": "sha256:" + "c" * 64}
     logs = "\n".join([
         "2026-11-06T08:30:15.123Z ##[group]Run immutable image verification",
@@ -132,7 +132,7 @@ def test_unmarked_commit_is_accepted_only_for_exact_core_and_active_config_candi
         {"filename": "services/eros-engine/eros-layer7-staging-model-config.toml"},
         {"filename": "tests/test_layer7_staging_workflow.py"},
     ]
-    commit = {"commit": {"message": "fix(eros): release ME-36"}, "files": files}
+    commit = {"sha": sha, "commit": {"message": "fix(eros): release ME-36"}, "files": files}
     core_logs = f"GPOINT_IMAGE_DIGEST CORE {MODULE.REPOSITORIES['CORE']}@{digests['CORE']}\n".encode()
     assert MODULE.verify_prepared_run(run, jobs, core_logs, sha, core_digest, 1234, commit) == (
         99, sha + "-1234-2"
@@ -146,7 +146,7 @@ def test_layer7_eros_prepared_run_is_bound_to_one_image_and_skipped_production_d
     import pytest
 
     run, jobs, _, sha, digests, _ = fixture()
-    commit = {"commit": {"message": "Eros update\n\nGPOINT-LAYER7-EROS"}}
+    commit = {"sha": sha, "commit": {"message": "Eros update\n\nGPOINT-LAYER7-EROS"}}
     eros_digest = {"EROS": digests["EROS"]}
     logs = f"GPOINT_IMAGE_DIGEST EROS {MODULE.REPOSITORIES['EROS']}@{digests['EROS']}\n".encode()
     deploy = {"name": "Kamal production Deploy and Verify", "conclusion": "skipped"}
@@ -158,3 +158,64 @@ def test_layer7_eros_prepared_run_is_bound_to_one_image_and_skipped_production_d
     deploy["conclusion"] = "success"
     with pytest.raises(ValueError, match="skipped production"):
         MODULE.verify_prepared_run(run, jobs, logs, sha, eros_digest, 1234, commit, layer7_eros=True)
+
+
+def test_bootstrap_full_build_allows_only_verified_core_subset_for_exact_layer7_core_config_scope():
+    run, jobs, _, sha, all_candidate_digests, _ = fixture()
+    core = {"CORE": all_candidate_digests["CORE"]}
+    commit = {"sha": sha, "commit": {"message": "ME-36 candidate\n\nGPOINT-ARTIFACT-PREPARE"},
+              "files": [
+                  {"filename": "apps/api/src/eros-response-prompt.js"},
+                  {"filename": "services/eros-engine/eros-layer7-staging-model-config.toml"},
+              ]}
+    all_digests = {name: "sha256:" + char * 64 for name, char in
+                   (("CORE", "b"), ("AGATA", "d"), ("MINIAPP", "e"), ("EROS", "f"))}
+    logs = "\n".join(
+        f"GPOINT_IMAGE_DIGEST {name} {MODULE.REPOSITORIES[name]}@{digest}"
+        for name, digest in all_digests.items()
+    ).encode()
+    assert MODULE.verify_prepared_run(run, jobs, logs, sha, core, 1234, commit,
+                                      layer7_core_config=True) == (99, sha + "-1234-2")
+    with pytest.raises(ValueError, match="do not match"):
+        MODULE.verify_prepared_run(run, jobs, logs, sha, core, 1234, commit)
+
+
+def test_layer7_core_config_subset_rejects_wrong_sha_digest_scope_and_duplicates():
+    run, jobs, _, sha, digests, _ = fixture()
+    core = {"CORE": digests["CORE"]}
+    commit = {"sha": sha, "commit": {"message": "ME-36 candidate\n\nGPOINT-ARTIFACT-PREPARE"},
+              "files": [
+                  {"filename": "apps/api/src/eros-response-prompt.js"},
+                  {"filename": "services/eros-engine/eros-layer7-staging-model-config.toml"},
+              ]}
+    line = f"GPOINT_IMAGE_DIGEST CORE {MODULE.REPOSITORIES['CORE']}@{digests['CORE']}\n"
+    assert MODULE.verify_prepared_run(run, jobs, line.encode(), sha, core, 1234, commit,
+                                      layer7_core_config=True)
+    with pytest.raises(ValueError, match="commit payload SHA"):
+        MODULE.verify_prepared_run(run, jobs, line.encode(), sha, core, 1234,
+                                   dict(commit, sha="d" * 40), layer7_core_config=True)
+    with pytest.raises(ValueError, match="Core/config-only"):
+        MODULE.verify_prepared_run(run, jobs, line.encode(), sha, core, 1234,
+                                   commit, layer7_core_config=True, layer7_eros=True)
+    with pytest.raises(ValueError, match="do not match"):
+        MODULE.verify_prepared_run(run, jobs, line.replace(digests["CORE"], "sha256:" + "d" * 64).encode(),
+                                   sha, core, 1234, commit, layer7_core_config=True)
+    commit["files"].append({"filename": "apps/worker/src/main.ts"})
+    with pytest.raises(ValueError, match="Core/config-only"):
+        MODULE.verify_prepared_run(run, jobs, line.encode(), sha, core, 1234,
+                                   commit, layer7_core_config=True)
+    commit["files"].pop()
+    with pytest.raises(ValueError, match="duplicate"):
+        MODULE.verify_prepared_run(run, jobs, (line + line).encode(), sha, core, 1234,
+                                   commit, layer7_core_config=True)
+    wrong_repository = line.replace(MODULE.REPOSITORIES["CORE"], MODULE.REPOSITORIES["AGATA"])
+    with pytest.raises(ValueError, match="invalid or duplicate digest"):
+        MODULE.verify_prepared_run(run, jobs, wrong_repository.encode(), sha, core, 1234,
+                                   commit, layer7_core_config=True)
+    with pytest.raises(ValueError, match="malformed digest"):
+        MODULE.verify_prepared_run(run, jobs, b"GPOINT_IMAGE_DIGEST UNKNOWN ghcr.io/example/image@sha256:abc\n",
+                                   sha, core, 1234, commit, layer7_core_config=True)
+    with pytest.raises(ValueError, match="Core/config-only"):
+        MODULE.verify_prepared_run(run, jobs, line.encode(), sha,
+                                   {"CORE": core["CORE"], "EROS": digests["EROS"]}, 1234,
+                                   commit, layer7_core_config=True)

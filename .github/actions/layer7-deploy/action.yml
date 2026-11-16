@@ -35,12 +35,12 @@ inputs:
 runs:
   using: composite
   steps:
-    - if: inputs.mode != 'eros-prepare'
+    - if: inputs.mode != 'eros-prepare' && inputs.mode != 'core-config-prepare'
       uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
       with:
         ruby-version: 3.3.13
     - name: Install pinned Kamal 2.12.0
-      if: inputs.mode != 'eros-prepare'
+      if: inputs.mode != 'eros-prepare' && inputs.mode != 'core-config-prepare'
       shell: bash
       run: |
         set -euo pipefail
@@ -80,7 +80,7 @@ runs:
           | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')"
         test "$current_main" = "$WORKFLOW_SHA"
         case "$MODE" in
-          eros-prepare|eros-deploy) test "$STAGING_IMAGE_SHA" = "$WORKFLOW_SHA"; exit 0 ;;
+          eros-prepare|eros-deploy|core-config-prepare) test "$STAGING_IMAGE_SHA" = "$WORKFLOW_SHA"; exit 0 ;;
           full) ;;
           *) exit 1 ;;
         esac
@@ -92,7 +92,7 @@ runs:
           "$STAGING_IMAGE_SHA" <<< "$comparison"
     - name: Detect the narrow Core and active Eros config scope
       id: protected_scope
-      if: github.event_name == 'workflow_dispatch' && inputs.mode == 'full'
+      if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'full' || inputs.mode == 'core-config-prepare')
       env:
         IMAGE_BASE_SHA: ${{ inputs.staging_image_sha }}
       shell: bash
@@ -140,15 +140,22 @@ runs:
         set -euo pipefail
         [[ "$PREPARED_RUN_ID" =~ ^[1-9][0-9]*$ ]]
         scope_args=()
-        if [[ "$MODE" == full ]]; then
+        if [[ "$MODE" == core-config-prepare ]]; then
+          [[ "$NARROW_SCOPE" == true ]]
+          [[ "$PREPARED_APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ -z "$PREPARED_MINIAPP_DIGEST$PREPARED_EROS_DIGEST$PREPARED_AGATA_DIGEST" ]]
+          scope_args=(--layer7-core-config)
+        elif [[ "$MODE" == full ]]; then
           [[ "$PREPARED_APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           if [[ "$NARROW_SCOPE" == true ]]; then
             [[ -z "$PREPARED_MINIAPP_DIGEST$PREPARED_EROS_DIGEST$PREPARED_AGATA_DIGEST" ]]
+            scope_args=(--layer7-core-config)
           else
             [[ "$PREPARED_MINIAPP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
             [[ "$PREPARED_EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           fi
         else
+          [[ "$MODE" == eros-prepare || "$MODE" == eros-deploy ]]
           [[ "$PREPARED_EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ -z "$PREPARED_APP_DIGEST$PREPARED_MINIAPP_DIGEST$PREPARED_AGATA_DIGEST" ]]
           scope_args=(--layer7-eros)
@@ -210,6 +217,9 @@ runs:
           --candidate-sha "$CANDIDATE_SHA" --run-id "$PREPARED_RUN_ID" --digests "$digests" \
           --output "$GITHUB_OUTPUT" "${scope_args[@]}"
         rm -f "$run_json" "$jobs_json" "$commit_json" "$log_headers" "$log_file"
+        if [[ "$MODE" == core-config-prepare ]]; then
+          echo "LAYER7_CORE_CONFIG_READINESS=PASS SHA=$CANDIDATE_SHA CORE_DIGEST=$PREPARED_APP_DIGEST CONFIG_SHA=$(sha256sum services/eros-engine/eros-layer7-staging-model-config.toml | awk '{print $1}') VPS_MUTATION=NONE APPLY=NOT_RUN" >> "$GITHUB_STEP_SUMMARY"
+        fi
     - name: Verify pinned Layer7 host key and existing SSH access
       shell: bash
       run: |
@@ -985,7 +995,7 @@ runs:
           curl --fail --silent --show-error --max-time 5 http://127.0.0.1:13001/health/live
         echo 'LAYER7_ME36_ROLLBACK=PASS prior_Core_API_and_Eros_config_restored' >> "$GITHUB_STEP_SUMMARY"
     - name: Remove temporary Kamal GHCR authorization from Layer7
-      if: always() && (steps.staging_preflight.outcome == 'success' || steps.scoped.outcome == 'success' || steps.protected_scope.outputs.narrow == 'true')
+      if: always() && inputs.mode != 'core-config-prepare' && (steps.staging_preflight.outcome == 'success' || steps.scoped.outcome == 'success' || steps.protected_scope.outputs.narrow == 'true')
       shell: bash
       run: |
         set -euo pipefail

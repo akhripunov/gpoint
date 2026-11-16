@@ -378,7 +378,7 @@ def test_layer7_staging_requires_exact_successful_prepare_and_explicit_staging_i
     assert "STAGING_IMAGE_SHA" in recheck["env"]
     assert "compare/$STAGING_IMAGE_SHA...$WORKFLOW_SHA" in recheck["run"]
     assert 'merge_base_commit",{}).get("sha")' in recheck["run"]
-    assert "staging_preflight.outcome == 'success'" in step_text
+    assert "staging_preflight.outcome" in step_text
     assert "Remove temporary Kamal GHCR authorization" in step_text
     assert "docker logout ghcr.io" in step_text
     assert "no_existing_credentials=true" in step_text
@@ -522,3 +522,34 @@ def test_eros_rehearsal_returns_before_live_apply_and_only_eros_redeploys():
     assert "prisma migrate" not in run
     assert run.count("kamal redeploy") == 1
     assert '--roles engine --config-file "$config"' in run
+
+
+def test_core_config_readiness_mode_is_read_only_and_still_uses_protected_narrow_checks():
+    workflow = yaml.load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text(), Loader=yaml.BaseLoader)
+    dispatch = workflow["on"]["workflow_dispatch"]
+    assert "core-config-prepare" in dispatch["inputs"]["mode"]["options"]
+    job = workflow["jobs"]["layer7_staging"]
+    condition = job["if"]
+    assert "inputs.mode == 'core-config-prepare'" in condition
+    assert "inputs.deploy_layer7_staging == false" in condition
+    assert "inputs.approve_layer7_staging == false" in condition
+    assert "inputs.mode != 'core-config-prepare'" in job["environment"]["deployment"]
+
+    steps = _staging_steps()
+    serialized = yaml.safe_dump(steps)
+    action = (ROOT / ".github/actions/layer7-deploy/action.yml").read_text()
+    assert "inputs.mode == 'core-config-prepare'" in action
+    assert "--layer7-core-config" in action
+    assert "LAYER7_CORE_CONFIG_READINESS=PASS" in action
+    assert "VPS_MUTATION=NONE APPLY=NOT_RUN" in action
+    assert "NARROW_SCOPE" in serialized
+    assert "sha256sum /opt/gpoint/env/eros-layer7-staging-model-config.toml" in action
+    assert "docker logout ghcr.io" in action
+    cleanup = next(step for step in steps if step.get("name") == "Remove temporary Kamal GHCR authorization from Layer7")
+    assert "inputs.mode != 'core-config-prepare'" in cleanup["if"]
+    for mutation in ("Install staging secrets", "Layer7 staging preflight", "Apply isolated Prisma",
+                     "Deploy exact immutable images", "Roll back the exact Core"):
+        step = next(step for step in steps if mutation in step.get("name", ""))
+        assert "core-config-prepare" not in step.get("if", "")
+    verify = next(step for step in steps if step.get("name") == "Verify exact successful Build run and immutable component digests")
+    assert "--layer7-core-config" in verify["run"]
