@@ -354,6 +354,8 @@ LAYER7_API_CONFIG_PATHS = frozenset({
 })
 LAYER7_CORE_CONFIG_TOOLING_PATHS = frozenset({
     ".github/actions/layer7-deploy/action.yml",
+    ".kamal/hooks/pre-app-boot",
+    ".kamal/hooks/post-app-boot",
     ".github/workflows/gpoint-layer7-staging.yml",
     ".github/workflows/gpoint-native-release.yml",
     "docs/release/automation.md",
@@ -362,6 +364,7 @@ LAYER7_CORE_CONFIG_TOOLING_PATHS = frozenset({
     "scripts/native_release_intent.py",
     "scripts/verify_native_prepared_run.py",
     "tests/test_kamal_native_automatic_release.py",
+    "tests/test_kamal_post_app_boot_hook.py",
     "tests/test_kamal_release_config.py",
     "tests/test_layer7_release_scope.py",
     "tests/test_layer7_staging_workflow.py",
@@ -487,6 +490,10 @@ def classify_push(*, event_name: str, ref: str,
     if LAYER7_API_MARKER in markers:
         if ARTIFACT_PREPARE_MARKER in markers:
             return "BLOCK"
+        if ({"scripts/native_release_intent.py", "tests/test_native_prepared_run.py"} <= changed_paths
+                and changed_paths <= LAYER7_CORE_CONFIG_TOOLING_PATHS):
+            # Scope fixes with a prepared-run regression can build only Core.
+            return "LAYER7_API"
         if LAYER7_API_ADAPTER_PATHS & changed_paths:
             allowed_adapter_change = (
                 LAYER7_API_ADAPTER_PATHS | LAYER7_API_ADAPTER_ROUTE_SUPPORT_PATHS

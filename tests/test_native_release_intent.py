@@ -251,6 +251,22 @@ def test_layer7_release_tooling_builds_core_but_does_not_auto_apply():
     )
 
 
+def test_marked_layer7_scope_fix_builds_only_core_without_authorizing_apply():
+    paths = {
+        "scripts/native_release_intent.py",
+        "tests/test_native_release_intent.py",
+        "tests/test_native_prepared_run.py",
+    }
+    kwargs = {"event_name": "push", "ref": "refs/heads/main",
+              "commit_message": "ME-36 Layer7 tooling\n\nGPOINT-LAYER7-API"}
+    mode = MODULE.classify_push(**kwargs, changed_paths=paths)
+    assert mode == "LAYER7_API"
+    assert not MODULE.push_deploy_authorized(mode=mode, changed_paths=paths)
+    assert MODULE.classify_push(
+        **kwargs, changed_paths=paths | {"apps/worker/src/main.ts"},
+    ) == "BLOCK"
+
+
 def test_layer7_eros_adapter_source_uses_only_the_explicit_api_route():
     paths = {
         "apps/api/src/eros-adapter.ts",
