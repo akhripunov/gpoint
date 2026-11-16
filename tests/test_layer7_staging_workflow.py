@@ -540,6 +540,8 @@ def test_core_config_readiness_mode_is_read_only_and_still_uses_protected_narrow
     action = (ROOT / ".github/actions/layer7-deploy/action.yml").read_text()
     assert "inputs.mode == 'core-config-prepare'" in action
     assert "--layer7-core-config" in action
+    assert "--layer7-scope-paths" in action
+    assert "layer7-candidate-paths.txt" in action
     assert "LAYER7_CORE_CONFIG_READINESS=PASS" in action
     assert "VPS_MUTATION=NONE APPLY=NOT_RUN" in action
     assert "NARROW_SCOPE" in serialized

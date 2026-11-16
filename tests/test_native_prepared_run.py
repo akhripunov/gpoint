@@ -174,8 +174,13 @@ def test_bootstrap_full_build_allows_only_verified_core_subset_for_exact_layer7_
         f"GPOINT_IMAGE_DIGEST {name} {MODULE.REPOSITORIES[name]}@{digest}"
         for name, digest in all_digests.items()
     ).encode()
+    scope_paths = {
+        "apps/api/src/eros-response-prompt.js",
+        "services/eros-engine/eros-layer7-staging-model-config.toml",
+    }
     assert MODULE.verify_prepared_run(run, jobs, logs, sha, core, 1234, commit,
-                                      layer7_core_config=True) == (99, sha + "-1234-2")
+                                      layer7_core_config=True,
+                                      layer7_scope_paths=scope_paths) == (99, sha + "-1234-2")
     with pytest.raises(ValueError, match="do not match"):
         MODULE.verify_prepared_run(run, jobs, logs, sha, core, 1234, commit)
 
@@ -189,33 +194,86 @@ def test_layer7_core_config_subset_rejects_wrong_sha_digest_scope_and_duplicates
                   {"filename": "services/eros-engine/eros-layer7-staging-model-config.toml"},
               ]}
     line = f"GPOINT_IMAGE_DIGEST CORE {MODULE.REPOSITORIES['CORE']}@{digests['CORE']}\n"
+    scope_paths = {
+        "apps/api/src/eros-response-prompt.js",
+        "services/eros-engine/eros-layer7-staging-model-config.toml",
+    }
     assert MODULE.verify_prepared_run(run, jobs, line.encode(), sha, core, 1234, commit,
-                                      layer7_core_config=True)
+                                      layer7_core_config=True, layer7_scope_paths=scope_paths)
     with pytest.raises(ValueError, match="commit payload SHA"):
         MODULE.verify_prepared_run(run, jobs, line.encode(), sha, core, 1234,
-                                   dict(commit, sha="d" * 40), layer7_core_config=True)
+                                   dict(commit, sha="d" * 40), layer7_core_config=True,
+                                   layer7_scope_paths=scope_paths)
     with pytest.raises(ValueError, match="Core/config-only"):
         MODULE.verify_prepared_run(run, jobs, line.encode(), sha, core, 1234,
-                                   commit, layer7_core_config=True, layer7_eros=True)
+                                   commit, layer7_core_config=True, layer7_eros=True,
+                                   layer7_scope_paths=scope_paths)
+    eros_marked = {"sha": sha, "commit": {"message": "Eros-only update\nGPOINT-LAYER7-EROS"}}
+    with pytest.raises(ValueError, match="Eros-only candidate"):
+        MODULE.verify_prepared_run(run, jobs, line.encode(), sha, core, 1234,
+                                   eros_marked, layer7_core_config=True,
+                                   layer7_scope_paths=scope_paths)
     with pytest.raises(ValueError, match="do not match"):
         MODULE.verify_prepared_run(run, jobs, line.replace(digests["CORE"], "sha256:" + "d" * 64).encode(),
-                                   sha, core, 1234, commit, layer7_core_config=True)
-    commit["files"].append({"filename": "apps/worker/src/main.ts"})
+                                   sha, core, 1234, commit, layer7_core_config=True,
+                                   layer7_scope_paths=scope_paths)
     with pytest.raises(ValueError, match="Core/config-only"):
         MODULE.verify_prepared_run(run, jobs, line.encode(), sha, core, 1234,
-                                   commit, layer7_core_config=True)
-    commit["files"].pop()
+                                   commit, layer7_core_config=True,
+                                   layer7_scope_paths=scope_paths | {"apps/worker/src/main.ts"})
     with pytest.raises(ValueError, match="duplicate"):
         MODULE.verify_prepared_run(run, jobs, (line + line).encode(), sha, core, 1234,
-                                   commit, layer7_core_config=True)
+                                   commit, layer7_core_config=True, layer7_scope_paths=scope_paths)
     wrong_repository = line.replace(MODULE.REPOSITORIES["CORE"], MODULE.REPOSITORIES["AGATA"])
     with pytest.raises(ValueError, match="invalid or duplicate digest"):
         MODULE.verify_prepared_run(run, jobs, wrong_repository.encode(), sha, core, 1234,
-                                   commit, layer7_core_config=True)
-    with pytest.raises(ValueError, match="malformed digest"):
-        MODULE.verify_prepared_run(run, jobs, b"GPOINT_IMAGE_DIGEST UNKNOWN ghcr.io/example/image@sha256:abc\n",
-                                   sha, core, 1234, commit, layer7_core_config=True)
+                                   commit, layer7_core_config=True, layer7_scope_paths=scope_paths)
     with pytest.raises(ValueError, match="Core/config-only"):
         MODULE.verify_prepared_run(run, jobs, line.encode(), sha,
                                    {"CORE": core["CORE"], "EROS": digests["EROS"]}, 1234,
-                                   commit, layer7_core_config=True)
+                                   commit, layer7_core_config=True, layer7_scope_paths=scope_paths)
+
+
+def test_layer7_core_config_subset_binds_to_full_live_candidate_scope_not_last_commit_files():
+    run, jobs, _, sha, digests, _ = fixture()
+    core = {"CORE": digests["CORE"]}
+    # The tip commit only fixes the scope checker. The action supplies the
+    # complete diff from the installed Core source, which contains the prompt
+    # and active model config that establish this narrow deployment.
+    commit = {"sha": sha, "commit": {"message": "fix(layer7): accept scoped release tooling"},
+              "files": [
+                  {"filename": "scripts/layer7_release_scope.py"},
+                  {"filename": "tests/test_layer7_release_scope.py"},
+              ]}
+    scope_paths = {
+        "apps/api/src/eros-response-prompt.js",
+        "services/eros-engine/eros-layer7-staging-model-config.toml",
+        ".github/actions/layer7-deploy/action.yml",
+        ".github/workflows/gpoint-layer7-staging.yml",
+        "scripts/layer7_release_scope.py",
+        "scripts/native_release_intent.py",
+        "scripts/verify_native_prepared_run.py",
+        "tests/test_layer7_release_scope.py",
+        "tests/test_layer7_staging_workflow.py",
+        "tests/test_native_prepared_run.py",
+        "tests/test_native_release_intent.py",
+    }
+    core_log = f"GPOINT_IMAGE_DIGEST CORE {MODULE.REPOSITORIES['CORE']}@{core['CORE']}\n".encode()
+    assert MODULE.verify_prepared_run(
+        run, jobs, core_log, sha, core, 1234, commit,
+        layer7_core_config=True, layer7_scope_paths=scope_paths,
+    ) == (99, sha + "-1234-2")
+    for rejected_scope in (
+        scope_paths - {"services/eros-engine/eros-layer7-staging-model-config.toml"},
+        scope_paths | {"apps/worker/src/main.ts"},
+        None,
+    ):
+        with pytest.raises(ValueError, match="Core/config-only"):
+            MODULE.verify_prepared_run(
+                run, jobs, core_log, sha, core, 1234, commit,
+                layer7_core_config=True, layer7_scope_paths=rejected_scope,
+            )
+    with pytest.raises(ValueError, match="malformed digest"):
+        MODULE.verify_prepared_run(run, jobs, b"GPOINT_IMAGE_DIGEST UNKNOWN ghcr.io/example/image@sha256:abc\n",
+                                   sha, core, 1234, commit, layer7_core_config=True,
+                                   layer7_scope_paths=scope_paths)

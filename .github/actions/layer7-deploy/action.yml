@@ -140,16 +140,19 @@ runs:
         set -euo pipefail
         [[ "$PREPARED_RUN_ID" =~ ^[1-9][0-9]*$ ]]
         scope_args=()
+        scope_paths_args=()
         if [[ "$MODE" == core-config-prepare ]]; then
           [[ "$NARROW_SCOPE" == true ]]
           [[ "$PREPARED_APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ -z "$PREPARED_MINIAPP_DIGEST$PREPARED_EROS_DIGEST$PREPARED_AGATA_DIGEST" ]]
           scope_args=(--layer7-core-config)
+          scope_paths_args=(--layer7-scope-paths "$RUNNER_TEMP/layer7-candidate-paths.txt")
         elif [[ "$MODE" == full ]]; then
           [[ "$PREPARED_APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           if [[ "$NARROW_SCOPE" == true ]]; then
             [[ -z "$PREPARED_MINIAPP_DIGEST$PREPARED_EROS_DIGEST$PREPARED_AGATA_DIGEST" ]]
             scope_args=(--layer7-core-config)
+            scope_paths_args=(--layer7-scope-paths "$RUNNER_TEMP/layer7-candidate-paths.txt")
           else
             [[ "$PREPARED_MINIAPP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
             [[ "$PREPARED_EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
@@ -215,11 +218,8 @@ runs:
         python3 scripts/verify_native_prepared_run.py \
           --run "$run_json" --jobs "$jobs_json" --commit "$commit_json" --logs "$log_file" \
           --candidate-sha "$CANDIDATE_SHA" --run-id "$PREPARED_RUN_ID" --digests "$digests" \
-          --output "$GITHUB_OUTPUT" "${scope_args[@]}"
+          --output "$GITHUB_OUTPUT" "${scope_args[@]}" "${scope_paths_args[@]}"
         rm -f "$run_json" "$jobs_json" "$commit_json" "$log_headers" "$log_file"
-        if [[ "$MODE" == core-config-prepare ]]; then
-          echo "LAYER7_CORE_CONFIG_READINESS=PASS SHA=$CANDIDATE_SHA CORE_DIGEST=$PREPARED_APP_DIGEST CONFIG_SHA=$(sha256sum services/eros-engine/eros-layer7-staging-model-config.toml | awk '{print $1}') VPS_MUTATION=NONE APPLY=NOT_RUN" >> "$GITHUB_STEP_SUMMARY"
-        fi
     - name: Verify pinned Layer7 host key and existing SSH access
       shell: bash
       run: |
@@ -235,6 +235,22 @@ runs:
         # shellcheck disable=SC2016
         LAYER7_SSH_KEY="$key" "$GITHUB_WORKSPACE/scripts/layer7-transport.sh" ssh \
           "root@$GPOINT_LAYER7_STAGING_HOST" 'test "$(id -u)" = 0'
+    - name: Record read-only Core and Eros config readiness
+      if: github.event_name == 'workflow_dispatch' && inputs.mode == 'core-config-prepare'
+      env:
+        CORE_DIGEST: ${{ inputs.prepared_app_digest }}
+        ACTIVE_CONFIG_SHA: ${{ steps.protected_scope.outputs.previous_config_sha }}
+        CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        BUILD_RUN_ID: ${{ inputs.prepared_run_id }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+        [[ "$BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+        [[ "$CORE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+        [[ "$ACTIVE_CONFIG_SHA" =~ ^[0-9a-f]{64}$ ]]
+        candidate_config_sha="$(sha256sum services/eros-engine/eros-layer7-staging-model-config.toml | awk '{print $1}')"
+        echo "LAYER7_CORE_CONFIG_READINESS=PASS SHA=$CANDIDATE_SHA BUILD_RUN_ID=$BUILD_RUN_ID CORE_DIGEST=$CORE_DIGEST ACTIVE_CONFIG_SHA=$ACTIVE_CONFIG_SHA CANDIDATE_CONFIG_SHA=$candidate_config_sha VPS_MUTATION=NONE APPLY=NOT_RUN" >> "$GITHUB_STEP_SUMMARY"
     - name: Rehearse or release only the Eros engine on Layer7
       if: inputs.mode == 'eros-prepare' || inputs.mode == 'eros-deploy'
       env:

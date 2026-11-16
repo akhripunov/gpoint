@@ -55,7 +55,8 @@ def verify_prepared_run(run: Any, jobs_payload: Any, logs: bytes,
                         candidate_sha: str, digests: dict[str, str],
                         expected_run_id: int, commit_payload: Any, *,
                         layer7_eros: bool = False,
-                        layer7_core_config: bool = False) -> tuple[int, str]:
+                        layer7_core_config: bool = False,
+                        layer7_scope_paths: set[str] | None = None) -> tuple[int, str]:
     if not isinstance(run, dict):
         raise ValueError("prepared run metadata is malformed")
     expected_run = {
@@ -82,9 +83,12 @@ def verify_prepared_run(run: Any, jobs_payload: Any, logs: bytes,
     if layer7_core_config and layer7_eros:
         raise ValueError("Layer7 Core/config-only scope conflicts with another prepared scope")
     message = commit.get("message") if isinstance(commit, dict) else None
+    if (layer7_core_config and isinstance(message, str)
+            and LAYER7_EROS_MARKER in message.splitlines()):
+        raise ValueError("Layer7 Core/config-only scope conflicts with an Eros-only candidate")
     marker = LAYER7_EROS_MARKER if layer7_eros else ARTIFACT_PREPARE_MARKER
     marked = isinstance(message, str) and marker in message.splitlines()
-    if not marked:
+    if not marked and not layer7_core_config:
         if layer7_eros or not isinstance(commit_payload, dict):
             raise ValueError("prepared run commit is not marked for artifact-only preparation")
         files = commit_payload.get("files")
@@ -101,16 +105,16 @@ def verify_prepared_run(run: Any, jobs_payload: Any, logs: bytes,
     if layer7_core_config:
         if layer7_eros or not isinstance(commit_payload, dict):
             raise ValueError("Layer7 Core/config-only scope conflicts with another prepared scope")
-        files = commit_payload.get("files")
-        paths = {row.get("filename") for row in files or [] if isinstance(row, dict)}
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from native_release_intent import ARTIFACT_PREPARE_PATHS
         required = {
             "apps/api/src/eros-response-prompt.js",
             "services/eros-engine/eros-layer7-staging-model-config.toml",
         }
-        if (not files or not paths <= ARTIFACT_PREPARE_PATHS or not required <= paths
-                or set(digests) != {"CORE"}):
+        if (not isinstance(layer7_scope_paths, set) or not layer7_scope_paths
+                or any(not isinstance(path, str) for path in layer7_scope_paths)
+                or not layer7_scope_paths <= ARTIFACT_PREPARE_PATHS
+                or not required <= layer7_scope_paths or set(digests) != {"CORE"}):
             raise ValueError("prepared candidate is not the exact Core/config-only scope")
     if not isinstance(digests, dict) or not digests or any(
             component not in REPOSITORIES or not isinstance(digest, str)
@@ -163,6 +167,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--layer7-eros", action="store_true")
     parser.add_argument("--layer7-core-config", action="store_true")
+    parser.add_argument("--layer7-scope-paths", type=Path,
+                        help="Full candidate diff from the installed Core source for narrow Layer7 scope")
     parser.add_argument("--run", required=True, type=Path)
     parser.add_argument("--jobs", required=True, type=Path)
     parser.add_argument("--commit", required=True, type=Path)
@@ -182,6 +188,8 @@ def main() -> int:
             json.loads(args.digests), args.run_id,
             json.loads(args.commit.read_text(encoding="utf-8")), layer7_eros=args.layer7_eros,
             layer7_core_config=args.layer7_core_config,
+            layer7_scope_paths=(set(args.layer7_scope_paths.read_text(encoding="utf-8").splitlines())
+                                if args.layer7_scope_paths else None),
         )
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise SystemExit("PREPARED_RUN=FAIL reason=" + str(exc)) from None
