@@ -54,7 +54,8 @@ def _strip_github_timestamp(line: str) -> str:
 def verify_prepared_run(run: Any, jobs_payload: Any, logs: bytes,
                         candidate_sha: str, digests: dict[str, str],
                         expected_run_id: int, commit_payload: Any, *,
-                        layer7_eros: bool = False) -> tuple[int, str]:
+                        layer7_eros: bool = False,
+                        layer7_core_config: bool = False) -> tuple[int, str]:
     if not isinstance(run, dict):
         raise ValueError("prepared run metadata is malformed")
     expected_run = {
@@ -76,6 +77,10 @@ def verify_prepared_run(run: Any, jobs_payload: Any, logs: bytes,
     if not isinstance(run_attempt, int) or run_attempt <= 0:
         raise ValueError("prepared run attempt is missing or invalid")
     commit = commit_payload.get("commit") if isinstance(commit_payload, dict) else None
+    if not isinstance(commit_payload, dict) or commit_payload.get("sha") != candidate_sha:
+        raise ValueError("prepared commit payload SHA does not match the exact candidate SHA")
+    if layer7_core_config and layer7_eros:
+        raise ValueError("Layer7 Core/config-only scope conflicts with another prepared scope")
     message = commit.get("message") if isinstance(commit, dict) else None
     marker = LAYER7_EROS_MARKER if layer7_eros else ARTIFACT_PREPARE_MARKER
     marked = isinstance(message, str) and marker in message.splitlines()
@@ -93,6 +98,20 @@ def verify_prepared_run(run: Any, jobs_payload: Any, logs: bytes,
         if (not files or not paths <= ARTIFACT_PREPARE_PATHS or not required <= paths
                 or set(digests) != {"CORE"}):
             raise ValueError("unmarked prepared candidate is not the exact Core/config-only scope")
+    if layer7_core_config:
+        if layer7_eros or not isinstance(commit_payload, dict):
+            raise ValueError("Layer7 Core/config-only scope conflicts with another prepared scope")
+        files = commit_payload.get("files")
+        paths = {row.get("filename") for row in files or [] if isinstance(row, dict)}
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from native_release_intent import ARTIFACT_PREPARE_PATHS
+        required = {
+            "apps/api/src/eros-response-prompt.js",
+            "services/eros-engine/eros-layer7-staging-model-config.toml",
+        }
+        if (not files or not paths <= ARTIFACT_PREPARE_PATHS or not required <= paths
+                or set(digests) != {"CORE"}):
+            raise ValueError("prepared candidate is not the exact Core/config-only scope")
     if not isinstance(digests, dict) or not digests or any(
             component not in REPOSITORIES or not isinstance(digest, str)
             or not DIGEST.fullmatch(digest) for component, digest in digests.items()):
@@ -122,14 +141,20 @@ def verify_prepared_run(run: Any, jobs_payload: Any, logs: bytes,
     lines = _job_log_lines(logs)
     recorded: dict[str, str] = {}
     for line in lines:
-        match = IMAGE_LINE.fullmatch(_strip_github_timestamp(line))
+        normalized = _strip_github_timestamp(line)
+        match = IMAGE_LINE.fullmatch(normalized)
         if not match:
+            if normalized.startswith("GPOINT_IMAGE_DIGEST"):
+                raise ValueError("prepared Native Build logs contain a malformed digest record")
             continue
         component, repository, digest = match.groups()
         if repository != REPOSITORIES[component] or component in recorded:
             raise ValueError("prepared Native Build logs contain an invalid or duplicate digest line")
         recorded[component] = digest
-    if recorded != digests:
+    if layer7_core_config:
+        if set(digests) != {"CORE"} or recorded.get("CORE") != digests["CORE"]:
+            raise ValueError("prepared digest inputs do not match the successful Build job logs")
+    elif recorded != digests:
         raise ValueError("prepared digest inputs do not match the successful Build job logs")
     return build["id"], f"{candidate_sha}-{expected_run_id}-{run_attempt}"
 
@@ -137,6 +162,7 @@ def verify_prepared_run(run: Any, jobs_payload: Any, logs: bytes,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--layer7-eros", action="store_true")
+    parser.add_argument("--layer7-core-config", action="store_true")
     parser.add_argument("--run", required=True, type=Path)
     parser.add_argument("--jobs", required=True, type=Path)
     parser.add_argument("--commit", required=True, type=Path)
@@ -155,6 +181,7 @@ def main() -> int:
             args.logs.read_bytes(), args.candidate_sha,
             json.loads(args.digests), args.run_id,
             json.loads(args.commit.read_text(encoding="utf-8")), layer7_eros=args.layer7_eros,
+            layer7_core_config=args.layer7_core_config,
         )
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise SystemExit("PREPARED_RUN=FAIL reason=" + str(exc)) from None

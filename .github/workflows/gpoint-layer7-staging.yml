@@ -8,7 +8,7 @@ on:
       mode:
         description: Layer7 deployment scope and phase
         type: choice
-        options: [full, eros-prepare, eros-deploy]
+        options: [full, core-config-prepare, eros-prepare, eros-deploy]
         default: full
       eros_rehearsal:
         description: Successful eros-prepare run ID and attempt, as ID-attempt
@@ -24,7 +24,7 @@ on:
         type: boolean
         default: false
       approve_layer7_staging:
-        description: I authorize this exact candidate SHA on the isolated Layer7 staging VPS
+        description: I authorize applying this exact candidate SHA to the isolated Layer7 staging VPS
         required: true
         type: boolean
         default: false
@@ -65,16 +65,16 @@ jobs:
       github.ref == 'refs/heads/main' &&
       github.actor == github.repository_owner && github.triggering_actor == github.repository_owner &&
       inputs.candidate_sha == github.sha &&
-      inputs.approve_layer7_staging == true &&
-      ((inputs.mode == 'eros-prepare' && inputs.deploy_layer7_staging == false) ||
-       (inputs.mode != 'eros-prepare' && inputs.deploy_layer7_staging == true)) &&
+      ((inputs.mode == 'eros-prepare' && inputs.deploy_layer7_staging == false && inputs.approve_layer7_staging == true) ||
+       (inputs.mode == 'core-config-prepare' && inputs.deploy_layer7_staging == false && inputs.approve_layer7_staging == false) ||
+       (inputs.mode != 'eros-prepare' && inputs.mode != 'core-config-prepare' && inputs.deploy_layer7_staging == true && inputs.approve_layer7_staging == true)) &&
       inputs.staging_image_sha != ''
     # ruby/setup-ruby's pinned 3.3.6 binary is unavailable on Ubuntu 26.04.
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     environment:
       name: layer7-staging
-      deployment: ${{ inputs.mode != 'eros-prepare' }}
+      deployment: ${{ inputs.mode != 'eros-prepare' && inputs.mode != 'core-config-prepare' }}
     concurrency:
       group: gpoint-layer7-staging
       cancel-in-progress: false
