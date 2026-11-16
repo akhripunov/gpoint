@@ -200,7 +200,12 @@ def test_layer7_readiness_uses_full_installed_sha_to_candidate_git_range_with_bo
         "services/eros-engine/eros-layer7-staging-model-config.toml": "model = 'qwen'\n",
         ".github/actions/layer7-deploy/action.yml": "# protected action contract\n",
     })
-    candidate = commit("third squash: final test only", {
+    commit("third squash: retained Eros Kamal identity contract", {
+        ".kamal/hooks/pre-app-boot": "# check retained component identity\n",
+        ".kamal/hooks/post-app-boot": "# verify retained component identity\n",
+        "tests/test_kamal_post_app_boot_hook.py": "# hook regression\n",
+    })
+    candidate = commit("fourth squash: final test only", {
         "tests/test_native_prepared_run.py": "# tip commit does not contain runtime paths\n",
     })
 
