@@ -37,6 +37,68 @@ def test_protected_full_mode_can_apply_only_exact_core_and_active_eros_config():
     assert "deploy_scope" not in action["inputs"]
 
 
+def test_narrow_apply_uses_live_eros_component_identity_and_restores_it_on_failure():
+    steps = _staging_steps()
+    scope = next(step for step in steps if step.get('id') == 'protected_scope')
+    assert '["roles"]["gpoint-eros-pilot-engine"]["source"]' in scope['run']
+    assert '"$engine_version" == "$engine_source_sha-"*' in scope['run']
+    assert 'engine_source_sha=%s' in scope['run']
+
+    deploy = next(step for step in steps if step.get('id') == 'deployment')
+    assert deploy['env']['ENGINE_SOURCE_SHA'] == '${{ steps.protected_scope.outputs.engine_source_sha }}'
+    assert deploy['env']['CANDIDATE_SHA'] == '${{ inputs.candidate_sha }}'
+    assert 'GPOINT_COMMIT_SHA="$CANDIDATE_SHA" GPOINT_APP_SOURCE_SHA="$ENGINE_SOURCE_SHA" GPOINT_KAMAL_OPERATION=retained' in deploy['run']
+    assert 'GPOINT_KAMAL_EXPECTED_SOURCE_SHA="$ENGINE_SOURCE_SHA" GPOINT_KAMAL_EXPECTED_VERSION="$ENGINE_VERSION"' in deploy['run']
+    assert 'restore_me36_config' in deploy['run']
+    assert 'LAYER7_EROS_CONFIG_RESTORED_AFTER_RESTART_FAILURE=PASS' in deploy['run']
+
+    rollback = next(step for step in steps if step.get('id') == 'me36_config_rollback')
+    assert rollback['env']['ENGINE_SOURCE_SHA'] == '${{ steps.protected_scope.outputs.engine_source_sha }}'
+    assert 'GPOINT_COMMIT_SHA="$CANDIDATE_SHA" GPOINT_APP_SOURCE_SHA="$ENGINE_SOURCE_SHA" GPOINT_KAMAL_OPERATION=retained' in rollback['run']
+    assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$ENGINE_DIGEST"' in rollback['run']
+    restore = deploy['run'].split("<<'RESTORE_CONFIG'", 1)[1].split('\n        RESTORE_CONFIG', 1)[0]
+    assert 'sha256sum "$backup"' in restore
+    assert 'mv -T -- "$temp" "$target"' in restore
+    assert 'sha256sum "$target"' in restore
+
+
+def test_failed_narrow_apply_restores_old_toml_before_restarting_exact_old_engine(tmp_path):
+    action = yaml.safe_load((ROOT / '.github/actions/layer7-deploy/action.yml').read_text())
+    deploy = next(step for step in action['runs']['steps'] if step.get('id') == 'deployment')['run']
+    restore_block = deploy.split("<<'RESTORE_CONFIG'\n", 1)[1].split('\nRESTORE_CONFIG\n', 1)[0]
+    old_text, candidate_text = 'old upstream model policy\n', 'candidate model config\n'
+    target, backup = tmp_path / 'active.toml', tmp_path / 'backup.toml'
+    target.write_text(candidate_text)
+    backup.write_text(old_text)
+    expected = __import__('hashlib').sha256(old_text.encode()).hexdigest()
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    (bindir / 'stat').write_text('#!/bin/sh\ncase "$2" in %u|%g) echo 0 ;; %a) echo 600 ;; *) exit 2 ;; esac\n')
+    (bindir / 'install').write_text(
+        '#!/bin/sh\nmode=600\nwhile [ "$#" -gt 0 ]; do\n'
+        '  case "$1" in -o|-g) shift 2 ;; -m) mode="$2"; shift 2 ;; *) break ;; esac\n'
+        'done\nexec /usr/bin/install -m "$mode" "$1" "$2"\n'
+    )
+    (bindir / 'mv').write_text('#!/bin/sh\ntest "$1" = -T; shift 2; /bin/mv "$1" "$2"\n')
+    (bindir / 'sync').write_text('#!/bin/sh\nexit 0\n')
+    for executable in bindir.iterdir():
+        executable.chmod(0o755)
+    script = tmp_path / 'restore.sh'
+    script.write_text(restore_block)
+    result = subprocess.run(['bash', str(script), str(backup), str(target), expected],
+                            env={**os.environ, 'PATH': f'{bindir}:{os.environ["PATH"]}'},
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert target.read_text() == old_text
+    assert backup.read_text() == old_text
+
+    restore_function = deploy.split('restore_me36_config() {', 1)[1].split('\n        }', 1)[0]
+    assert restore_function.index('RESTORE_CONFIG') < restore_function.index('GPOINT_KAMAL_OPERATION=retained')
+    assert 'GPOINT_APP_SOURCE_SHA="$ENGINE_SOURCE_SHA"' in restore_function
+    assert 'GPOINT_KAMAL_EXPECTED_VERSION="$ENGINE_VERSION"' in restore_function
+    assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$ENGINE_DIGEST"' in restore_function
+
+
 def test_staging_ssh_keeps_silent_transfers_alive_without_weakening_host_keys():
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text())
     text = '\n'.join(s.get('run', '') for s in _staging_steps())

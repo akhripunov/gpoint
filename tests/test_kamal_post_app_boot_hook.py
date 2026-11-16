@@ -12,11 +12,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CANDIDATE = "a" * 40
 APP_SOURCE = "b" * 40
-VERSION = f"{CANDIDATE}-42495781430-1"
+VERSION = f"{APP_SOURCE}-42495781430-1"
 HOST = "95.133.236.59"
 
 
 def _run_hook(tmp_path, service, roles=""):
+    app_source = APP_SOURCE if service == "gpoint-eros-pilot" else CANDIDATE
+    version = f"{app_source}-42495781430-1"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     args_file = tmp_path / "ssh-args"
@@ -38,9 +40,12 @@ def _run_hook(tmp_path, service, roles=""):
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "GPOINT_KAMAL_SERVICE": service,
-        "KAMAL_VERSION": VERSION,
+        "KAMAL_VERSION": version,
         "GPOINT_COMMIT_SHA": CANDIDATE,
-        "GPOINT_APP_SOURCE_SHA": APP_SOURCE,
+        "GPOINT_APP_SOURCE_SHA": app_source,
+        "GPOINT_KAMAL_OPERATION": "retained" if service == "gpoint-eros-pilot" else "candidate",
+        "GPOINT_KAMAL_EXPECTED_SOURCE_SHA": app_source,
+        "GPOINT_KAMAL_EXPECTED_VERSION": version,
         "KAMAL_HOSTS": HOST,
         "KAMAL_ROLES": roles,
         "GPOINT_SSH_KEY": str(key),
@@ -59,15 +64,15 @@ def _run_hook(tmp_path, service, roles=""):
 def test_eros_role_keeps_positional_arguments_when_no_network_is_attached(tmp_path):
     result, args, stdin = _run_hook(tmp_path, "gpoint-eros-pilot")
     assert result.returncode == 0, result.stderr
-    assert args[-6:] == ["gpoint-eros-pilot", "engine", VERSION, "-", CANDIDATE, APP_SOURCE]
+    assert args[-8:] == ["gpoint-eros-pilot", "engine", VERSION, "-", CANDIDATE, APP_SOURCE, "retained", APP_SOURCE]
     assert 'if [ "$networks" = "-" ]; then networks=""; fi' in stdin
 
 
 def test_core_role_still_passes_its_network_list(tmp_path):
     result, args, stdin = _run_hook(tmp_path, "gpoint-core", roles="api")
     assert result.returncode == 0, result.stderr
-    assert args[-6:] == [
-        "gpoint-core", "api", VERSION,
-        "gpoint_app:api,shared_internal:", CANDIDATE, APP_SOURCE,
+    assert args[-8:] == [
+        "gpoint-core", "api", f"{CANDIDATE}-42495781430-1",
+        "gpoint_app:api,shared_internal:", CANDIDATE, CANDIDATE, "candidate", CANDIDATE,
     ]
     assert 'if [ "$networks" = "-" ]; then networks=""; fi' in stdin
