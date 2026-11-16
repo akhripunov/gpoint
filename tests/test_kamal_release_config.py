@@ -906,10 +906,14 @@ def test_core_hook_binds_component_source_to_release_candidate_before_ssh(tmp_pa
 
 def test_component_identity_regression_is_in_mandatory_test_job_before_deploy():
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    tests_job = workflow["jobs"]["tests"]
+    assert tests_job["strategy"]["matrix"]["suite"] == ["workspace", "python", "release-tooling", "eros"]
     assert workflow["jobs"]["build"]["needs"] == ["tests"]
+    assert "needs.tests.result == 'success'" in workflow["jobs"]["build"]["if"]
     assert "tests" in workflow["jobs"]["deploy"]["needs"]
+    assert "needs.tests.result == 'success'" in workflow["jobs"]["deploy"]["if"]
     assert "tests/test_kamal_release_config.py" in " ".join(
-        step.get("run", "") for step in workflow["jobs"]["tests"]["steps"]
+        step.get("run", "") for step in tests_job["steps"]
     )
 
 
