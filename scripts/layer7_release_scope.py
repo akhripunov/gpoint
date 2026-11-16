@@ -40,6 +40,15 @@ RELEASE_PATHS = {
     "tests/test_native_prisma_apply_boundary.py",
     "docs/release/automation.md",
 }
+LAYER7_CORE_CONFIG_RELEASE_PATHS = {
+    ".github/actions/layer7-deploy/action.yml",
+    ".github/workflows/gpoint-layer7-staging.yml",
+    "scripts/native_release_intent.py",
+    "scripts/verify_native_prepared_run.py",
+    "tests/test_layer7_staging_workflow.py",
+    "tests/test_native_prepared_run.py",
+    "tests/test_native_release_intent.py",
+}
 CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
 
 # ME-36: the independent Eros v2.7.0 release (run 43699423688) advanced
@@ -150,7 +159,8 @@ def plan(repo, candidate, snapshot, *, previous=None, verify_schema=False):
         from native_release_intent import changed_paths
 
         subprocess.run(["git", "merge-base", "--is-ancestor", previous, candidate], cwd=repo, check=True)
-        if changed_paths(previous, candidate, repo=repo) - LAYER7_API_PATHS - EROS_MODEL_CONFIG_PATHS:
+        if (changed_paths(previous, candidate, repo=repo) - LAYER7_API_PATHS
+                - EROS_MODEL_CONFIG_PATHS - LAYER7_CORE_CONFIG_RELEASE_PATHS):
             raise ValueError("Layer7 push changed paths outside the Core API release scope")
     historical_start, historical_end, engine_digest = RECONCILED_LAYER7_RANGE
     engine = snapshot["roles"][ENGINE]
