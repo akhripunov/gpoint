@@ -136,6 +136,30 @@ def test_scope_uses_full_diff_from_every_running_role(tmp_path):
         plan(tmp_path, latest, mixed)
 
 
+def test_scope_allows_only_known_release_router_paths_alongside_core_config(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    base = commit(tmp_path, "base", "apps/api/src/eros-response-prompt.js", "old prompt")
+    staging = commit(tmp_path, "Layer7 staging readiness",
+                     ".github/workflows/gpoint-layer7-staging.yml", "readiness workflow")
+    action = commit(tmp_path, "Layer7 action", ".github/actions/layer7-deploy/action.yml", "action")
+    router = commit(tmp_path, "release router", "scripts/native_release_intent.py", "router")
+    verifier = commit(tmp_path, "prepared verifier", "scripts/verify_native_prepared_run.py", "verifier")
+    staging_test = commit(tmp_path, "staging workflow test",
+                          "tests/test_layer7_staging_workflow.py", "staging test")
+    prepared_test = commit(tmp_path, "prepared run test", "tests/test_native_prepared_run.py", "prepared test")
+    router_test = commit(tmp_path, "release router test", "tests/test_native_release_intent.py", "test")
+    config = commit(tmp_path, "active Eros config",
+                    "services/eros-engine/eros-layer7-staging-model-config.toml", "model = 'qwen'\n")
+    candidate = commit(tmp_path, "Core prompt", "apps/api/src/eros-response-prompt.js", "new prompt")
+    assert plan(tmp_path, candidate, inventory(base), previous=base) == ["CORE"]
+
+    worker = commit(tmp_path, "out-of-scope worker", "apps/worker/src/main.ts", "worker change")
+    with pytest.raises(ValueError, match="outside"):
+        plan(tmp_path, worker, inventory(base), previous=base)
+
+
 def test_scope_reconciles_only_the_verified_historical_layer7_range(tmp_path, monkeypatch):
     import layer7_release_scope as scope
 
