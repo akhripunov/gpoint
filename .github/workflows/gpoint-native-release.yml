@@ -757,6 +757,7 @@ jobs:
          needs.build.result == 'success' && needs.build.outputs.deploy_scope != 'NONE') ||
         (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
          needs.tests.result == 'success' && needs.tests.outputs.mode == 'LAYER7_API' &&
+         needs.tests.outputs.deploy == 'true' &&
          github.actor == github.repository_owner && github.triggering_actor == github.repository_owner &&
          needs.build.result == 'success' && needs.build.outputs.deploy_scope == 'CORE' &&
          needs.build.outputs.app_digest != '') ||

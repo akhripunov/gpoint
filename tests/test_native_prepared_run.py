@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 SPEC = importlib.util.spec_from_file_location(
     "native_prepared_run", ROOT / "scripts/verify_native_prepared_run.py"
 )
@@ -160,62 +161,133 @@ def test_layer7_eros_prepared_run_is_bound_to_one_image_and_skipped_production_d
         MODULE.verify_prepared_run(run, jobs, logs, sha, eros_digest, 1234, commit, layer7_eros=True)
 
 
-def test_bootstrap_full_build_allows_only_verified_core_subset_for_exact_layer7_core_config_scope():
-    run, jobs, _, sha, all_candidate_digests, _ = fixture()
-    core = {"CORE": all_candidate_digests["CORE"]}
-    commit = {"sha": sha, "commit": {"message": "ME-36 candidate\n\nGPOINT-ARTIFACT-PREPARE"},
-              "files": [
-                  {"filename": "apps/api/src/eros-response-prompt.js"},
-                  {"filename": "services/eros-engine/eros-layer7-staging-model-config.toml"},
-              ]}
+def test_layer7_readiness_uses_full_installed_sha_to_candidate_git_range_with_bootstrap_build(tmp_path):
+    import hashlib
+    import subprocess
+
+    from layer7_release_scope import REQUIRED_ROLES
+
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=tmp_path, text=True).strip()
+
+    def write(path, content):
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    def commit(message, changes):
+        for path, content in changes.items():
+            write(path, content)
+        git("add", "--all")
+        subprocess.run(["git", "commit", "-qm", message], cwd=tmp_path, check=True)
+        return git("rev-parse", "HEAD")
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    git("config", "user.name", "Layer7 test")
+    git("config", "user.email", "layer7@example.test")
+    migration = "CREATE TABLE fixture (id integer);\n"
+    migration_sha = hashlib.sha256(migration.encode()).hexdigest()
+    installed = commit("installed Layer7 baseline", {
+        "apps/api/src/eros-response-prompt.js": "export default 'old';\n",
+        "services/eros-engine/eros-layer7-staging-model-config.toml": "model = 'old'\n",
+        "packages/db/prisma/migrations/20261116000000_fixture/migration.sql": migration,
+    })
+    commit("first squash: prompt and tests", {
+        "apps/api/src/eros-response-prompt.js": "export default 'candidate';\n",
+        "tests/test_layer7_staging_workflow.py": "# source change from first PR\n",
+    })
+    commit("second squash: operational config", {
+        "services/eros-engine/eros-layer7-staging-model-config.toml": "model = 'qwen'\n",
+        ".github/actions/layer7-deploy/action.yml": "# protected action contract\n",
+    })
+    candidate = commit("third squash: final test only", {
+        "tests/test_native_prepared_run.py": "# tip commit does not contain runtime paths\n",
+    })
+
+    roles = {
+        role: {"source": installed, "container": "a" * 64, "image": "sha256:" + "b" * 64,
+               "digest": "sha256:" + "c" * 64, "version": installed + "-1-1", "restarts": "0"}
+        for role in REQUIRED_ROLES
+    }
+    snapshot = {
+        "roles": roles, "prisma": ["20261116000000_fixture=" + migration_sha],
+        "sqlx": ["1=" + "e" * 96],
+        "database": {"postgres": "f" * 64, "redis": "1" * 64},
+    }
     all_digests = {name: "sha256:" + char * 64 for name, char in
                    (("CORE", "b"), ("AGATA", "d"), ("MINIAPP", "e"), ("EROS", "f"))}
-    logs = "\n".join(
+    full_build_logs = "\n".join(
         f"GPOINT_IMAGE_DIGEST {name} {MODULE.REPOSITORIES[name]}@{digest}"
         for name, digest in all_digests.items()
     ).encode()
-    assert MODULE.verify_prepared_run(run, jobs, logs, sha, core, 1234, commit,
-                                      layer7_core_config=True) == (99, sha + "-1234-2")
-    with pytest.raises(ValueError, match="do not match"):
-        MODULE.verify_prepared_run(run, jobs, logs, sha, core, 1234, commit)
+    run, jobs, _, _, _, _ = fixture()
+    run.update(id=1234, head_sha=candidate, run_attempt=2)
+    commit_payload = {"sha": candidate, "commit": {"message": "ME-59 candidate\nGPOINT-ARTIFACT-PREPARE"},
+                     # Deliberately reflects only the tip squash commit and is not trusted for scope.
+                     "files": [{"filename": "tests/test_native_prepared_run.py"}]}
 
+    result = MODULE.verify_prepared_run(
+        run, jobs, full_build_logs, candidate, {"CORE": all_digests["CORE"]}, 1234,
+        commit_payload, layer7_core_config=True, layer7_inventory=snapshot, repo=tmp_path,
+    )
+    assert result == (99, candidate + "-1234-2")
+    assert MODULE.verify_prepared_run(
+        run, jobs, full_build_logs, candidate, {"CORE": all_digests["CORE"]}, 1234,
+        commit_payload, layer7_core_config=True, layer7_inventory=snapshot, repo=tmp_path,
+    ) == result
 
-def test_layer7_core_config_subset_rejects_wrong_sha_digest_scope_and_duplicates():
-    run, jobs, _, sha, digests, _ = fixture()
-    core = {"CORE": digests["CORE"]}
-    commit = {"sha": sha, "commit": {"message": "ME-36 candidate\n\nGPOINT-ARTIFACT-PREPARE"},
-              "files": [
-                  {"filename": "apps/api/src/eros-response-prompt.js"},
-                  {"filename": "services/eros-engine/eros-layer7-staging-model-config.toml"},
-              ]}
-    line = f"GPOINT_IMAGE_DIGEST CORE {MODULE.REPOSITORIES['CORE']}@{digests['CORE']}\n"
-    assert MODULE.verify_prepared_run(run, jobs, line.encode(), sha, core, 1234, commit,
-                                      layer7_core_config=True)
-    with pytest.raises(ValueError, match="commit payload SHA"):
-        MODULE.verify_prepared_run(run, jobs, line.encode(), sha, core, 1234,
-                                   dict(commit, sha="d" * 40), layer7_core_config=True)
-    with pytest.raises(ValueError, match="Core/config-only"):
-        MODULE.verify_prepared_run(run, jobs, line.encode(), sha, core, 1234,
-                                   commit, layer7_core_config=True, layer7_eros=True)
     with pytest.raises(ValueError, match="do not match"):
-        MODULE.verify_prepared_run(run, jobs, line.replace(digests["CORE"], "sha256:" + "d" * 64).encode(),
-                                   sha, core, 1234, commit, layer7_core_config=True)
-    commit["files"].append({"filename": "apps/worker/src/main.ts"})
-    with pytest.raises(ValueError, match="Core/config-only"):
-        MODULE.verify_prepared_run(run, jobs, line.encode(), sha, core, 1234,
-                                   commit, layer7_core_config=True)
-    commit["files"].pop()
-    with pytest.raises(ValueError, match="duplicate"):
-        MODULE.verify_prepared_run(run, jobs, (line + line).encode(), sha, core, 1234,
-                                   commit, layer7_core_config=True)
-    wrong_repository = line.replace(MODULE.REPOSITORIES["CORE"], MODULE.REPOSITORIES["AGATA"])
+        MODULE.verify_prepared_run(
+            run, jobs, full_build_logs, candidate, {"CORE": "sha256:" + "a" * 64}, 1234,
+            commit_payload, layer7_core_config=True, layer7_inventory=snapshot, repo=tmp_path,
+        )
+    with pytest.raises(ValueError, match="exact lowercase Git SHA"):
+        MODULE.verify_prepared_run(
+            run, jobs, full_build_logs, "not-a-sha", {"CORE": all_digests["CORE"]}, 1234,
+            commit_payload, layer7_core_config=True, layer7_inventory=snapshot, repo=tmp_path,
+        )
+    with pytest.raises(ValueError, match="exact SHA"):
+        MODULE.verify_prepared_run(
+            run, jobs, full_build_logs, "d" * 40, {"CORE": all_digests["CORE"]}, 1234,
+            commit_payload, layer7_core_config=True, layer7_inventory=snapshot, repo=tmp_path,
+        )
+    with pytest.raises(ValueError, match="digest map is malformed"):
+        MODULE.verify_prepared_run(
+            run, jobs, full_build_logs, candidate, ["CORE"], 1234,
+            commit_payload, layer7_core_config=True, layer7_inventory=snapshot, repo=tmp_path,
+        )
     with pytest.raises(ValueError, match="invalid or duplicate digest"):
-        MODULE.verify_prepared_run(run, jobs, wrong_repository.encode(), sha, core, 1234,
-                                   commit, layer7_core_config=True)
-    with pytest.raises(ValueError, match="malformed digest"):
-        MODULE.verify_prepared_run(run, jobs, b"GPOINT_IMAGE_DIGEST UNKNOWN ghcr.io/example/image@sha256:abc\n",
-                                   sha, core, 1234, commit, layer7_core_config=True)
-    with pytest.raises(ValueError, match="Core/config-only"):
-        MODULE.verify_prepared_run(run, jobs, line.encode(), sha,
-                                   {"CORE": core["CORE"], "EROS": digests["EROS"]}, 1234,
-                                   commit, layer7_core_config=True)
+        bad_repository_logs = full_build_logs.replace(
+            MODULE.REPOSITORIES["CORE"].encode(), MODULE.REPOSITORIES["AGATA"].encode(), 1
+        )
+        MODULE.verify_prepared_run(
+            run, jobs, bad_repository_logs, candidate, {"CORE": all_digests["CORE"]}, 1234,
+            commit_payload, layer7_core_config=True, layer7_inventory=snapshot, repo=tmp_path,
+        )
+
+    for path, label in (("apps/worker/src/main.ts", "Worker"),
+                        ("apps/miniapp/src/main.tsx", "Mini App"),
+                        ("services/agata/api/main.py", "AGATA")):
+        subprocess.run(["git", "checkout", "-q", "-B", "off-scope-test", candidate],
+                       cwd=tmp_path, check=True)
+        off_scope = commit(f"off-scope {label} change", {path: "changed\n"})
+        off_scope_run = dict(run, head_sha=off_scope)
+        off_scope_payload = dict(commit_payload, sha=off_scope)
+        with pytest.raises(ValueError, match="outside"):
+            MODULE.verify_prepared_run(
+                off_scope_run, jobs, full_build_logs, off_scope,
+                {"CORE": all_digests["CORE"]}, 1234,
+                off_scope_payload, layer7_core_config=True,
+                layer7_inventory=snapshot, repo=tmp_path,
+            )
+
+    subprocess.run(["git", "checkout", "-q", candidate], cwd=tmp_path, check=True)
+
+    unknown_inventory = json.loads(json.dumps(snapshot))
+    unknown_inventory["roles"]["gpoint-untracked-service"] = dict(roles["gpoint-core-api"])
+    with pytest.raises(ValueError, match="role inventory differs"):
+        MODULE.verify_prepared_run(
+            run, jobs, full_build_logs, candidate, {"CORE": all_digests["CORE"]}, 1234,
+            commit_payload, layer7_core_config=True,
+            layer7_inventory=unknown_inventory, repo=tmp_path,
+        )

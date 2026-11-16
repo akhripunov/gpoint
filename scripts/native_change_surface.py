@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from native_release_intent import _path_kind  # noqa: E402
+from native_release_intent import _path_kind, git_diff_entries  # noqa: E402
 
 # Paths that change what the stock Eros image or its local E2E harness runs.
 EROS_RUNTIME_PREFIXES = (
@@ -97,25 +97,7 @@ def classify(paths) -> dict:
 
 
 def changed_paths(base: str, head: str) -> list:
-    output = subprocess.run(
-        ["git", "diff", "--name-status", "--no-renames", base, head],
-        check=True, capture_output=True, text=True,
-    ).stdout
-    renamed = subprocess.run(
-        ["git", "diff", "--name-status", "-M", base, head],
-        check=True, capture_output=True, text=True,
-    ).stdout
-    paths = set()
-    for line in output.splitlines():
-        parts = line.split("\t")
-        if len(parts) >= 2 and parts[1].strip():
-            paths.add(parts[1].strip())
-    for line in renamed.splitlines():
-        parts = line.split("\t")
-        if parts and parts[0].startswith("R") and len(parts) >= 3:
-            paths.add(parts[1].strip())
-            paths.add(parts[2].strip())
-    return sorted(paths)
+    return sorted({path for _status, path in git_diff_entries(base, head)})
 
 
 def main() -> int:
@@ -132,7 +114,7 @@ def main() -> int:
         try:
             surface = classify(changed_paths(args.base, args.head))
             surface["reason"] = "diff"
-        except subprocess.CalledProcessError as error:
+        except (subprocess.CalledProcessError, ValueError) as error:
             print(f"native_change_surface: {error}", file=sys.stderr)
             surface = classify([])
             surface["reason"] = "diff failed: full suite"

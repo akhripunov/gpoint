@@ -8,7 +8,42 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from layer7_release_scope import API, REQUIRED_ROLES, plan, verify_runtime
-from native_release_intent import ARTIFACT_PREPARE_PATHS, classify_push
+from native_release_intent import ARTIFACT_PREPARE_PATHS, LAYER7_CORE_CONFIG_TOOLING_PATHS, classify_push
+
+
+def test_core_config_release_tooling_uses_one_shared_target_allowlist():
+    source = (ROOT / "scripts/layer7_release_scope.py").read_text()
+    assert "LAYER7_CORE_CONFIG_TOOLING_PATHS" in source
+    assert "LAYER7_CORE_CONFIG_RELEASE_PATHS =" not in source
+    assert "CORE_CONFIG_REQUIRED_PATHS =" not in source
+    assert "LAYER7_API_PREPARE_TOOLING_PATHS =" not in (ROOT / "scripts/native_release_intent.py").read_text()
+    assert {
+        ".github/actions/layer7-deploy/action.yml",
+        ".github/workflows/gpoint-layer7-staging.yml",
+        ".github/workflows/gpoint-native-release.yml",
+        "docs/release/automation.md",
+        "scripts/layer7_release_scope.py",
+        "scripts/native_change_surface.py",
+        "scripts/native_release_intent.py",
+        "scripts/verify_native_prepared_run.py",
+        "tests/test_kamal_native_automatic_release.py",
+        "tests/test_kamal_release_config.py",
+        "tests/test_layer7_release_scope.py",
+        "tests/test_layer7_staging_workflow.py",
+        "tests/test_native_build_boundary.py",
+        "tests/test_native_change_surface.py",
+        "tests/test_native_prepared_run.py",
+        "tests/test_native_prisma_apply_boundary.py",
+        "tests/test_native_release_intent.py",
+    } <= LAYER7_CORE_CONFIG_TOOLING_PATHS
+    assert classify_push(
+        event_name="push", ref="refs/heads/main",
+        changed_paths=set(LAYER7_CORE_CONFIG_TOOLING_PATHS),
+    ) == "LAYER7_API"
+    assert classify_push(
+        event_name="push", ref="refs/heads/main",
+        changed_paths=set(LAYER7_CORE_CONFIG_TOOLING_PATHS) | {"apps/worker/src/main.ts"},
+    ) == "BLOCK"
 
 
 def commit(repo, message, path, content):
@@ -121,8 +156,7 @@ def test_scope_uses_full_diff_from_every_running_role(tmp_path):
                    "network: [shared_internal, gpoint_eros_api, gpoint_eros_embeddings]\n")
     assert plan(tmp_path, config, inventory(adapter), previous=adapter) == ["CORE"]
     tooling = commit(tmp_path, "tooling", ".github/workflows/gpoint-native-release.yml", "updated")
-    with pytest.raises(ValueError, match="outside"):
-        plan(tmp_path, tooling, inventory(base), previous=base)
+    assert plan(tmp_path, tooling, inventory(base), previous=base) == ["CORE"]
     prompt = commit(tmp_path, "prompt", "apps/api/src/eros-response-prompt.js", "b2")
     assert plan(tmp_path, prompt, inventory(base), previous=tooling) == ["CORE"]
     assert plan(tmp_path, prompt, inventory(prompt)) == []
@@ -228,36 +262,32 @@ def test_verification_allows_only_an_eros_container_restart_with_the_same_image(
                        eros_config_update=True)
 
 
-def test_auto_workflow_is_branch_restricted_and_only_mutates_api():
+def test_layer7_core_api_apply_uses_the_existing_protected_environment_and_stock_kamal():
     import yaml
 
     native = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())["jobs"]
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text())
     layer7 = workflow["jobs"]["layer7_staging"]
     deploy = native["deploy"]
-    action = next(step for step in deploy["steps"]
-                  if step.get("uses") == "./.github/actions/layer7-deploy")
-    assert action["with"]["prepared_app_digest"] == "${{ needs.build.outputs.app_digest }}"
     assert native["build"]["needs"] == ["tests"]
     assert layer7["environment"]["name"] == "layer7-staging"
     assert "workflow_call" not in workflow[True]
     assert "STAGING_ENV_BUNDLE" not in layer7["env"]
     assert layer7["concurrency"]["group"] == "gpoint-layer7-staging"
-    assert "github.triggering_actor == github.repository_owner" in deploy["if"]
     assert "github.event_name == 'push'" in deploy["if"]
+    assert "needs.tests.outputs.mode == 'LAYER7_API'" in deploy["if"]
+    assert "github.actor == github.repository_owner" in deploy["if"]
+    assert "github.triggering_actor == github.repository_owner" in deploy["if"]
+    assert deploy["environment"]["name"] == "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}"
+    assert deploy["concurrency"]["group"] == "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'gpoint-layer7-staging' || 'gpoint-production-release' }}"
     steps = yaml.safe_load((ROOT / ".github/actions/layer7-deploy/action.yml").read_text())["runs"]["steps"]
-    preflight = next(step for step in steps if step.get("id") == "scoped")
-    assert preflight["if"] == "github.event_name == 'push'"
-    scope = preflight["run"]
-    assert "/environments/layer7-api-auto" in scope
-    assert '"$environment/deployment-branch-policies"' in scope
-    assert '[("main", "branch")]' in scope
-    assert "custom_branch_policies" in scope
-    assert 'rules != ["branch_policy"]' in scope
-    assert scope.index('gh api "$environment"') < scope.index("scripts/layer7-transport.sh ssh")
-    assert scope.count("python3 - collect") == 1
-    assert "python3 scripts/layer7_release_scope.py plan" in scope
-    assert all("python3 - collect" not in step.get("run", "") for step in deploy["steps"])
+    assert not any(step.get("id") == "scoped" for step in steps)
+    scope = next(step for step in steps if step.get("id") == "protected_scope")
+    assert "github.event_name == 'push'" in scope["if"]
+    assert "repos/$GITHUB_REPOSITORY/environments/layer7-api-auto" in scope["run"]
+    assert '"$environment/deployment-branch-policies"' in scope["run"]
+    assert "layer7_release_scope.py paths" in scope["run"]
+    assert "PREVIOUS_SHA: ${{ github.event.before }}" not in str(scope.get("env", {}))
     for title in ("Apply isolated Prisma and SQLx migrations with recovery gates",
                   "Install staging secrets and provision only the empty GPoint staging database",
                   "Layer7 staging preflight and isolated GPoint schema bootstrap"):

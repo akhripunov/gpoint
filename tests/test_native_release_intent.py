@@ -196,6 +196,40 @@ def test_layer7_api_route_change_cannot_fall_through_to_production_deploy():
     ) == "ARTIFACT_PREPARE"
 
 
+def test_layer7_release_tooling_builds_core_but_does_not_auto_apply():
+    paths = {
+        ".github/actions/layer7-deploy/action.yml",
+        ".github/workflows/gpoint-native-release.yml",
+        "docs/release/automation.md",
+        "scripts/layer7_release_scope.py",
+        "scripts/native_change_surface.py",
+        "scripts/native_release_intent.py",
+        "scripts/verify_native_prepared_run.py",
+        "tests/test_kamal_native_automatic_release.py",
+        "tests/test_kamal_release_config.py",
+        "tests/test_layer7_release_scope.py",
+        "tests/test_layer7_staging_workflow.py",
+        "tests/test_native_build_boundary.py",
+        "tests/test_native_change_surface.py",
+        "tests/test_native_prepared_run.py",
+        "tests/test_native_prisma_apply_boundary.py",
+        "tests/test_native_release_intent.py",
+    }
+    mode = MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths=paths,
+    )
+    assert mode == "LAYER7_API"
+    assert not MODULE.push_deploy_authorized(mode=mode, changed_paths=paths)
+    assert MODULE.push_deploy_authorized(
+        mode="LAYER7_API",
+        changed_paths={"apps/api/src/eros-response-prompt.js",
+                       "services/eros-engine/eros-layer7-staging-model-config.toml"},
+    )
+    assert MODULE.push_deploy_authorized(
+        mode="DEPLOY", changed_paths={"apps/api/src/main.ts"},
+    )
+
+
 def test_layer7_eros_adapter_source_uses_only_the_explicit_api_route():
     paths = {
         "apps/api/src/eros-adapter.ts",
