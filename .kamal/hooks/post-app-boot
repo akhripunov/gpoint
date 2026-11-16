@@ -8,6 +8,12 @@ app_source_sha="${GPOINT_APP_SOURCE_SHA:?GPOINT_APP_SOURCE_SHA is required}"
 operation="${GPOINT_KAMAL_OPERATION:-candidate}"
 expected_source_sha="${GPOINT_KAMAL_EXPECTED_SOURCE_SHA:-$app_source_sha}"
 expected_version="${GPOINT_KAMAL_EXPECTED_VERSION:-$version}"
+if [ "$operation" = retained ]; then
+  test -n "${GPOINT_KAMAL_EXPECTED_SOURCE_SHA:-}" && test -n "${GPOINT_KAMAL_EXPECTED_VERSION:-}" || {
+    echo 'Retained Eros requires inventory-verified source SHA and version' >&2
+    exit 1
+  }
+fi
 hosts="${KAMAL_HOSTS:?KAMAL_HOSTS is required}"
 roles="${KAMAL_ROLES:-}"
 ssh_key="${GPOINT_SSH_KEY:?GPOINT_SSH_KEY is required}"
@@ -29,9 +35,6 @@ case "$operation" in
   retained)
     test "$service" = gpoint-eros-pilot || { echo 'Retained-image operation is permitted only for the Eros engine' >&2; exit 1; }
     case "$version" in "$expected_source_sha"-*) ;; *) echo 'Retained Eros version is not bound to its verified source SHA' >&2; exit 1 ;; esac
-    ;;
-  rollback)
-    case "$version" in "$expected_source_sha"-*) ;; *) echo 'Rollback image version is not bound to its verified source SHA' >&2; exit 1 ;; esac
     ;;
   *) echo 'Unknown Kamal component operation' >&2; exit 1 ;;
 esac

@@ -852,18 +852,24 @@ def test_pre_app_boot_accepts_verified_retained_eros_image_but_rejects_identity_
         tool.chmod(0o755)
 
     def run(*, actual_source=engine_source, actual_version=version, actual_ref=f"{repository}@{digest}",
-            app_source=engine_source):
+            app_source=engine_source, inventory_bound=True):
         env = os.environ.copy()
         env.update({
             "PATH": f"{bin_dir}:{env['PATH']}", "GPOINT_KAMAL_SERVICE": "gpoint-eros-pilot",
             "KAMAL_VERSION": actual_version, "GPOINT_COMMIT_SHA": candidate,
             "GPOINT_APP_SOURCE_SHA": app_source, "GPOINT_KAMAL_EXPECTED_DIGEST": digest,
-            "GPOINT_KAMAL_OPERATION": "retained", "GPOINT_KAMAL_EXPECTED_SOURCE_SHA": engine_source,
-            "GPOINT_KAMAL_EXPECTED_VERSION": version,
             "KAMAL_HOSTS": "127.0.0.1", "GPOINT_SSH_KEY": str(key),
             "GPOINT_KNOWN_HOSTS_FILE": str(known), "TEST_SOURCE": actual_source, "TEST_REF": actual_ref,
             "TEST_DOCKER_LOG": str(tmp_path / "docker.log"),
         })
+        if inventory_bound:
+            env["GPOINT_KAMAL_OPERATION"] = "retained"
+            env["GPOINT_KAMAL_EXPECTED_SOURCE_SHA"] = engine_source
+            env["GPOINT_KAMAL_EXPECTED_VERSION"] = version
+        else:
+            env["GPOINT_KAMAL_OPERATION"] = "retained"
+            env.pop("GPOINT_KAMAL_EXPECTED_SOURCE_SHA", None)
+            env.pop("GPOINT_KAMAL_EXPECTED_VERSION", None)
         return subprocess.run(["sh", str(ROOT / ".kamal/hooks/pre-app-boot")], env=env,
                               capture_output=True, text=True)
 
@@ -872,6 +878,7 @@ def test_pre_app_boot_accepts_verified_retained_eros_image_but_rejects_identity_
     assert run(actual_source="e" * 40).returncode != 0
     assert run(actual_version=f"{candidate}-43698686567-1").returncode != 0
     assert run(actual_ref=f"{repository}@sha256:" + "c" * 64).returncode != 0
+    assert run(inventory_bound=False).returncode != 0
 
 
 def test_core_hook_binds_component_source_to_release_candidate_before_ssh(tmp_path):
