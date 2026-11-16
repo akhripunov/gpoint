@@ -103,6 +103,27 @@ def test_known_operational_or_test_only_main_push_uses_the_same_release():
         ) == "DEPLOY"
 
 
+def test_component_identity_infrastructure_pr_is_test_only_until_main_push():
+    paths = {
+        ".kamal/hooks/pre-app-boot", ".kamal/hooks/post-app-boot",
+        ".github/actions/layer7-deploy/action.yml",
+        "scripts/native_release_intent.py",
+        "tests/test_kamal_release_config.py", "tests/test_kamal_post_app_boot_hook.py",
+        "tests/test_layer7_staging_workflow.py",
+    }
+    assert MODULE.classify_push(
+        event_name="pull_request", ref="refs/pull/999/merge", changed_paths=paths,
+    ) == "NO_DEPLOY"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths=paths,
+    ) == "NO_DEPLOY"
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    deploy = workflow.split("  deploy:\n", 1)[1].split("  backup_maintenance:\n", 1)[0]
+    assert "github.event_name == 'push'" in deploy
+    assert "github.ref == 'refs/heads/main'" in deploy
+    assert "github.event_name == 'pull_request'" not in deploy
+
+
 def test_app_and_release_files_can_ship_together_in_one_authorized_main_push():
     for changed_paths in (
         {"apps/api/src/main.ts", ".github/workflows/gpoint-native-release.yml"},

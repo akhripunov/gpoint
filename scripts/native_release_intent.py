@@ -432,6 +432,18 @@ def classify_push(*, event_name: str, ref: str,
     kinds = {_path_kind(path) for path in changed_paths}
     if "schema" in kinds or "unknown" in kinds:
         return "BLOCK"
+    kamal_component_contract_paths = {
+        ".kamal/hooks/pre-app-boot", ".kamal/hooks/post-app-boot",
+        ".github/actions/layer7-deploy/action.yml",
+        "scripts/native_release_intent.py",
+        "tests/test_kamal_release_config.py", "tests/test_kamal_post_app_boot_hook.py",
+        "tests/test_layer7_staging_workflow.py", "tests/test_native_release_intent.py",
+    }
+    if (".github/actions/layer7-deploy/action.yml" in changed_paths
+            and changed_paths <= kamal_component_contract_paths):
+        # This safety-contract fix must pass hosted TEST before any separately
+        # authorized Layer7 release; merging it alone must not deploy public prod.
+        return "NO_DEPLOY"
     markers = set(commit_message.splitlines())
     if (".github/workflows/gpoint-layer7-staging.yml" in changed_paths
             and LAYER7_EROS_MARKER not in markers

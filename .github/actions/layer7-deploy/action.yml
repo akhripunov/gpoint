@@ -214,15 +214,17 @@ runs:
           sha256sum /opt/gpoint/env/eros-layer7-staging-model-config.toml | awk '{print $1}')"
         test "$actual" = "$expected"
         engine_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["roles"]["gpoint-eros-pilot-engine"]["version"])' "$baseline")"
+        engine_source_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["roles"]["gpoint-eros-pilot-engine"]["source"])' "$baseline")"
+        [[ "$engine_source_sha" =~ ^[0-9a-f]{40}$ && "$engine_version" == "$engine_source_sha-"* ]]
         test "$engine_version" = "$KAMAL_ENGINE_VERSION"
         api_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["roles"]["gpoint-core-api"]["version"])' "$baseline")"
         test "$api_version" = "$KAMAL_API_VERSION"
         engine_digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["roles"]["gpoint-eros-pilot-engine"]["digest"])' "$baseline")"
         [[ "$engine_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
         bot_enabled="$(python3 -c 'import json,sys; print(str("gpoint-core-bot" in json.load(open(sys.argv[1]))["roles"]).lower())' "$baseline")"
-        printf 'narrow=true\nscoped=true\nimage_version=%s\nengine_version=%s\nengine_digest=%s\nprevious_config_sha=%s\nbot_enabled=%s\n' \
+        printf 'narrow=true\nscoped=true\nimage_version=%s\nengine_version=%s\nengine_source_sha=%s\nengine_digest=%s\nprevious_config_sha=%s\nbot_enabled=%s\n' \
           "$SCOPED_IMAGE_VERSION" \
-          "$engine_version" "$engine_digest" "$actual" "$bot_enabled" >> "$GITHUB_OUTPUT"
+          "$engine_version" "$engine_source_sha" "$engine_digest" "$actual" "$bot_enabled" >> "$GITHUB_OUTPUT"
         echo "plan_file=$plan" >> "$GITHUB_OUTPUT"
         scripts/layer7-transport.sh ssh "root@$GPOINT_LAYER7_STAGING_HOST" bash -s <<'BACKUP_PREFLIGHT'
         set -euo pipefail
@@ -355,6 +357,7 @@ runs:
         BASELINE_PATH: ${{ runner.temp }}/layer7-verified-baseline.json
         PLAN_PATH: ${{ steps.protected_scope.outputs.plan_file }}
         ENGINE_VERSION: ${{ steps.protected_scope.outputs.engine_version }}
+        ENGINE_SOURCE_SHA: ${{ steps.protected_scope.outputs.engine_source_sha }}
         ENGINE_DIGEST: ${{ steps.protected_scope.outputs.engine_digest }}
       shell: bash
       run: |
@@ -703,6 +706,7 @@ runs:
       if: inputs.mode == 'full'
       id: deployment
       env:
+        CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.protected_scope.outputs.image_version }}
         CORE_DIGEST: ${{ inputs.prepared_app_digest }}
         MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
@@ -710,6 +714,7 @@ runs:
         SCOPED: ${{ steps.protected_scope.outputs.scoped == 'true' }}
         NARROW_SCOPE: ${{ steps.protected_scope.outputs.narrow }}
         ENGINE_VERSION: ${{ steps.protected_scope.outputs.engine_version }}
+        ENGINE_SOURCE_SHA: ${{ steps.protected_scope.outputs.engine_source_sha }}
         ENGINE_DIGEST: ${{ steps.protected_scope.outputs.engine_digest }}
         PREVIOUS_CONFIG_SHA: ${{ steps.protected_scope.outputs.previous_config_sha }}
         STAGING_BOT_ENABLED: ${{ steps.staging_env.outputs.bot_enabled || steps.protected_scope.outputs.bot_enabled }}
@@ -739,7 +744,9 @@ runs:
         sync -f "$(dirname "$target")"
         test "$(sha256sum "$target" | awk '{print $1}')" = "$expected"
         RESTORE_CONFIG
-          GPOINT_KAMAL_EXPECTED_DIGEST="$ENGINE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
+          GPOINT_COMMIT_SHA="$CANDIDATE_SHA" GPOINT_APP_SOURCE_SHA="$ENGINE_SOURCE_SHA" GPOINT_KAMAL_OPERATION=retained \
+            GPOINT_KAMAL_EXPECTED_SOURCE_SHA="$ENGINE_SOURCE_SHA" GPOINT_KAMAL_EXPECTED_VERSION="$ENGINE_VERSION" \
+            GPOINT_KAMAL_EXPECTED_DIGEST="$ENGINE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
             kamal redeploy --skip-push --version "$ENGINE_VERSION" --roles engine --config-file config/deploy.layer7-staging.eros.yml
         }
         if [[ "$SCOPED" != true ]]; then
@@ -833,7 +840,9 @@ runs:
         sync -f "$(dirname "$target")"
         test "$(sha256sum "$target" | awk '{print $1}')" = "$expected"
         APPLY_CONFIG
-          if ! GPOINT_KAMAL_EXPECTED_DIGEST="$ENGINE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
+          if ! GPOINT_COMMIT_SHA="$CANDIDATE_SHA" GPOINT_APP_SOURCE_SHA="$ENGINE_SOURCE_SHA" GPOINT_KAMAL_OPERATION=retained \
+            GPOINT_KAMAL_EXPECTED_SOURCE_SHA="$ENGINE_SOURCE_SHA" GPOINT_KAMAL_EXPECTED_VERSION="$ENGINE_VERSION" \
+            GPOINT_KAMAL_EXPECTED_DIGEST="$ENGINE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
             kamal redeploy --skip-push --version "$ENGINE_VERSION" --roles engine --config-file config/deploy.layer7-staging.eros.yml; then
             restore_me36_config
             echo 'LAYER7_EROS_CONFIG_RESTORED_AFTER_RESTART_FAILURE=PASS' >&2
@@ -1064,8 +1073,10 @@ runs:
       id: me36_config_rollback
       if: always() && steps.protected_scope.outputs.narrow == 'true' && steps.deployment.outcome == 'success' && steps.runtime_verify.outcome == 'failure'
       env:
+        CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         CORE_VERSION: ${{ steps.prepared.outputs.image_version }}
         ENGINE_VERSION: ${{ steps.protected_scope.outputs.engine_version }}
+        ENGINE_SOURCE_SHA: ${{ steps.protected_scope.outputs.engine_source_sha }}
         ENGINE_DIGEST: ${{ steps.protected_scope.outputs.engine_digest }}
         PREVIOUS_CONFIG_SHA: ${{ steps.protected_scope.outputs.previous_config_sha }}
         CORE_DIGEST: ${{ inputs.prepared_app_digest }}
@@ -1090,7 +1101,9 @@ runs:
         sync -f "$(dirname "$target")"
         test "$(sha256sum "$target" | awk '{print $1}')" = "$previous"
         RESTORE
-        GPOINT_KAMAL_EXPECTED_DIGEST="$ENGINE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
+        GPOINT_COMMIT_SHA="$CANDIDATE_SHA" GPOINT_APP_SOURCE_SHA="$ENGINE_SOURCE_SHA" GPOINT_KAMAL_OPERATION=retained \
+          GPOINT_KAMAL_EXPECTED_SOURCE_SHA="$ENGINE_SOURCE_SHA" GPOINT_KAMAL_EXPECTED_VERSION="$ENGINE_VERSION" \
+          GPOINT_KAMAL_EXPECTED_DIGEST="$ENGINE_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
           kamal redeploy --skip-push --version "$ENGINE_VERSION" --roles engine --config-file config/deploy.layer7-staging.eros.yml
         previous_api_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["roles"]["gpoint-core-api"]["version"])' "$RUNNER_TEMP/layer7-verified-baseline.json")"
         previous_api_source="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["roles"]["gpoint-core-api"]["source"])' "$RUNNER_TEMP/layer7-verified-baseline.json")"

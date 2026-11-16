@@ -5,6 +5,15 @@ service="${GPOINT_KAMAL_SERVICE:?GPOINT_KAMAL_SERVICE is required}"
 version="${KAMAL_VERSION:?KAMAL_VERSION is required}"
 candidate="${GPOINT_COMMIT_SHA:?GPOINT_COMMIT_SHA is required}"
 app_source_sha="${GPOINT_APP_SOURCE_SHA:?GPOINT_APP_SOURCE_SHA is required}"
+operation="${GPOINT_KAMAL_OPERATION:-candidate}"
+expected_source_sha="${GPOINT_KAMAL_EXPECTED_SOURCE_SHA:-$app_source_sha}"
+expected_version="${GPOINT_KAMAL_EXPECTED_VERSION:-$version}"
+if [ "$operation" = retained ]; then
+  test -n "${GPOINT_KAMAL_EXPECTED_SOURCE_SHA:-}" && test -n "${GPOINT_KAMAL_EXPECTED_VERSION:-}" || {
+    echo 'Retained Eros requires inventory-verified source SHA and version' >&2
+    exit 1
+  }
+fi
 hosts="${KAMAL_HOSTS:?KAMAL_HOSTS is required}"
 roles="${KAMAL_ROLES:-}"
 ssh_key="${GPOINT_SSH_KEY:?GPOINT_SSH_KEY is required}"
@@ -14,8 +23,21 @@ case ",$hosts," in *,"$target_host",*) ;; *) echo 'Kamal target host is outside 
 
 printf '%s\n' "$candidate" | grep -Eq '^[0-9a-f]{40}$'
 printf '%s\n' "$app_source_sha" | grep -Eq '^[0-9a-f]{40}$'
-case "$version" in "$candidate"-*) ;; *) echo 'Kamal version is not bound to the candidate SHA' >&2; exit 1 ;; esac
 printf '%s\n' "$version" | grep -Eq '^[0-9a-f]{40}-[0-9]+-[0-9]+$'
+printf '%s\n' "$expected_source_sha" | grep -Eq '^[0-9a-f]{40}$'
+test "$version" = "$expected_version" || { echo 'Kamal version differs from the verified component version' >&2; exit 1; }
+test "$app_source_sha" = "$expected_source_sha" || { echo 'Kamal component source SHA differs from the verified source SHA' >&2; exit 1; }
+case "$operation" in
+  candidate)
+    test "$app_source_sha" = "$candidate" || { echo 'Core/app source SHA is not bound to the release candidate' >&2; exit 1; }
+    case "$version" in "$candidate"-*) ;; *) echo 'Kamal version is not bound to the release candidate' >&2; exit 1 ;; esac
+    ;;
+  retained)
+    test "$service" = gpoint-eros-pilot || { echo 'Retained-image operation is permitted only for the Eros engine' >&2; exit 1; }
+    case "$version" in "$expected_source_sha"-*) ;; *) echo 'Retained Eros version is not bound to its verified source SHA' >&2; exit 1 ;; esac
+    ;;
+  *) echo 'Unknown Kamal component operation' >&2; exit 1 ;;
+esac
 test -r "$ssh_key" && test -r "$known_hosts"
 case "$hosts" in ''|,*|*,|*,,*) echo 'KAMAL_HOSTS is empty or malformed' >&2; exit 1 ;; esac
 case "$hosts" in *[!A-Za-z0-9.,-]*) echo 'KAMAL_HOSTS contains an invalid host character' >&2; exit 1 ;; esac
@@ -68,15 +90,17 @@ for role in $(printf '%s' "$roles" | tr ',' ' '); do
       -o IdentitiesOnly=yes \
       -o StrictHostKeyChecking=yes \
       -o UserKnownHostsFile="$known_hosts" \
-      "root@$host" bash -s -- "$service" "$role" "$version" "${networks:--}" "$candidate" "$app_source_sha" <<'REMOTE'
+      "root@$host" bash -s -- "$service" "$role" "$version" "${networks:--}" "$candidate" "$app_source_sha" "$operation" "$expected_source_sha" <<'REMOTE'
 set -euo pipefail
-service="$1"; role="$2"; version="$3"; networks="$4"; candidate="$5"; app_source_sha="$6"
+service="$1"; role="$2"; version="$3"; networks="$4"; candidate="$5"; app_source_sha="$6"; operation="$7"; expected_source_sha="$8"
 # ssh joins remote arguments without quoting, so an empty network list would
 # vanish and shift every later positional parameter. "-" is the empty marker.
 if [ "$networks" = "-" ]; then networks=""; fi
 container="${service}-${role}-${version}"
 [[ "$container" =~ ^[A-Za-z0-9._-]+$ && "$candidate" =~ ^[0-9a-f]{40}$ && "$app_source_sha" =~ ^[0-9a-f]{40}$ ]]
-[[ "$version" == "$candidate-"* && "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+[[ "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ && "$version" == "$expected_source_sha-"* && "$app_source_sha" == "$expected_source_sha" ]]
+if [[ "$operation" == candidate ]]; then [[ "$version" == "$candidate-"* && "$app_source_sha" == "$candidate" ]]; fi
+if [[ "$operation" == retained ]]; then [[ "$service" == gpoint-eros-pilot ]]; fi
 id="$(docker inspect --format '{{.Id}}' "$container")"
 test "$(docker inspect --format '{{.State.Running}}' "$id")" = true
 if [[ "$service:$role" == "gpoint-eros-pilot:engine" ]]; then

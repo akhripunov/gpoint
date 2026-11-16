@@ -163,7 +163,7 @@ def test_kamal_network_hook_joins_only_allowed_core_and_agata_roles():
     assert 'case "$version" in "$candidate"-*)' in hook
     assert 'candidate="${GPOINT_COMMIT_SHA:?GPOINT_COMMIT_SHA is required}"' in hook
     assert 'app_source_sha="${GPOINT_APP_SOURCE_SHA:?GPOINT_APP_SOURCE_SHA is required}"' in hook
-    assert '[[ "$version" == "$candidate-"* && "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]' in hook
+    assert '[[ "$version" == "$candidate-"* && "$app_source_sha" == "$candidate" ]]' in hook
     assert '"$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$' in hook
     assert '"$version" =~ ^[0-9a-f]{40}$' not in hook
     assert "printf '%s\\n' \"$candidate\" | grep -Eq '^[0-9a-f]{40}$'" in hook
@@ -745,7 +745,7 @@ def test_native_runtime_verify_compares_live_database_to_its_predeploy_baseline(
 
 def test_pre_app_boot_reads_the_ssh_heredoc_and_fails_closed_on_digest_mismatch():
     candidate = "a" * 40
-    app_source_sha = "d" * 40
+    app_source_sha = candidate
     digest = "sha256:" + "b" * 64
     repository = "ghcr.io/akhripunov/gpoint-runtime"
 
@@ -818,6 +818,103 @@ def test_pre_app_boot_reads_the_ssh_heredoc_and_fails_closed_on_digest_mismatch(
     assert mismatch.returncode != 0
     assert "does not match the BuildKit-verified OCI digest" in mismatch.stderr
     assert len(calls) == 3
+
+
+def test_pre_app_boot_accepts_verified_retained_eros_image_but_rejects_identity_drift(tmp_path):
+    """A narrow config release keeps Engine identity while Core uses the candidate SHA."""
+    candidate = "a" * 40
+    engine_source = "f" * 40
+    version = f"{engine_source}-43698686567-1"
+    digest = "sha256:" + "b" * 64
+    repository = "ghcr.io/akhripunov/gpoint-eros"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    key, known = tmp_path / "key", tmp_path / "known_hosts"
+    key.write_text("key\n")
+    known.write_text("host\n")
+    (bin_dir / "ssh").write_text(textwrap.dedent("""\
+        #!/usr/bin/env python3
+        import subprocess, sys
+        args = sys.argv[1:]
+        host = next(i for i, arg in enumerate(args) if arg.startswith("root@"))
+        raise SystemExit(subprocess.run(args[host + 1:]).returncode)
+    """))
+    (bin_dir / "docker").write_text(textwrap.dedent("""\
+        #!/usr/bin/env python3
+        import json, os, sys
+        template = sys.argv[4]
+        if template == "{{json .RepoDigests}}": print(json.dumps([os.environ["TEST_REF"]]))
+        elif template == '{{index .Config.Labels "com.gpoint.source.revision"}}': print(os.environ["TEST_SOURCE"])
+        elif template == "{{.Os}}/{{.Architecture}}": print("linux/amd64")
+        else: raise SystemExit(2)
+    """))
+    for tool in bin_dir.iterdir():
+        tool.chmod(0o755)
+
+    def run(*, actual_source=engine_source, actual_version=version, actual_ref=f"{repository}@{digest}",
+            app_source=engine_source, inventory_bound=True):
+        env = os.environ.copy()
+        env.update({
+            "PATH": f"{bin_dir}:{env['PATH']}", "GPOINT_KAMAL_SERVICE": "gpoint-eros-pilot",
+            "KAMAL_VERSION": actual_version, "GPOINT_COMMIT_SHA": candidate,
+            "GPOINT_APP_SOURCE_SHA": app_source, "GPOINT_KAMAL_EXPECTED_DIGEST": digest,
+            "KAMAL_HOSTS": "127.0.0.1", "GPOINT_SSH_KEY": str(key),
+            "GPOINT_KNOWN_HOSTS_FILE": str(known), "TEST_SOURCE": actual_source, "TEST_REF": actual_ref,
+            "TEST_DOCKER_LOG": str(tmp_path / "docker.log"),
+        })
+        if inventory_bound:
+            env["GPOINT_KAMAL_OPERATION"] = "retained"
+            env["GPOINT_KAMAL_EXPECTED_SOURCE_SHA"] = engine_source
+            env["GPOINT_KAMAL_EXPECTED_VERSION"] = version
+        else:
+            env["GPOINT_KAMAL_OPERATION"] = "retained"
+            env.pop("GPOINT_KAMAL_EXPECTED_SOURCE_SHA", None)
+            env.pop("GPOINT_KAMAL_EXPECTED_VERSION", None)
+        return subprocess.run(["sh", str(ROOT / ".kamal/hooks/pre-app-boot")], env=env,
+                              capture_output=True, text=True)
+
+    accepted = run()
+    assert accepted.returncode == 0, f"stdout={accepted.stdout} stderr={accepted.stderr} calls={(tmp_path / 'docker.log').read_text() if (tmp_path / 'docker.log').exists() else ''}"
+    assert run(actual_source="e" * 40).returncode != 0
+    assert run(actual_version=f"{candidate}-43698686567-1").returncode != 0
+    assert run(actual_ref=f"{repository}@sha256:" + "c" * 64).returncode != 0
+    assert run(inventory_bound=False).returncode != 0
+
+
+def test_core_hook_binds_component_source_to_release_candidate_before_ssh(tmp_path):
+    candidate = "a" * 40
+    app_source = "d" * 40
+    key, known = tmp_path / "key", tmp_path / "known_hosts"
+    key.write_text("key\n")
+    known.write_text("host\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    ssh_called = tmp_path / "ssh-called"
+    (bin_dir / "ssh").write_text(f"#!/bin/sh\ntouch '{ssh_called}'\n")
+    (bin_dir / "ssh").chmod(0o755)
+    env = os.environ.copy()
+    env.update({"PATH": f"{bin_dir}:{env['PATH']}", "GPOINT_KAMAL_SERVICE": "gpoint-core", "KAMAL_VERSION": f"{candidate}-1-1",
+                "GPOINT_COMMIT_SHA": candidate, "GPOINT_APP_SOURCE_SHA": app_source,
+                "GPOINT_KAMAL_EXPECTED_SOURCE_SHA": candidate,
+                "GPOINT_KAMAL_EXPECTED_DIGEST": "sha256:" + "b" * 64, "KAMAL_HOSTS": "127.0.0.1",
+                "GPOINT_SSH_KEY": str(key), "GPOINT_KNOWN_HOSTS_FILE": str(known)})
+    result = subprocess.run(["sh", str(ROOT / ".kamal/hooks/pre-app-boot")], env=env,
+                            capture_output=True, text=True)
+    assert result.returncode != 0
+    assert not ssh_called.exists(), "invalid Core source identity must block before remote inspection"
+
+
+def test_component_identity_regression_is_in_mandatory_test_job_before_deploy():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    tests_job = workflow["jobs"]["tests"]
+    assert tests_job["strategy"]["matrix"]["suite"] == ["workspace", "python", "release-tooling", "eros"]
+    assert workflow["jobs"]["build"]["needs"] == ["tests"]
+    assert "needs.tests.result == 'success'" in workflow["jobs"]["build"]["if"]
+    assert "tests" in workflow["jobs"]["deploy"]["needs"]
+    assert "needs.tests.result == 'success'" in workflow["jobs"]["deploy"]["if"]
+    assert "tests/test_kamal_release_config.py" in " ".join(
+        step.get("run", "") for step in tests_job["steps"]
+    )
 
 
 def test_post_migration_head_requires_checksum_proof_when_old_runtime_lacks_revision(tmp_path):
