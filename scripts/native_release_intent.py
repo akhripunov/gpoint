@@ -289,6 +289,13 @@ ARTIFACT_PREPARE_PATHS = frozenset({
     "tests/test_native_prepared_run.py",
     "tests/test_prisma_migration_release_plan.py",
 })
+LAYER7_RELEASE_TOOLING_PREPARE_PATHS = frozenset({
+    ".github/actions/layer7-deploy/action.yml",
+    ".github/workflows/gpoint-layer7-staging.yml",
+    "scripts/verify_native_prepared_run.py",
+    "tests/test_layer7_staging_workflow.py",
+    "tests/test_native_prepared_run.py",
+})
 EROS_MODEL_CONFIG_PATHS = frozenset({
     "services/eros-engine/eros-layer7-staging-model-config.toml",
     "services/eros-engine/eros-pilot-model-config.toml",
@@ -395,7 +402,8 @@ def classify_push(*, event_name: str, ref: str,
             and LAYER7_EROS_MARKER not in markers
             and not ({"apps/api/src/eros-response-prompt.js",
                       "services/eros-engine/eros-layer7-staging-model-config.toml"}
-                     <= changed_paths)):
+                     <= changed_paths)
+            and changed_paths != LAYER7_RELEASE_TOOLING_PREPARE_PATHS):
         return "BLOCK"
     if ARTIFACT_PREPARE_MARKER in markers:
         if markers & {LAYER7_API_MARKER, LAYER7_EROS_MARKER}:
