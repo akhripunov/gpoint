@@ -241,6 +241,17 @@ def test_artifact_prepare_marker_in_subject_is_not_a_mode_marker():
 
 
 def test_exact_release_tooling_candidate_routes_to_artifact_prepare_without_marker():
+    me36_layer7_release_tooling = {
+        ".github/actions/layer7-deploy/action.yml",
+        ".github/workflows/gpoint-layer7-staging.yml",
+        "scripts/verify_native_prepared_run.py",
+        "tests/test_layer7_staging_workflow.py",
+        "tests/test_native_prepared_run.py",
+    }
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        changed_paths=me36_layer7_release_tooling,
+    ) == "ARTIFACT_PREPARE"
     assert MODULE.classify_push(
         event_name="push", ref="refs/heads/main",
         changed_paths=set(MODULE.ARTIFACT_PREPARE_PATHS),
