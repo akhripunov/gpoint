@@ -21,7 +21,6 @@ from native_release_intent import _component_paths, _path_kind, git_diff_entries
 # Paths that only select or configure an existing image: an Eros TOML or a
 # staging/production Eros Kamal config must never rebuild the stock image.
 EROS_CONFIG_PREFIXES = (
-    "config/deploy.eros",
     "config/deploy.layer7-staging.eros",
     "infra/production/eros",
 )
@@ -43,7 +42,9 @@ def classify(paths) -> dict:
     files = sorted({path.strip() for path in paths if path.strip()})
     kinds = {_path_kind(path) for path in files}
     components = {path: _component_paths(path) for path in files}
-    eros_config_paths = [path for path in files if _matches(path, EROS_CONFIG_PREFIXES)] or [
+    eros_config_paths = [path for path in files if _matches(path, EROS_CONFIG_PREFIXES)
+                         or (path.startswith("config/deploy.eros")
+                             and "EROS" in components[path])] or [
         path for path in files
         if path.startswith("services/eros-engine/") and path.endswith(".toml")
     ]

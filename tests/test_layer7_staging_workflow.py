@@ -482,11 +482,11 @@ def test_layer7_staging_never_uses_production_environment_or_production_host():
     assert "GITHUB_TOKEN" in serialized
 
 
-def test_layer7_staging_is_separate_from_build_and_production_deploy_jobs():
+def test_layer7_staging_and_automatic_eros_are_separate_from_production_deploy():
     workflow = yaml.load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text(), Loader=yaml.BaseLoader)
     native = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
     staging = workflow["jobs"]["layer7_staging"]
-    assert set(native["jobs"]) == {"tests", "build", "deploy"}
+    assert set(native["jobs"]) == {"tests", "build", "deploy", "layer7_eros_deploy"}
     assert set(workflow["jobs"]) == {"layer7_staging"}
     assert staging["env"]["KAMAL_REGISTRY_PASSWORD"] == "${{ secrets.GITHUB_TOKEN }}"
     assert staging["permissions"]["packages"] == "read"
@@ -584,6 +584,31 @@ def test_eros_rehearsal_returns_before_live_apply_and_only_eros_redeploys():
     assert "prisma migrate" not in run
     assert run.count("kamal redeploy") == 1
     assert '--roles engine --config-file "$config"' in run
+
+
+def test_native_eros_push_routes_automatically_only_to_protected_layer7():
+    native = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    job = native["jobs"].get("layer7_eros_deploy")
+    assert job is not None
+    assert "LAYER7_EROS" in job["if"]
+    assert job["environment"]["name"] == "layer7-staging"
+    assert job["concurrency"]["group"] == "gpoint-layer7-staging"
+    action = next(step for step in job["steps"] if step.get("uses") == "./.github/actions/layer7-deploy")
+    assert action["with"]["mode"] == "eros-auto"
+    assert action["with"]["prepared_eros_digest"] == "${{ needs.build.outputs.eros_digest }}"
+    public = native["jobs"]["deploy"]
+    assert "LAYER7_EROS" not in public["if"]
+
+
+def test_eros_auto_action_rehearses_exact_run_before_any_schema_apply():
+    action = next(step for step in _staging_steps()
+                  if step.get("name", "").startswith("Rehearse or release"))
+    run = action["run"]
+    assert "inputs.mode == 'eros-auto'" in action["if"]
+    assert '"$MODE" == eros-auto' in run
+    assert run.index('database verify-prepared "$run_id"') < run.index("database apply")
+    assert run.index("kamal app stop --roles engine") < run.index("database apply")
+    assert run.index("database apply") < run.index("kamal redeploy")
 
 
 def test_core_config_readiness_mode_is_read_only_and_still_uses_protected_narrow_checks():

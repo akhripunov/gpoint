@@ -746,6 +746,80 @@ jobs:
             echo "${role}_image_bytes=$image_bytes" >> "$GITHUB_OUTPUT"
           done
 
+  layer7_eros_deploy:
+    name: Layer7 isolated Eros Deploy and Verify
+    needs: [tests, build]
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      needs.tests.result == 'success' && needs.tests.outputs.mode == 'LAYER7_EROS' &&
+      github.actor == github.repository_owner && github.triggering_actor == github.repository_owner &&
+      needs.build.result == 'success' && needs.build.outputs.deploy_scope == 'EROS' &&
+      needs.build.outputs.eros_digest != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    environment:
+      name: layer7-staging
+      url: http://95.133.236.59
+    concurrency:
+      group: gpoint-layer7-staging
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read
+      actions: read
+      deployments: write
+    env:
+      CANDIDATE_SHA: ${{ github.sha }}
+      GPOINT_COMMIT_SHA: ${{ github.sha }}
+      GPOINT_APP_SOURCE_SHA: ${{ github.sha }}
+      KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Recheck exact owner task scope and current main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ github.sha }}
+          EVENT_ACTOR: ${{ github.actor }}
+          EVENT_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          test "$EVENT_ACTOR" = "$REPOSITORY_OWNER"
+          test "$EVENT_TRIGGERING_ACTOR" = "$REPOSITORY_OWNER"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/commits/$CANDIDATE_SHA" --jq '.commit.message' |
+            grep -Fx 'GPOINT-LAYER7-EROS' >/dev/null
+      - name: Materialize protected Layer7 SSH credentials
+        env:
+          LAYER7_SSH_KEY_SECRET: ${{ secrets.LAYER7_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$LAYER7_SSH_KEY_SECRET"
+          install -d -m 700 "$RUNNER_TEMP/layer7"
+          printf '%s\n' "$LAYER7_SSH_KEY_SECRET" > "$RUNNER_TEMP/layer7/key"
+          chmod 600 "$RUNNER_TEMP/layer7/key"
+          {
+            echo "LAYER7_SSH_KEY=$RUNNER_TEMP/layer7/key"
+            echo "GPOINT_SSH_KEY=$RUNNER_TEMP/layer7/key"
+            echo "GPOINT_KNOWN_HOSTS_FILE=$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts"
+            echo "GPOINT_LAYER7_STAGING_HOST=95.133.236.59"
+            echo "GPOINT_KAMAL_TARGET_HOST=95.133.236.59"
+          } >> "$GITHUB_ENV"
+      - uses: ./.github/actions/layer7-deploy
+        with:
+          mode: eros-auto
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          candidate_sha: ${{ github.sha }}
+          staging_image_sha: ${{ github.sha }}
+          scoped_image_version: ${{ needs.build.outputs.image_version }}
+          prepared_run_id: ${{ github.run_id }}
+          prepared_app_digest: ''
+          prepared_eros_digest: ${{ needs.build.outputs.eros_digest }}
+
   deploy:
     name: Kamal production Deploy and Verify
     needs: [tests, build]

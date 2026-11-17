@@ -659,6 +659,8 @@ def _component_paths(path: str) -> set[str]:
         return set()
     if path == "config/deploy.yml":
         return {"CORE"}
+    if path == "config/deploy.eros-api.yml":
+        return {"CORE"}
     if (path.startswith(("docker/", "patches/", "infra/production/eros/"))
             or path.startswith("services/eros-engine/")):
         return {"EROS"}

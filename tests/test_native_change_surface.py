@@ -35,6 +35,13 @@ def test_common_kamal_deploy_config_selects_core_checks():
     assert surface["full_ci"] is False
 
 
+def test_eros_api_kamal_config_selects_core_not_the_stock_eros_image():
+    surface = classify(["config/deploy.eros-api.yml"])
+    assert surface["core"] is True
+    assert surface["eros"] is False
+    assert surface["eros_config"] is False
+
+
 def test_component_surface_uses_the_release_planners_single_path_mapping(monkeypatch):
     monkeypatch.setattr(surface, "_component_paths", lambda path: {"CORE"})
     result = surface.classify(["unlisted/future-core-path"])

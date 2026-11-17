@@ -20,25 +20,28 @@
 
 Pin the upstream commit in `services/eros-engine/upstream.sha` and review the
 upstream migration requirements and Layer7 model TOML. Use the
-`GPOINT-LAYER7-EROS` line in the authorized main commit message. Native Tests
-and Build publish only the Eros image. Production Deploy is skipped.
+`GPOINT-LAYER7-EROS` line only for an OWNER-authorized task-scoped update. Native
+Tests and Build publish only the Eros image. The separate `layer7_eros_deploy`
+job then targets only the fixed Layer7 staging host through the protected
+`layer7-staging` Environment and `gpoint-layer7-staging` concurrency group;
+public production Deploy remains skipped. The job rechecks the owner actor,
+exact current-main SHA, marker and immutable Eros digest.
 
-Dispatch `gpoint-layer7-staging.yml` on exact current main with
-`mode=eros-prepare`, the successful Native Build run ID and the Eros digest.
-Set `approve_layer7_staging=true` and `deploy_layer7_staging=false`. The protected
-job restores an encrypted backup to a temporary PostgreSQL database, rehearses
-stock migrations and compares before/after runtime and ledger snapshots.
+The automatic `eros-auto` action first restores the staging database snapshot
+into an isolated temporary database, rehearses stock SQLx migrations and
+compares before/after runtime and ledger snapshots. It then applies only after
+the rehearsal succeeds and the job's Environment approval is satisfied. If SQLx
+migrations are pending, it checks the inference queue, stops only the Eros
+engine, snapshots the quiesced staging database and applies the stock migration
+chain. It never downgrades the database. Kamal redeploys only the `engine` role
+using the exact GHCR digest, then Runtime Verify checks engine health and the
+Core API route. A failure after migration requires the documented forward
+recovery path; it does not restart an incompatible pre-migration image.
 
-After review of that rehearsal and approval for the exact candidate, dispatch
-`mode=eros-deploy` with the same SHA, Build run and digest, set
-`deploy_layer7_staging=true`, and supply the successful rehearsal ID and attempt
-as `eros_rehearsal`. Use the same candidate SHA for `staging_image_sha`.
-If there are pending SQLx migrations, the job checks the queue, stops only the
-Eros engine with Kamal, snapshots the quiesced database, then applies the stock
-migration chain. After a successful Apply, recover any deployment failure
-forward with the approved artifact. A pre-migration image may be restarted only
-after independently proving the source ledger and runtime configuration are
-still compatible. Record the verified Layer7 runtime and conversation checks.
+The protected manual `eros-prepare` / `eros-deploy` route remains available for
+reviewed staging rehearsal and recovery operations outside the authorized
+automatic task-scoped path. It retains its exact-run, exact-SHA, rehearsal and
+Environment checks.
 
 ### Layer7 Core API and model config release
 

@@ -52,7 +52,22 @@ def test_app_only_main_push_deploys_including_its_regression_tests():
 
 def test_common_kamal_deploy_config_selects_core_component_scope():
     assert MODULE._component_paths("config/deploy.yml") == {"CORE"}
-    assert MODULE._component_paths("config/deploy.eros-api.yml") == {"EROS"}
+    assert MODULE._component_paths("config/deploy.eros-api.yml") == {"CORE"}
+
+
+def test_core_eros_api_kamal_config_selects_only_the_core_image_from_installed_sha(tmp_path):
+    repo, baseline, _, _ = _component_repo(tmp_path, {
+        "config/deploy.eros-api.yml": "service: gpoint-core\nimage: old\n",
+    })
+    (repo / "config/deploy.eros-api.yml").write_text("service: gpoint-core\nimage: new\n")
+    _git(repo, "add", "config/deploy.eros-api.yml")
+    _git(repo, "commit", "-qm", "update Core API Kamal config")
+    candidate = _git(repo, "rev-parse", "HEAD")
+    sources = {component: baseline for component in MODULE.COMPONENT_ROLES}
+    sources["EROS"] = baseline
+    plan = MODULE.classify_component_build_plan(repo, candidate, sources)
+    assert plan["deploy_scope"] == "CORE"
+    assert plan["build_components"] == ["CORE"]
 
 
 def test_me36_active_eros_model_config_does_not_build_or_update_eros_image(tmp_path):
