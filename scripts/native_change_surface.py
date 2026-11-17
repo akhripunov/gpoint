@@ -16,14 +16,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from native_release_intent import _path_kind, git_diff_entries  # noqa: E402
+from native_release_intent import _component_paths, _path_kind, git_diff_entries  # noqa: E402
 
-# Paths that change what the stock Eros image or its local E2E harness runs.
-EROS_RUNTIME_PREFIXES = (
-    "services/eros-engine/",
-    "docker/",
-    "patches/",
-)
 # Paths that only select or configure an existing image: an Eros TOML or a
 # staging/production Eros Kamal config must never rebuild the stock image.
 EROS_CONFIG_PREFIXES = (
@@ -31,10 +25,6 @@ EROS_CONFIG_PREFIXES = (
     "config/deploy.layer7-staging.eros",
     "infra/production/eros",
 )
-MINIAPP_PREFIXES = ("apps/miniapp/",)
-AGATA_PREFIXES = ("services/agata/",)
-CORE_PREFIXES = ("apps/api/", "apps/bot/", "apps/worker/", "packages/")
-CORE_CONFIG_FILES = frozenset({"config/deploy.yml"})
 DOCS_PREFIXES = ("docs/", "design/")
 DOCS_ROOT_FILES = frozenset({"README.md"})
 # Release instructions are protected: changing them must run the full suite.
@@ -52,27 +42,22 @@ def _matches(path: str, prefixes) -> bool:
 def classify(paths) -> dict:
     files = sorted({path.strip() for path in paths if path.strip()})
     kinds = {_path_kind(path) for path in files}
+    components = {path: _component_paths(path) for path in files}
     eros_config_paths = [path for path in files if _matches(path, EROS_CONFIG_PREFIXES)] or [
         path for path in files
         if path.startswith("services/eros-engine/") and path.endswith(".toml")
     ]
-    eros_runtime = [
-        path for path in files
-        if _matches(path, EROS_RUNTIME_PREFIXES) and path not in eros_config_paths
-    ]
+    eros_runtime = [path for path in files
+                    if "EROS" in components[path] and path not in eros_config_paths]
     surface = {
         "files": len(files),
         "unknown_paths": sorted(path for path in files if _path_kind(path) == "unknown"),
         "protected_paths": sorted(path for path in files if path in PROTECTED_FILES),
         "eros": bool(eros_runtime),
         "eros_config": bool(eros_config_paths),
-        "miniapp": any(_matches(path, MINIAPP_PREFIXES) for path in files),
-        "agata": any(_matches(path, AGATA_PREFIXES) for path in files),
-        "core": any(
-            path in CORE_CONFIG_FILES
-            or (_matches(path, CORE_PREFIXES) and not _matches(path, MINIAPP_PREFIXES))
-            for path in files
-        ),
+        "miniapp": any("MINIAPP" in mapped for mapped in components.values()),
+        "agata": any("AGATA" in mapped for mapped in components.values()),
+        "core": any("CORE" in mapped for mapped in components.values()),
         "database": bool(kinds & DATABASE_KINDS),
         "docs_only": bool(files) and all(
             path in DOCS_ROOT_FILES or _matches(path, DOCS_PREFIXES) for path in files

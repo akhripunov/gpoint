@@ -659,7 +659,10 @@ def _component_paths(path: str) -> set[str]:
         return set()
     if path == "config/deploy.yml":
         return {"CORE"}
-    if path.startswith(("services/eros-engine/", "config/deploy.eros")):
+    if (path.startswith(("docker/", "patches/", "infra/production/eros/"))
+            or path.startswith("services/eros-engine/")):
+        return {"EROS"}
+    if path.startswith("config/deploy.eros"):
         return {"EROS"}
     if path in {"infra/production/Gpoint.Dockerfile", "infra/production/nginx-miniapp.conf"}:
         return {"CORE", "MINIAPP"} if path.endswith("Gpoint.Dockerfile") else {"MINIAPP"}

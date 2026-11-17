@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import native_change_surface as surface  # noqa: E402
 from native_change_surface import classify  # noqa: E402
 
 
@@ -34,6 +35,12 @@ def test_common_kamal_deploy_config_selects_core_checks():
     assert surface["full_ci"] is False
 
 
+def test_component_surface_uses_the_release_planners_single_path_mapping(monkeypatch):
+    monkeypatch.setattr(surface, "_component_paths", lambda path: {"CORE"})
+    result = surface.classify(["unlisted/future-core-path"])
+    assert result["core"] is True
+
+
 def test_eros_toml_alone_does_not_select_the_image_build():
     surface = classify(["services/eros-engine/eros-layer7-staging-model-config.toml"])
     assert surface["eros"] is False
@@ -44,6 +51,15 @@ def test_eros_engine_code_selects_the_image_build():
     surface = classify(["services/eros-engine/run-local-e2e.sh"])
     assert surface["eros"] is True
     assert surface["eros_config"] is False
+
+
+def test_eros_image_build_surface_matches_the_release_component_mapping():
+    import native_release_intent as intent
+
+    paths = ["docker/Dockerfile.eros"]
+    result = classify(paths)
+    assert "EROS" in intent._component_paths(paths[0])
+    assert result["eros"] is True
 
 
 def test_protected_instructions_fail_closed():
