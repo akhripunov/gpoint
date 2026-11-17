@@ -63,6 +63,34 @@ def test_kamal_core_config_uses_public_tls_proxy_and_only_core_roles():
     assert "eros" not in config["servers"]
 
 
+def test_telegram_webapp_url_is_canonical_for_core_and_bot_roles():
+    core = yaml.safe_load((ROOT / "config/deploy.yml").read_text())
+    eros_core = yaml.safe_load((ROOT / "config/deploy.eros-api.yml").read_text())
+    for config in (core, eros_core):
+        assert config["servers"]["api"]["env"]["clear"]["PUBLIC_APP_URL"] == "https://gpoint.one"
+    assert core["servers"]["bot"]["env"]["clear"]["PUBLIC_APP_URL"] == "https://gpoint.one"
+
+
+def test_kamal_media_route_reaches_the_core_media_controller():
+    for name in ("config/deploy.yml", "config/deploy.eros-api.yml"):
+        config = yaml.safe_load((ROOT / name).read_text())
+        api = config["servers"]["api"]["proxy"]
+        assert api["path_prefixes"] == ["/api"]
+        assert api["strip_path_prefix"] is True
+    nginx = (ROOT / "infra/production/nginx-miniapp.conf").read_text()
+    assert "location ^~ /media/" in nginx
+    assert "proxy_pass http://$gpoint_api$request_uri;" in nginx
+    assert "proxy_set_header Authorization $http_authorization;" in nginx
+    assert "proxy_set_header Cookie $http_cookie;" in nginx
+    media_controller = (ROOT / "apps/api/src/media-read.ts").read_text()
+    assert "@Get(['media/assets/:id', 'assets/:id'])" in media_controller
+    assert "resolveSession(req.headers?.authorization?.replace(/^Bearer\\s+/i, ''))" in media_controller
+    assert "const isOwner = !!asset.postMedia.some" in media_controller
+    assert "const isAdmin = session ? !!await prisma.userRole.findUnique" in media_controller
+    assert "(!isOwner && !isAdmin && !isPublicPost && !isPublicProfile && !isConnectedChannelAvatar)" in media_controller
+    assert "NotFoundException('media unavailable')" in media_controller
+
+
 def test_kamal_agata_and_miniapp_are_separate_services():
     agata = yaml.safe_load((ROOT / "config/deploy.agata.yml").read_text())
     miniapp = yaml.safe_load((ROOT / "config/deploy.miniapp.yml").read_text())
