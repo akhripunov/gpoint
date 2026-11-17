@@ -34,6 +34,7 @@ EROS_CONFIG_PREFIXES = (
 MINIAPP_PREFIXES = ("apps/miniapp/",)
 AGATA_PREFIXES = ("services/agata/",)
 CORE_PREFIXES = ("apps/api/", "apps/bot/", "apps/worker/", "packages/")
+CORE_CONFIG_FILES = frozenset({"config/deploy.yml"})
 DOCS_PREFIXES = ("docs/", "design/")
 DOCS_ROOT_FILES = frozenset({"README.md"})
 # Release instructions are protected: changing them must run the full suite.
@@ -68,7 +69,8 @@ def classify(paths) -> dict:
         "miniapp": any(_matches(path, MINIAPP_PREFIXES) for path in files),
         "agata": any(_matches(path, AGATA_PREFIXES) for path in files),
         "core": any(
-            _matches(path, CORE_PREFIXES) and not _matches(path, MINIAPP_PREFIXES)
+            path in CORE_CONFIG_FILES
+            or (_matches(path, CORE_PREFIXES) and not _matches(path, MINIAPP_PREFIXES))
             for path in files
         ),
         "database": bool(kinds & DATABASE_KINDS),

@@ -27,6 +27,13 @@ def test_staging_eros_config_does_not_select_the_eros_image_build():
     assert surface["full_ci"] is False
 
 
+def test_common_kamal_deploy_config_selects_core_checks():
+    surface = classify(["config/deploy.yml"])
+    assert surface["core"] is True
+    assert surface["app_backend"] is True
+    assert surface["full_ci"] is False
+
+
 def test_eros_toml_alone_does_not_select_the_image_build():
     surface = classify(["services/eros-engine/eros-layer7-staging-model-config.toml"])
     assert surface["eros"] is False

@@ -50,6 +50,11 @@ def test_app_only_main_push_deploys_including_its_regression_tests():
     ) == "DEPLOY"
 
 
+def test_common_kamal_deploy_config_selects_core_component_scope():
+    assert MODULE._component_paths("config/deploy.yml") == {"CORE"}
+    assert MODULE._component_paths("config/deploy.eros-api.yml") == {"EROS"}
+
+
 def test_me36_active_eros_model_config_does_not_build_or_update_eros_image(tmp_path):
     repo, baseline, _, _ = _component_repo(tmp_path, {
         "services/eros-engine/eros-layer7-staging-model-config.toml": "old config\n",
