@@ -12,5 +12,6 @@ COPY apps/api ./apps/api
 COPY services/eros-engine/local-test-api-routes.mjs services/eros-engine/local-test-api-routes.mjs
 COPY services/eros-engine/local-test-api-entrypoint.mjs services/eros-engine/local-test-api-entrypoint.mjs
 COPY services/eros-engine/local-test-e2e.mjs services/eros-engine/local-test-e2e.mjs
+COPY services/eros-engine/local-test-tier-memory-e2e.mjs services/eros-engine/local-test-tier-memory-e2e.mjs
 ENV NODE_ENV=development
 ENTRYPOINT ["node", "services/eros-engine/local-test-api-entrypoint.mjs"]
