@@ -191,6 +191,31 @@ test('runtime Eros profiles keep only the dreaming scan output contract and para
   assert.doesNotMatch(fixtureDreaming, /privacy rules|never retain .*credentials/i);
 });
 
+test('isolated tiered E2E exercises stock Eros recall at affinity levels 1 through 5', () => {
+  const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  const script = readFileSync(new URL('local-test-tier-memory-e2e.mjs', directory), 'utf8');
+  const fixtures = readFileSync(new URL('local-test-tier-memory-fixtures.py', directory), 'utf8');
+  const worker = readFileSync(new URL('local-test-worker.py', directory), 'utf8');
+  assert.match(runner, /local-test-tier-memory-e2e\.mjs --prepare/);
+  assert.match(runner, /local-test-tier-memory-fixtures\.py/);
+  assert.match(runner, /local-test-tier-memory-e2e\.mjs --verify/);
+  assert.match(script, /memory_scope/);
+  assert.match(script, /bond5_chem1/);
+  assert.match(script, /bond1_chem5/);
+  assert.match(script, /scope_none/);
+  assert.match(script, /scope_relationship_only/);
+  assert.match(script, /scope_neutral_only/);
+  assert.match(fixtures, /relationship_episodes/);
+  assert.match(fixtures, /relationship_arcs/);
+  assert.match(fixtures, /relationship_journal/);
+  assert.match(fixtures, /metadata/);
+  assert.match(worker, /LOCAL_TEST_TIER_CONTEXT/);
+  assert.match(worker, /SYNTH_TIER_CASE/);
+  assert.match(script, /LOCAL_E2E_AFFINITY_TIER=PASS/);
+  assert.match(script, /LOCAL_E2E_MEMORY_SCOPE=PASS/);
+  assert.match(script, /LOCAL_E2E_REAL_INFERENCE=NOT_RUN/);
+});
+
 test('GPoint adapter and injected dialogue prompts do not control Eros memory scope or use', () => {
   const adapter = readFileSync(new URL('../../apps/api/src/eros-adapter.ts', import.meta.url), 'utf8');
   const responsePrompt = readFileSync(new URL('../../apps/api/src/eros-response-prompt.js', import.meta.url), 'utf8');

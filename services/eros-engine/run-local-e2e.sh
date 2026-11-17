@@ -316,6 +316,23 @@ api_image=$(compose images -q gpoint-api)
   test/eros-worker-contract.test.ts test/eros-worker-cancel.integration.test.ts
 echo LOCAL_E2E_GPOINT_QUEUE_RLS_TENANT_ISOLATION=PASS fixture_role=gpoint_worker_test
 compose --profile worker up -d --no-deps gpoint-worker
+tier_fixture_json=$(compose exec -w /workspace/apps/api -T -e "EROS_TEST_GENOME_ID=$genome_id" \
+  gpoint-api node /workspace/services/eros-engine/local-test-tier-memory-e2e.mjs --prepare) || {
+  echo LOCAL_E2E_AFFINITY_FIXTURE_PREPARE=FAIL >&2
+  exit 1
+}
+printf '%s\n' "$tier_fixture_json" >"$tmp/tier-fixtures.json"
+python3 -c 'import json,sys; rows=json.load(open(sys.argv[1])); assert len(rows)==10; assert all(len(row["user_id"])==36 and len(row["session_id"])==36 and len(row["instance_id"])==36 for row in rows); print("LOCAL_E2E_AFFINITY_FIXTURE_PREPARE=PASS scenarios=10")' "$tmp/tier-fixtures.json"
+python3 "$repo/services/eros-engine/local-test-tier-memory-fixtures.py" "$tmp/tier-fixtures.json" >"$tmp/tier-fixtures.sql"
+compose exec -T postgres psql -U eros_test_admin -d eros_test -v ON_ERROR_STOP=1 <"$tmp/tier-fixtures.sql" >"$tmp/tier-fixtures.out"
+grep '^LOCAL_E2E_AFFINITY_FIXTURE=' "$tmp/tier-fixtures.out"
+if ! compose exec -w /workspace/apps/api -T gpoint-api node /workspace/services/eros-engine/local-test-tier-memory-e2e.mjs --verify \
+  >"$tmp/tier-e2e.out" 2>&1; then
+  tail -80 "$tmp/tier-e2e.out" >&2
+  echo LOCAL_E2E_AFFINITY_TIER=FAIL >&2
+  exit 1
+fi
+cat "$tmp/tier-e2e.out"
 if ! compose exec -w /workspace/apps/api -T gpoint-api node --import tsx /workspace/services/eros-engine/local-test-e2e.mjs >"$tmp/e2e.out" 2>&1; then tail -40 "$tmp/e2e.out" >&2; exit 1; fi
 cat "$tmp/e2e.out"
 relationship_mapping_count=$(compose exec -T postgres psql -U eros_test_admin -d gpoint_test -Atc 'SELECT count(*) FROM "ErosRelationshipMapping";')

@@ -49,6 +49,37 @@ def deterministic_inference(job, **_kwargs):
             'candidate_count': len(memories),
         }, separators=(',', ':')), flush=True)
         return json.dumps({'memories': memories, 'episode': '', 'journal': []}, separators=(',', ':'))
+    if purpose == 'eros_chat_completion' and 'SYNTH_TIER_PROBE' in content:
+        user_messages = [
+            item for item in messages
+            if isinstance(item, dict) and item.get('role') == 'user'
+            and isinstance(item.get('content'), str)
+        ]
+        last_user = user_messages[-1].get('content', '') if user_messages else ''
+        case = next((line.split('=', 1)[1] for line in last_user.splitlines()
+                     if line.startswith('SYNTH_TIER_CASE=')), 'unknown')
+        system_messages = [
+            item for item in messages
+            if isinstance(item, dict) and item.get('role') == 'system'
+            and isinstance(item.get('content'), str)
+        ]
+        system_context = '\n'.join(item['content'] for item in system_messages)
+        markers = [
+            'SYNTH_PROFILE_NEUTRAL_1', 'SYNTH_PROFILE_NEUTRAL_2',
+            'SYNTH_PROFILE_ROMANCE', 'SYNTH_PROFILE_FAMILY',
+            'SYNTH_PROFILE_FINANCE', 'SYNTH_PROFILE_KINK',
+            'SYNTH_REL_RAW_1', 'SYNTH_REL_RAW_2', 'SYNTH_REL_RAW_3',
+            'SYNTH_ARC_OPENING', 'SYNTH_ARC_CURRENT',
+            'SYNTH_EPISODE_1', 'SYNTH_EPISODE_2', 'SYNTH_EPISODE_3',
+            'SYNTH_JOURNAL_1', 'SYNTH_JOURNAL_2',
+        ]
+        seen = {marker: marker in system_context for marker in markers}
+        evidence = {'case': case, 'seen': seen}
+        print(json.dumps({
+            'event': 'LOCAL_TEST_TIER_CONTEXT',
+            **evidence,
+        }, separators=(',', ':')), flush=True)
+        return json.dumps(evidence, separators=(',', ':'))
     if purpose == 'eros_chat_completion' and 'SYNTH_RECALL_PROBE' in content:
         memory_context = '\n'.join(
             item.get('content', '') for item in messages
