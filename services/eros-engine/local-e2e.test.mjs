@@ -372,4 +372,386 @@ test('Docker endpoint must be the local Mac Unix socket', () => {
     /unapproved_docker_socket/,
   );
   assert.throws(
-    () => validateDockerEndpoint('w¾<îÚ$z{-®éÜj×¹•ôÀ)±•…¹ÕÀ ¥ì(€ÉŒôü(€ÑÉ…À€´a%P!U@%9PQI4(€±•…¹ÕÁ}™…¥±•ôÀ(€¥˜l€ˆ‘ÉŒˆ€µ¹”€Àt€˜˜l€ˆ‘½µÁ½Í•}ÍÑ…ÉÑ•ˆ€µ•Ä€ÄtìÑ¡•¸(€€€µ¥É…Ñ½É}½¹Ñ…¥¹•Èô¡½µÁ½Í”ÁÌ€´µ…±°€´µÅÕ¥•Ð•É½Ìµµ¥É…Ñ”€Èø½‘•Ø½¹Õ±°ñðÑÉÕ”¤(€€€¥˜l€µ¸€ˆ‘µ¥É…Ñ½É}½¹Ñ…¥¹•ÈˆtìÑ¡•¸(€€€€€•¡¼1=1}É}5%IQ=I}1=}	%8€ø˜È(€€€€€‘½­•É}±½…°±½Ì€´µÑ…¥°€ÄÀÀ€ˆ‘µ¥É…Ñ½É}½¹Ñ…¥¹•Èˆ€Èø˜Äp(€€€€€€€ðÍ•€µ€µ”€ÌŒ¡Á½ÍÑÉ•Ì¡Å°¤üè¼¼¥myléÍÁ…”éut­ pÅmIQu œœp(€€€€€€€€€€µ”€Ì¼ ¡Á…ÍÍÝ½É‘ñÑ½­•¹ñÍ•É•Ð¥lôèt¬¥myléÍÁ…”éut¬½pÅmIQt½%œœ€ø˜ÈñðÑÉÕ”(€€€€€•¡¼1=1}É}5%IQ=I}1=}9€ø˜È(€€€™¤(€€€½µÁ½Í”±½Ì€´µ¹¼µ½±½ÈÁ½ÍÑÉ•ÌÁ½¥¹Ðµ…Á¤µµ¥É…Ñ”Á½¥¹Ðµ…Á¤•É½ÌÁ½¥¹ÐµÝ½É­•È€Èø½‘•Ø½¹Õ±°ðÉ•À€µ¤€µ€È€‰•ÉÉ½Éñ•á•ÁÑ¥½¹ñ™…¥±•‘ñ™…Ñ…±ñÁ…¹¥ñ‘•¹¥•‘ñ¹½Ð™½Õ¹‘ñÉ•™ÕÍ•ˆðÑ…¥°€´ÄÀÀ€ø˜ÈñðÑÉÕ”(€™¤(€¥˜l€ˆ‘½µÁ½Í•}ÍÑ…ÉÑ•ˆ€µ•Ä€ÄtìÑ¡•¸(€€€½µÁ½Í”‘½Ý¸€´µÙ½±Õµ•Ì€´µÉ•µ½Ù”µ½ÉÁ¡…¹Ì€ø½‘•Ø½¹Õ±°€Èø˜Äñð±•…¹ÕÁ}™…¥±•ôÄ(€™¤(€¥˜l€ˆ‘ÉÕ¹}½Ý¹•ˆ€µ•Ä€ÄtìÑ¡•¸(€€€¥˜¥¹Ñ•É…Ñ¥½¹}¥‘•¹Ñ¥Ñäô¡¥¹ÍÁ•Ñ}ÉÕ¹}½¹Ñ…¥¹•È€ˆ‘¥¹Ñ•É…Ñ¥½¹}½¹Ñ…¥¹•Èˆ¤ìÑ¡•¸(€€€€€¥¹Ñ•É…Ñ¥½¹}½Ý¹•Èô‘í¥¹Ñ•É…Ñ¥½¹}¥‘•¹Ñ¥ÑäŒ©ñô(€€€€€¥˜l€ˆ‘¥¹Ñ•É…Ñ¥½¹}½Ý¹•Èˆ€ô€ˆ‘ÁÉ½©•ÐˆtìÑ¡•¸(€€€€€€€‘½­•É}±½…°É´€µ˜€ˆ‘¥¹Ñ•É…Ñ¥½¹}½¹Ñ…¥¹•Èˆ€ø½‘•Ø½¹Õ±°ñð±•…¹ÕÁ}™…¥±•ôÄ(€€€€€•±Í”(€€€€€€€±•…¹ÕÁ}™…¥±•ôÄ(€€€€€™¤(€€€•±Í”(€€€€€¥¹ÍÁ•Ñ}ÍÑ…ÑÕÌôü(€€€€€l€ˆ‘¥¹ÍÁ•Ñ}ÍÑ…ÑÕÌˆ€µ•Ä€Ètñð±•…¹ÕÁ}™…¥±•ôÄ(€€€™¤(€€€½¹Ñ…¥¹•ÉÌô¡‘½­•É}±½…°ÁÌ€µ…Ä€´µ™¥±Ñ•È€‰±…‰•°õ½´¹‘½­•È¹½µÁ½Í”¹ÁÉ½©•Ðô‘ÁÉ½©•Ðˆ¤ñð±•…¹ÕÁ}™…¥±•ôÄ(€€€™½È½¹Ñ…¥¹•È¥¸€‘í½¹Ñ…¥¹•ÉÌèµôì‘¼(€€€€€½¹Ñ…¥¹•É}½Ý¹•Èô¡‘½­•É}±½…°¥¹ÍÁ•Ð€ˆ‘½¹Ñ…¥¹•Èˆ€´µ™½Éµ…Ð€íí¥¹‘•à€¹½¹™¥œ¹1…‰•±Ì€‰½´¹‘½­•È¹½µÁ½Í”¹ÁÉ½©•Ð‰õôœ¤ñð±•…¹ÕÁ}™…¥±•ôÄ(€€€€€¥˜l€ˆ‘½¹Ñ…¥¹•É}½Ý¹•Èˆ€ô€ˆ‘ÁÉ½©•ÐˆtìÑ¡•¸(€€€€€€€‘½­•É}±½…°É´€µ˜€ˆ‘½¹Ñ…¥¹•Èˆ€ø½‘•Ø½¹Õ±°ñð±•…¹ÕÁ}™…¥±•ôÄ(€€€€€•±Í”(€€€€€€€±•…¹ÕÁ}™…¥±•ôÄ(€€€€€™¤(€€€‘½¹”(€€€½¹Ñ…¥¹•ÉÌô¡‘½­•É}±½…°ÁÌ€µ…Ä€´µ™¥±Ñ•È€‰±…‰•°õ½´¹‘½­•È¹½µÁ½Í”¹ÁÉ½©•Ðô‘ÁÉ½©•Ðˆ¤ñð±•…¹ÕÁ}™…¥±•ôÄ(€€€¹•ÑÝ½É­Ìô¡‘½­•É}±½…°¹•ÑÝ½É¬±Ì€µÄ€´µ™¥±Ñ•È€‰±…‰•°õ½´¹‘½­•È¹½µÁ½Í”¹ÁÉ½©•Ðô‘ÁÉ½©•Ðˆ¤ñð±•…¹ÕÁ}™…¥±•ôÄ(€€€™½È¹•ÑÝ½É¬¥¸€‘í¹•ÑÝ½É­Ìèµôì‘¼(€€€€€¹•ÑÝ½É­}½Ý¹•Èô¡‘½­•É}±½…°¹•ÑÝ½É¬¥¹ÍÁ•Ð€ˆ‘¹•ÑÝ½É¬ˆ€´µ™½Éµ…Ð€íí¥¹‘•à€¹1…‰•±Ì€‰½´¹‘½­•È¹½µÁ½Í”¹ÁÉ½©•Ð‰õôœ¤ñð±•…¹ÕÁ}™…¥±•ôÄ(€€€€€¹•ÑÝ½É­}¹…µ”ô¡‘½­•É}±½…°¹•ÑÝ½É¬¥¹ÍÁ•Ð€ˆ‘¹•ÑÝ½É¬ˆ€´µ™½Éµ…Ð€íì¹9…µ•õôœ¤ñð±•…¹ÕÁ}™…¥±•ôÄ(€€€€€¹•ÑÝ½É­}½¹Ñ…¥¹•ÉÌô¡‘½­•É}±½…°¹•ÑÝ½É¬¥¹ÍÁ•Ð€ˆ‘¹•ÑÝ½É¬ˆ€´µ™½Éµ…Ð€íí±•¸€¹½¹Ñ…¥¹•ÉÍõôœ¤ñð±•…¹ÕÁ}™…¥±•ôÄ(€€€€€¥˜l€ˆ‘¹•ÑÝ½É­}½Ý¹•Èˆ€ô€ˆ‘ÁÉ½©•Ðˆt€˜˜l€ˆ‘¹•ÑÝ½É­}¹…µ”ˆ€ô€ˆ‘íÁÉ½©•Ñõ}•É½Í}Ñ•ÍÐˆt€˜˜l€ˆ‘¹•ÑÝ½É­}½¹Ñ…¥¹•ÉÌˆ€ô€ÀtìÑ¡•¸(€€€€€€€‘½­•É}±½…°¹•ÑÝ½É¬É´€ˆ‘¹•ÑÝ½É¬ˆ€ø½‘•Ø½¹Õ±°ñð±•…¹ÕÁ}™…¥±•ôÄ(€€€€€•±Í”(€€€€€€€±•…¹ÕÁ}™…¥±•ôÄ(€€€€€™¤(€€€‘½¹”(€€€Ù½±Õµ•Ìô¡‘½­•É}±½…°Ù½±Õµ”±Ì€µÄ€´µ™¥±Ñ•È€‰±…‰•°õ½´¹‘½­•È¹½µÁ½Í”¹ÁÉ½©•Ðô‘ÁÉ½©•Ðˆ¤ñð±•…¹ÕÁ}™…¥±•ôÄ(€€€¥˜l€µ¸€ˆ‘í½¹Ñ…¥¹•ÉÌèµô‘í¹•ÑÝ½É­Ìèµô‘íÙ½±Õµ•ÌèµôˆtìÑ¡•¸±•…¹ÕÁ}™…¥±•ôÄì™¤(€™¤(€¥˜l€µ˜€ˆ‘ÉÕ¹}µ…¹¥™•ÍÐˆtìÑ¡•¸(€€€™½ÈÍ•ÉÙ¥”¥¸Á½¥¹Ðµ…Á¤Á½¥¹Ðµ…Á¤µµ¥É…Ñ”Á½¥¹ÐµÝ½É­•Èì‘¼(€€€€€¥µ…•}É•˜ôˆ‘íÁÉ½©•Ñô´‘íÍ•ÉÙ¥•ôé±…Ñ•ÍÐˆ(€€€€€µ…¹¥™•ÍÑ}•¹ÑÉäô¡…Ý¬€µðœ€µØÉ•˜ôˆ‘¥µ…•}É•˜ˆ€œÄ€ôôÉ•˜ìÁÉ¥¹Ðì•á¥Ðôœ€ˆ‘ÉÕ¹}µ…¹¥™•ÍÐˆ¤(€€€€€¥˜l€µè€ˆ‘µ…¹¥™•ÍÑ}•¹ÑÉäˆtìÑ¡•¸(€€€€€€€€ŒÑ…œ±•™Ð‰•¡¥¹…™Ñ•È„™…¥±•‰Õ¥±½¥¹ÍÁ•Ñ¥½¸¡…Ì¹¼Ù•É¥™¥•(€€€€€€€€Œ¥‘•¹Ñ¥Ñä¸AÉ•Í•ÉÙ”¥Ð…¹µ…­”±•…¹ÕÀÙ¥Í¥‰±ä™…¥°±½Í•¸(€€€€€€€¥˜¥µ…•}¥‘•¹Ñ¥Ñäô¡¥¹ÍÁ•Ñ}ÉÕ¹}¥µ…”€ˆ‘¥µ…•}É•˜ˆ¤ìÑ¡•¸(€€€€€€€€€±•…¹ÕÁ}™…¥±•ôÄ(€€€€€€€€€•¡¼€‰1=1}É}%5}=]9IM!%@õU9YI%%Ñ…œô‘¥µ…•}É•˜É•…Í½¸õ¹½Ñ}¥¹}µ…¹¥™•ÍÐˆ€ø˜È(€€€€€€€•±Í”(€€€€€€€€€¥¹ÍÁ•Ñ}ÍÑ…ÑÕÌôü(€€€€€€€€€¥˜l€ˆ‘¥¹ÍÁ•Ñ}ÍÑ…ÑÕÌˆ€µ¹”€ÈtìÑ¡•¸±•…¹ÕÁ}™…¥±•ôÄì™¤(€€€€€€€™¤(€€€€€€€½¹Ñ¥¹Õ”(€€€€€™¤(€€€€€%LôðœÉ•…€µÈµ…¹¥™•ÍÑ}É•˜•áÁ•Ñ•‘}¥µ…•}¥¥µ…•}½Ý¹•È•áÁ•Ñ•‘}Í•ÉÙ¥”€ðñ=(‘µ…¹¥™•ÍÑ}•¹ÑÉä)=(€€€€€…Í”€ˆ‘¥µ…•}É•˜ˆ¥¸(€€€€€€€€ˆ‘íÁÉ½©•ÑôµÁ½¥¹Ðµ…Á¤é±…Ñ•ÍÐ‰ðˆ‘íÁÉ½©•ÑôµÁ½¥¹Ðµ…Á¤µµ¥É…Ñ”é±…Ñ•ÍÐ‰ðˆ‘íÁÉ½©•ÑôµÁ½¥¹ÐµÝ½É­•Èé±…Ñ•ÍÐˆ¤€ìì(€€€€€€€€¨¤±•…¹ÕÁ}™…¥±•ôÄì•¡¼€‰1=1}É}%5}=]9IM!%@õ%0ˆ€ø˜Èì½¹Ñ¥¹Õ”€ìì(€€€€€•Í…Œ(€€€€€¥˜¥µ…•}¥‘•¹Ñ¥Ñäô¡¥¹ÍÁ•Ñ}ÉÕ¹}¥µ…”€ˆ‘¥µ…•}É•˜ˆ¤ìÑ¡•¸(€€€€€€€€è(€€€€€•±Í”(€€€€€€€¥¹ÍÁ•Ñ}ÍÑ…ÑÕÌôü(€€€€€€€¥˜l€ˆ‘¥¹ÍÁ•Ñ}ÍÑ…ÑÕÌˆ€µ•Ä€ÈtìÑ¡•¸(€€€€€€€€€±•…¹ÕÁ}™…¥±•ôÄ(€€€€€€€€€•¡¼€‰1=1}É}%5}%9MAPõ%0Ñ…œô‘¥µ…•}É•˜É•…Í½¸õµ…¹¥™•ÍÑ}¥µ…•}µ¥ÍÍ¥¹œˆ€ø˜È(€€€€€€€•±Í”(€€€€€€€€€±•…¹ÕÁ}™…¥±•ôÄ(€€€€€€€™¤(€€€€€€€½¹Ñ¥¹Õ”(€€€€€™¤(€€€€€ÕÉÉ•¹Ñ}¥µ…•}¥ô‘í¥µ…•}¥‘•¹Ñ¥Ñä”•ð©ô(€€€€€¥µ…•}±…‰•±Ìô‘í¥µ…•}¥‘•¹Ñ¥ÑäŒ©ñô(€€€€€¥˜l€ˆ‘µ…¹¥™•ÍÑ}É•˜ˆ€„ô€ˆ‘¥µ…•}É•˜ˆtñðl€ˆ‘ÕÉÉ•¹Ñ}¥µ…•}¥ˆ€„ô€ˆ‘•áÁ•Ñ•‘}¥µ…•}¥ˆtñðl€ˆ‘¥µ…•}±…‰•±Ìˆ€„ô€ˆ‘ÁÉ½©•Ñð‘•áÁ•Ñ•‘}Í•ÉÙ¥”ˆtñðl€ˆ‘¥µ…•}½Ý¹•Èˆ€„ô€ˆ‘ÁÉ½©•Ðˆtñðl€ˆ‘•áÁ•Ñ•‘}Í•ÉÙ¥”ˆ€„ô€ˆ‘Í•ÉÙ¥”ˆtìÑ¡•¸(€€€€€€€±•…¹ÕÁ}™…¥±•ôÄ(€€€€€€€•¡¼€‰1=1}É}%5}=]9IM!%@õ%0Ñ…œô‘¥µ…•}É•˜É•…Í½¸õ¥‘•¹Ñ¥Ñå}¡…¹•ˆ€ø˜È(€€€€€€€½¹Ñ¥¹Õ”(€€€€€™¤(€€€€€¥µ…•}ÕÍ•ÉÌô¡‘½­•É}±½…°ÁÌ€µ…Ä€´µ™¥±Ñ•È€‰…¹•ÍÑ½Èô‘•áÁ•Ñ•‘}¥µ…•}¥ˆ¤ñðì±•…¹ÕÁ}™…¥±•ôÄì½¹Ñ¥¹Õ”ìô(€€€€€¥˜l€µ¸€ˆ‘¥µ…•}ÕÍ•ÉÌˆtìÑ¡•¸(€€€€€€€•¡¼€‰1=1}É}%5}IQ%9õ%9}UMÍ•ÉÙ¥•}Ñ…œô‘¥µ…•}É•˜ˆ€ø˜È(€€€€€€€±•…¹ÕÁ}™…¥±•ôÄ(€€€€€•±¥˜€„‘½­•É}±½…°¥µ…”É´€ˆ‘¥µ…•}É•˜ˆ€ø½‘•Ø½¹Õ±°ìÑ¡•¸(€€€€€€€±•…¹ÕÁ}™…¥±•ôÄ(€€€€€•±Í”(€€€€€€€•¡¼€‰1=1}É}%5}19U@õAMLÑ…œô‘¥µ…•}É•˜ˆ(€€€€€™¤(€€€‘½¹”(€™¤(€É´€µÉ˜€ˆ‘ÑµÀˆñð±•…¹ÕÁ}™…¥±•ôÄ(€¥˜l€ˆ‘±•…¹ÕÁ}™…¥±•ˆ€µ¹”€ÀtìÑ¡•¸(€€€•¡¼€‰1=1}É}19U@õ%0ÁÉ½©•Ðô‘ÁÉ½©•Ðˆ€ø˜È(€€€l€ˆ‘ÉŒˆ€µ¹”€ÀtñðÉŒôÄ(€•±Í”(€€€•¡¼€‰1=1}É}19U@õAMLÁÉ½©•Ðô‘ÁÉ½©•Ðˆ(€™¤(€•á¥Ð€ˆ‘ÉŒˆ)ô)ÑÉ…À±•…¹ÕÀa%P!U@%9PQI4)™½ÈÍ•ÉÙ¥”¥¸Á½¥¹Ðµ…Á¤Á½¥¹Ðµ…Á¤µµ¥É…Ñ”Á½¥¹ÐµÝ½É­•Èì‘¼(€¥µ…•}É•˜ôˆ‘íÁÉ½©•Ñô´‘íÍ•ÉÙ¥•ôé±…Ñ•ÍÐˆ(€¥˜¥µ…•}¥‘•¹Ñ¥Ñäô¡¥¹ÍÁ•Ñ}ÉÕ¹}¥µ…”€ˆ‘¥µ…•}É•˜ˆ¤ìÑ¡•¸(€€€•¡¼€‰1=1}É}IM=UI}=11%M%=8õ%0¥µ…”ô‘¥µ…•}É•˜ˆ€ø˜È(€€€•á¥Ð€È(€•±Í”(€€€¥¹ÍÁ•Ñ}ÍÑ…ÑÕÌôü(€€€l€ˆ‘¥¹ÍÁ•Ñ}ÍÑ…ÑÕÌˆ€µ•Ä€Ètñðì•¡¼€‰1=1}É}%5}%9MAPõ%0Ñ…œô‘¥µ…•}É•˜Á¡…Í”õÁÉ•™±¥¡Ðˆ€ø˜Èì•á¥Ð€Èìô(€™¤)‘½¹”)™½ÈÉ•Í½ÕÉ•}­¥¹¥¸½¹Ñ…¥¹•È¹•ÑÝ½É¬Ù½±Õµ”ì‘¼(€…Í”€ˆ‘É•Í½ÕÉ•}­¥¹ˆ¥¸(€€€½¹Ñ…¥¹•È¤•á¥ÍÑ¥¹œô¡‘½­•É}±½…°ÁÌ€µ…Ä€´µ™¥±Ñ•È€‰±…‰•°õ½´¹‘½­•È¹½µÁ½Í”¹ÁÉ½©•Ðô‘ÁÉ½©•Ðˆ¤€ìì(€€€¹•ÑÝ½É¬¤•á¥ÍÑ¥¹œô¡‘½­•É}±½…°¹•ÑÝ½É¬±Ì€µÄ€´µ™¥±Ñ•È€‰±…‰•°õ½´¹‘½­•È¹½µÁ½Í”¹ÁÉ½©•Ðô‘ÁÉ½©•Ðˆ¤€ìì(€€€Ù½±Õµ”¤•á¥ÍÑ¥¹œô¡‘½­•É}±½…°Ù½±Õµ”±Ì€µÄ€´µ™¥±Ñ•È€‰±…‰•°õ½´¹‘½­•È¹½µÁ½Í”¹ÁÉ½©•Ðô‘ÁÉ½©•Ðˆ¤€ìì(€•Í…Œ(€l€µè€ˆ‘•á¥ÍÑ¥¹œˆtñðì•¡¼€‰1=1}É}IM=UI}=11%M%=8õ%0ÑåÁ”ô‘É•Í½ÕÉ•}­¥¹ˆ€ø˜Èì•á¥Ð€Èìô)‘½¹”)¥˜¥¹Ñ•É…Ñ¥½¹}¥‘•¹Ñ¥Ñäô¡¥¹ÍÁ•Ñ}ÉÕ¹}½¹Ñ…¥¹•È€ˆ‘¥¹Ñ•É…Ñ¥½¹}½¹Ñ…¥¹•Èˆ¤ìÑ¡•¸(€•¡¼1=1}É}IM=UI}=11%M%=8õ%0ÑåÁ”õ¥¹Ñ•É…Ñ¥½¹}½¹Ñ…¥¹•È€ø˜È(€•á¥Ð€È)•±Í”(€¥¹ÍÁ•Ñ}ÍÑ…ÑÕÌôü(€l€ˆ‘¥¹ÍÁ•Ñ}ÍÑ…ÑÕÌˆ€µ•Ä€Ètñðì•¡¼1=1}É}=9Q%9I}%9MAPõ%0Á¡…Í”õÁÉ•™±¥¡Ð€ø˜Èì•á¥Ð€Èìô)™¤)ÉÕ¹}½Ý¹•ôÄ)µ­‘¥È€µ´€ÜÀÀ€ˆ‘ÑµÀ½¡½µ”ˆ)™½ÈÍ•ÉÙ¥”¥¸Á½¥¹Ðµ…Á¤Á½¥¹Ðµ…Á¤µµ¥É…Ñ”Á½¥¹ÐµÝ½É­•Èì‘¼(€¥µ…•}É•˜ôˆ‘íÁÉ½©•Ñô´‘íÍ•ÉÙ¥•ôé±…Ñ•ÍÐˆ(€•¡¼€‰1=1}É}%5}	U%1õ	%8Í•ÉÙ¥”ô‘Í•ÉÙ¥”ˆ(€½µÁ½Í”€´µÁÉ½™¥±”Ý½É­•È‰Õ¥±€ˆ‘Í•ÉÙ¥”ˆ(€¥µ…•}¥‘•¹Ñ¥Ñäô¡‘½­•É}±½…°¥µ…”¥¹ÍÁ•Ð€ˆ‘¥µ…•}É•˜ˆ€´µ™½Éµ…Ð€íì¹%‘õõñíí¥¹‘•à€¹½¹™¥œ¹1…‰•±Ì€‰½´¹Á½¥¹Ð¹µ”ÌØ¹ÉÕ¸‰õõñíí¥¹‘•à€¹½¹™¥œ¹1…‰•±Ì€‰½´¹Á½¥¹Ð¹µ”ÌØ¹Í•ÉÙ¥”‰õôœ¤(€•áÁ•Ñ•‘}¥‘•¹Ñ¥Ñäôˆ‘ÁÉ½©•Ñð‘Í•ÉÙ¥”ˆ(€l€ˆ‘í¥µ…•}¥‘•¹Ñ¥ÑäŒ©ñôˆ€ô€ˆ‘•áÁ•Ñ•‘}¥‘•¹Ñ¥Ñäˆtñðì•¡¼€‰1=1}É}%5}=]9IM!%@õ%0Ñ…œô‘¥µ…•}É•˜É•…Í½¸õ‰Õ¥±‘}±…‰•±}µ¥Íµ…Ñ ˆ€ø˜Èì•á¥Ð€Äìô(€€ŒI•½É•… ¥µ…”¥µµ•‘¥…Ñ•±ä…™Ñ•È¥ÑÌ½Ý¸‰Õ¥±…¹½Ý¹•ÉÍ¡¥ÀÙ…±¥‘…Ñ¥½¸°(€€ŒÍ¼„±…Ñ•ÈÍ•ÉÙ¥”‰Õ¥±™…¥±ÕÉ”…¹¹½Ð½ÉÁ¡…¸•…É±¥•ÈÙ•É¥™¥•¥µ…•Ì¸(€ÁÉ¥¹Ñ˜€œ•Íð•Íð•Íð•Íq¸œ€ˆ‘¥µ…•}É•˜ˆ€ˆ‘í¥µ…•}¥‘•¹Ñ¥Ñä”•ð©ôˆ€ˆ‘ÁÉ½©•Ðˆ€ˆ‘Í•ÉÙ¥”ˆ€øøˆ‘ÉÕ¹}µ…¹¥™•ÍÐˆ(€•¡¼€‰1=1}É}%5}	U%1õAMLÍ•ÉÙ¥”ô‘Í•ÉÙ¥”ˆ)‘½¹”)•¡¼1=1}É}=5A=M}MQIPõ	%8)½µÁ½Í•}ÍÑ…ÉÑ•ôÄ)½µÁ½Í”ÕÀ€µ€´µÝ…¥Ð€´µÝ…¥ÐµÑ¥µ•½ÕÐ€ÈÐÀÁ½ÍÑÉ•Ì)½µÁ½Í”ÕÀ€µ€´µ¹¼µ‘•ÁÌ•É½Ìµµ¥É…Ñ”)µ¥É…Ñ½É}½¹Ñ…¥¹•Èô¡½µÁ½Í”ÁÌ€´µ…±°€´µÅÕ¥•Ð•É½Ìµµ¥É…Ñ”¤)l€µ¸€ˆ‘µ¥É…Ñ½É}½¹Ñ…¥¹•Èˆtñðì•¡¼1=1}É}MQ=-}5%IQ%=9Lõ%0É•…Í½¸õ½¹Ñ…¥¹•É}µ¥ÍÍ¥¹œ€ø˜Èì•á¥Ð€Äìô)µ¥É…Ñ½É}ÍÑ…ÑÕÌô¡‘½­•É}±½…°Ý…¥Ð€ˆ‘µ¥É…Ñ½É}½¹Ñ…¥¹•Èˆ¤)l€ˆ‘µ¥É…Ñ½É}ÍÑ…ÑÕÌˆ€ô€Àtñðì•¡¼€‰1=1}É}MQ=-}5%IQ%=9Lõ%0•á¥Ñ}½‘”ô‘µ¥É…Ñ½É}ÍÑ…ÑÕÌˆ€ø˜Èì•á¥Ð€Äìô)•¡¼1=1}É}MQ=-}5%IQ%=9LõAML)½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µ•É½Í}Ñ•ÍÐ€µØ=9}II=I}MQ=@ôÄ€ððME0œ)I9PUM=8M!5•¹¥¹”Q<•É½Í}ÉÕ¹Ñ¥µ”°•É½Í}ÉÕ¹Ñ¥µ•}¹½‰åÁ…ÍÌì)I9P10=810Q	1L%8M!5•¹¥¹”Q<•É½Í}ÉÕ¹Ñ¥µ”ì)I9P10=810MEU9L%8M!5•¹¥¹”Q<•É½Í}ÉÕ¹Ñ¥µ”ì)I9PaUQ=810U9Q%=9L%8M!5•¹¥¹”Q<•É½Í}ÉÕ¹Ñ¥µ”ì)1QHU1PAI%Y%1L=HI=1•É½Í}µ¥É…Ñ½È%8M!5•¹¥¹”I9P10=8Q	1LQ<•É½Í}ÉÕ¹Ñ¥µ”ì)1QHU1PAI%Y%1L=HI=1•É½Í}µ¥É…Ñ½È%8M!5•¹¥¹”I9P10=8MEU9LQ<•É½Í}ÉÕ¹Ñ¥µ”ì)1QHU1PAI%Y%1L=HI=1•É½Í}µ¥É…Ñ½È%8M!5•¹¥¹”I9PaUQ=8U9Q%=9LQ<•É½Í}ÉÕ¹Ñ¥µ”ì)I9PM1P°%9MIP°UAQ°1Q=810Q	1L%8M!5•¹¥¹”Q<•É½Í}ÉÕ¹Ñ¥µ•}¹½‰åÁ…ÍÌì)I9PUM°M1P°UAQ=810MEU9L%8M!5•¹¥¹”Q<•É½Í}ÉÕ¹Ñ¥µ•}¹½‰åÁ…ÍÌì)1QHU1PAI%Y%1L=HI=1•É½Í}µ¥É…Ñ½È%8M!5•¹¥¹”I9PM1P°%9MIP°UAQ°1Q=8Q	1LQ<•É½Í}ÉÕ¹Ñ¥µ•}¹½‰åÁ…ÍÌì)1QHU1PAI%Y%1L=HI=1•É½Í}µ¥É…Ñ½È%8M!5•¹¥¹”I9PUM°M1P°UAQ=8MEU9LQ<•É½Í}ÉÕ¹Ñ¥µ•}¹½‰åÁ…ÍÌì)ME0)½µÁ½Í”ÕÀ€µ€´µÝ…¥Ð€´µÝ…¥ÐµÑ¥µ•½ÕÐ€ÈÐÀ)•¡¼1=1}É}=5A=M}MQIPõAML)•É½Í}…Á¥}ÁÉ¥Ù¥±••Ìô¡½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µ•É½Í}Ñ•ÍÐ€µÐ€ððME0œ)]%Q É•±…Ñ¥½¹}ÁÉ¥Ù¥±••ÌL€ (€M1PŒ¹½¥°Œ¹É•±­¥¹°À¹ÁÉ¥Ù¥±•”(€I=4Á}±…ÍÌŒ(€)=%8Á}¹…µ•ÍÁ…”¸=8¸¹½¥€ôŒ¹É•±¹…µ•ÍÁ…”(€I=ML)=%8€¡Y1UL€ M1Pœ¤°€ %9MIPœ¤°€ UAQœ¤°€ 1Qœ¤°€ QIU9Qœ¤°€ II9Lœ¤°€ QI%Hœ¤¤LÀ¡ÁÉ¥Ù¥±•”¤(€]!I¸¹¹ÍÁ¹…µ”9=P1%-€Áq|”œ9¸¹¹ÍÁ¹…µ”€ðø€¥¹™½Éµ…Ñ¥½¹}Í¡•µ„œ(€€€9Œ¹É•±­¥¹%8€ Èœ°€Àœ°€Øœ°€´œ°€˜œ¤(€€€9¡…Í}Ñ…‰±•}ÁÉ¥Ù¥±•” Á½¥¹Ñ}…Á¥}Ñ•ÍÐœ°Œ¹½¥°À¹ÁÉ¥Ù¥±•”¤(¤°½±Õµ¹}ÁÉ¥Ù¥±••ÌL€ (€M1PŒ¹½¥(€I=4Á}±…ÍÌŒ(€)=%8Á}¹…µ•ÍÁ…”¸=8¸¹½¥€ôŒ¹É•±¹…µ•ÍÁ…”(€)=%8Á}…ÑÑÉ¥‰ÕÑ”„=8„¹…ÑÑÉ•±¥€ôŒ¹½¥9„¹…ÑÑ¹Õ´€ø€À99=P„¹…ÑÑ¥Í‘É½ÁÁ•(€I=ML)=%8€¡Y1UL€ M1Pœ¤°€ %9MIPœ¤°€ UAQœ¤°€ II9Lœ¤¤LÀ¡ÁÉ¥Ù¥±•”¤(€]!I¸¹¹ÍÁ¹…µ”9=P1%-€Áq|”œ9¸¹¹ÍÁ¹…µ”€ðø€¥¹™½Éµ…Ñ¥½¹}Í¡•µ„œ(€€€9Œ¹É•±­¥¹%8€ Èœ°€Àœ°€Øœ°€´œ°€˜œ¤(€€€9¡…Í}½±Õµ¹}ÁÉ¥Ù¥±•” Á½¥¹Ñ}…Á¥}Ñ•ÍÐœ°Œ¹½¥°„¹…ÑÑ¹Õ´°À¹ÁÉ¥Ù¥±•”¤(¤°Í•ÅÕ•¹•}ÁÉ¥Ù¥±••ÌL€ (€M1PŒ¹½¥(€I=4Á}±…ÍÌŒ(€)=%8Á}¹…µ•ÍÁ…”¸=8¸¹½¥€ôŒ¹É•±¹…µ•ÍÁ…”(€I=ML)=%8€¡Y1UL€ UMœ¤°€ M1Pœ¤°€ UAQœ¤¤LÀ¡ÁÉ¥Ù¥±•”¤(€]!I¸¹¹ÍÁ¹…µ”9=P1%-€Áq|”œ9¸¹¹ÍÁ¹…µ”€ðø€¥¹™½Éµ…Ñ¥½¹}Í¡•µ„œ(€€€9Œ¹É•±­¥¹€ô€Lœ9¡…Í}Í•ÅÕ•¹•}ÁÉ¥Ù¥±•” Á½¥¹Ñ}…Á¥}Ñ•ÍÐœ°Œ¹½¥°À¹ÁÉ¥Ù¥±•”¤(¤)M1P(€¡…Í}‘…Ñ…‰…Í•}ÁÉ¥Ù¥±•” Á½¥¹Ñ}…Á¥}Ñ•ÍÐœ°€•É½Í}Ñ•ÍÐœ°€=99Pœ¤èéÑ•áÐñð€ðœñð(€¡…Í}Í¡•µ…}ÁÉ¥Ù¥±•” Á½¥¹Ñ}…Á¥}Ñ•ÍÐœ°€•¹¥¹”œ°€UMœ¤èéÑ•áÐñð€ðœñð(€€¡M1P½Õ¹Ð ¨¤I=4É•±…Ñ¥½¹}ÁÉ¥Ù¥±••Ì¤èéÑ•áÐñð€ðœñð(€€¡M1P½Õ¹Ð ¨¤I=4½±Õµ¹}ÁÉ¥Ù¥±••Ì¤èéÑ•áÐñð€ðœñð(€€¡M1P½Õ¹Ð ¨¤I=4Í•ÅÕ•¹•}ÁÉ¥Ù¥±••Ì¤èéÑ•áÐì)ME0(¤)l€ˆ‘•É½Í}…Á¥}ÁÉ¥Ù¥±••Ìˆ€ô€™…±Í•ñ™…±Í•ðÁðÁðÀœtñðì(€•¡¼€‰1=1}É}I=M}	}A%}%M=1Q%=8õ%0¡•­Ìô‘•É½Í}…Á¥}ÁÉ¥Ù¥±••Ì•áÁ•Ñ•õ™…±Í•ñ™…±Í•ðÁðÁðÀˆ€ø˜È(€•á¥Ð€Ä)ô)•¡¼€‰1=1}É}I=M}	}A%}%M=1Q%=8õAML…Á¥}É½±•}½¹¹•Ðõ™…±Í”Í¡•µ…}ÕÍ…”õ™…±Í”Ñ…‰±•}ÁÉ¥Ù¥±••ÌôÀ½±Õµ¹}ÁÉ¥Ù¥±••ÌôÀÍ•ÅÕ•¹•}ÁÉ¥Ù¥±••ÌôÀˆ)Í••‘}½ÕÑÁÕÐô¡½µÁ½Í”•á•Œ€µP•É½Ì€½ÕÍÈ½±½…°½‰¥¸½•É½Ìµ•¹¥¹”Í••µÁ•ÉÍ½¹…Ì€½•ÑŒ½•É½Ìµ•¹¥¹”½Ñ•ÍÐµÁ•ÉÍ½¹…Ì€Èø˜Ä¤ñðì(€ÁÉ¥¹Ñ˜€œ•Íq¸œ€ˆ‘Í••‘}½ÕÑÁÕÐˆ€ø˜È(€•¡¼1=1}É}MQ=-}AIM=9}Mõ%0€ø˜È(€•á¥Ð€Ä)ô)ÁÉ¥¹Ñ˜€œ•Íq¸œ€ˆ‘Í••‘}½ÕÑÁÕÐˆ)•¹½µ•}¥ô¡ÁÉ¥¹Ñ˜€œ•Íq¸œ€ˆ‘Í••‘}½ÕÑÁÕÐˆðÉ•À€Må¹Ñ¡•Ñ¥ŒÉ½ÌA•ÉÍ½¹„œðÉ•À€µ¼€lÀ´å„µ™uìáôµlÀ´å„µ™uìÑôµlÀ´å„µ™uìÑôµlÀ´å„µ™uìÑôµlÀ´å„µ™uìÄÉôœðÑ…¥°€´Ä¤)ml€ˆ‘•¹½µ•}¥ˆ€õøylÀ´å„µ™uìáôµlÀ´å„µ™uìÑôµlÀ´å„µ™uìÑôµlÀ´å„µ™uìÑôµlÀ´å„µ™uìÄÉôutñðì(€•¡¼1=1}É}MQ=-}AIM=9}Mõ%0É•…Í½¸õ•¹½µ•}¥‘}µ¥ÍÍ¥¹œ€ø˜È(€•á¥Ð€Ä)ô)•¡¼1=1}É}MQ=-}AIM=9}MõAML)•É½Í}É±Í}ÍÑ…ÑÌô¡½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µ•É½Í}Ñ•ÍÐ€µÑŒ€‰M1P½Õ¹Ð ¨¤ñð€ðœñð½Õ¹Ð ¨¤%1QH€¡]!IŒ¹É•±É½ÝÍ•ÕÉ¥Ñä¤ñð€ðœñð½Õ¹Ð ¨¤%1QH€¡]!IŒ¹É•±™½É•É½ÝÍ•ÕÉ¥Ñä¤ñð€ðœñð€¡M1P½Õ¹Ð ¨¤I=4Á}Á½±¥¥•Ì]!IÍ¡•µ…¹…µ”ô•¹¥¹”œ¤I=4Á}±…ÍÌŒ)=%8Á}¹…µ•ÍÁ…”¸=8¸¹½¥õŒ¹É•±¹…µ•ÍÁ…”]!I¸¹¹ÍÁ¹…µ”ô•¹¥¹”œ9Œ¹É•±­¥¹%8€ Èœ°Àœ¤ìˆ¤)%LôðœÉ•…€µÈ•É½Í}Ñ…‰±•Ì•É½Í}É±Í}•¹…‰±••É½Í}É±Í}™½É••É½Í}Á½±¥å}½Õ¹Ð€ðñ=(‘•É½Í}É±Í}ÍÑ…ÑÌ)=)•É½Í}ÉÕ¹Ñ¥µ•}‰åÁ…ÍÌô¡½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µ•É½Í}Ñ•ÍÐ€µÑŒ€‰M1PÉ½±‰åÁ…ÍÍÉ±ÌI=4Á}É½±•Ì]!IÉ½±¹…µ”ô•É½Í}ÉÕ¹Ñ¥µ”œìˆ¤)•É½Í}…‘µ¥¹}Á•ÉÍ½¹…Ìô¡½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µ•É½Í}Ñ•ÍÐ€µÅÑŒ€MPI=1•É½Í}ÉÕ¹Ñ¥µ”ìM1P½Õ¹Ð ¨¤I=4•¹¥¹”¹Á•ÉÍ½¹…}•¹½µ•Ììœ¤)•É½Í}ÍÑÉ¥Ñ}Á•ÉÍ½¹…Ìô¡½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µ•É½Í}Ñ•ÍÐ€µÅÑŒ€MPI=1•É½Í}ÉÕ¹Ñ¥µ•}¹½‰åÁ…ÍÌìM1P½Õ¹Ð ¨¤I=4•¹¥¹”¹Á•ÉÍ½¹…}•¹½µ•Ììœ¤)l€ˆ‘•É½Í}ÉÕ¹Ñ¥µ•}‰åÁ…ÍÌˆ€ôÐt€˜˜l€ˆ‘•É½Í}…‘µ¥¹}Á•ÉÍ½¹…Ìˆ€µÐ€Àt€˜˜l€ˆ‘•É½Í}ÍÑÉ¥Ñ}Á•ÉÍ½¹…Ìˆ€ô€Àt€˜˜l€ˆ‘•É½Í}Ñ…‰±•Ìˆ€µÐ€Àt€˜˜l€ˆ‘•É½Í}É±Í}•¹…‰±•ˆ€ô€ˆ‘•É½Í}Ñ…‰±•Ìˆt€˜˜l€ˆ‘•É½Í}É±Í}™½É•ˆ€ô€Àt€˜˜l€ˆ‘•É½Í}Á½±¥å}½Õ¹Ðˆ€ô€Àtñðì(€•¡¼€‰1=1}É}I=M}Q	M}I1M}1%5%QQ%=8õU9aAQÑ…‰±•Ìô‘•É½Í}Ñ…‰±•Ì•¹…‰±•ô‘•É½Í}É±Í}•¹…‰±•™½É•ô‘•É½Í}É±Í}™½É•ÉÕ¹Ñ¥µ•}É½±•}É½ÝÌô‘•É½Í}…‘µ¥¹}Á•ÉÍ½¹…ÌÍÑÉ¥Ñ}É½±•}É½ÝÌô‘•É½Í}ÍÑÉ¥Ñ}Á•ÉÍ½¹…ÌÁ½±¥¥•Ìô‘•É½Í}Á½±¥å}½Õ¹ÐÉÕ¹Ñ¥µ•}‰åÁ…ÍÌô‘•É½Í}ÉÕ¹Ñ¥µ•}‰åÁ…ÍÌˆ€ø˜È(€•á¥Ð€Ä)ô)•¡¼€‰1=1}É}I=M}Q	M}I1M}1%5%QQ%=8õ=9%I5Ñ…‰±•Ìô‘•É½Í}Ñ…‰±•Ì•¹…‰±•ô‘•É½Í}É±Í}•¹…‰±•™½É•ô‘•É½Í}É±Í}™½É•ÉÕ¹Ñ¥µ•}É½±•}É½ÝÌô‘•É½Í}…‘µ¥¹}Á•ÉÍ½¹…ÌÍÑÉ¥Ñ}É½±•}É½ÝÌô‘•É½Í}ÍÑÉ¥Ñ}Á•ÉÍ½¹…ÌÁ½±¥¥•Ìô‘•É½Í}Á½±¥å}½Õ¹ÐÉÕ¹Ñ¥µ•}‰åÁ…ÍÌô‘•É½Í}ÉÕ¹Ñ¥µ•}‰åÁ…ÍÌˆ)½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µÁ½¥¹Ñ}Ñ•ÍÐ€µØ=9}II=I}MQ=@ôÄ€ððME0œ)I9PM1P°%9MIP°UAQ°1Q=810Q	1L%8M!5•¹¥¹”Q<Á½¥¹Ñ}Ý½É­•É}Ñ•ÍÐì)I9PUM°M1P°UAQ=810MEU9L%8M!5•¹¥¹”Q<Á½¥¹Ñ}Ý½É­•É}Ñ•ÍÐì)ME0)½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µÁ½¥¹Ñ}Ñ•ÍÐ€µØ=9}II=I}MQ=@ôÄ€ððME0œ)%9MIP%9Q<€‰UÍ•Èˆ€¡¥°‰Ñ•±•É…µUÍ•É%ˆ°‰Ñ•±•É…µUÍ•É¹…µ”ˆ°‰™¥ÉÍÑ9…µ”ˆ°‰É•…Ñ•‘Ðˆ°‰ÕÁ‘…Ñ•‘Ðˆ¤Y1UL€ œÄÀÀÀÀÀÀÀ´ÀÀÀÀ´ÐÀÀÀ´àÀÀÀ´ÀÀÀÀÀÀÀÀÀÀÀÄœ°äÀÀÀÀÀÀÀÄ°•É½Í}Ñ•ÍÑ}‘¥…±½Õ”œ°Må¹Ñ¡•Ñ¥Œœ±¹½Ü ¤±¹½Ü ¤¤ì)%9MIP%9Q<€‰É•…Ñ½Èˆ€¡¥°‰‘¥ÍÁ±…å9…µ”ˆ±Í±Õœ°‰É•…Ñ•‘Ðˆ¤Y1UL€ œÈÀÀÀÀÀÀÀ´ÀÀÀÀ´ÐÀÀÀ´àÀÀÀ´ÀÀÀÀÀÀÀÀÀÀÀÈœ°Må¹Ñ¡•Ñ¥ŒÉ½ÌA•ÉÍ½¹„œ°•É½ÌµÑ•ÍÐµÁ•ÉÍ½¹„œ±¹½Ü ¤¤ì)ME0)½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µÁ½¥¹Ñ}Ñ•ÍÐ€µØ=9}II=I}MQ=@ôÄ€ðñME0)%9MIP%9Q<€‰Á½¥¹Ñ¡…ÑA½±¥åAÉ½™¥±”ˆ(€€¡¥°‰Í½ÕÉ•Q•¹…¹Ñ%ˆ±Ù•ÉÍ¥½¸°‰Ñ•ÉµÍY•ÉÍ¥½¸ˆ°‰ÁÉ¥Ù…åY•ÉÍ¥½¸ˆ±ÍÑ…ÑÕÌ°‰•™™•Ñ¥Ù•É½´ˆ±ÉÕ±•Ì¤)Y1UL(€€ •É½Í}Ñ•ÍÑ}Á½¥¹Ñ}Á½±¥äœ°œ‘Ñ•¹…¹Ðœ°Ä°Á½¥¹ÐµÑ•ÉµÌµØÄœ°Á½¥¹ÐµÁÉ¥Ù…äµØÄœ°…Ñ¥Ù”œ±¹½Ü ¤°(€€€ì‰µ¥¹¥µÕµ}…”ˆèÄà°‰…¥}‘¥Í±½ÍÕÉ•}É•ÅÕ¥É•ˆéÑÉÕ”°‰Í•±™}…ÑÑ•ÍÑ…Ñ¥½¹}…±±½Ý•ˆéÑÉÕ”°‰…‘Õ±Ñ}½¹±å}™•…ÑÕÉ•Ìˆémt°‰‘¥Í±½ÍÕÉ•}É•Á•…Ñ}¡½ÕÉÌˆèÈÑôœèé©Í½¹ˆ¤ì)ME0)½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µÁ½¥¹Ñ}Ñ•ÍÐ€µØ=9}II=I}MQ=@ôÄ€µŒp(€€‰%9MIP%9Q<p‰É•…Ñ½ÉAÉ½™¥±•pˆ€¡¥±p‰É•…Ñ½É%‘pˆ±ÍÑ…ÑÕÌ±‰¥¼±p‰Ñ…Í)Í½¹pˆ±p‰•É½Í•¹½µ•%‘pˆ¤Y1UL€ •É½Í}Ñ•ÍÑ}ÁÉ½™¥±”œ°œÈÀÀÀÀÀÀÀ´ÀÀÀÀ´ÐÀÀÀ´àÀÀÀ´ÀÀÀÀÀÀÀÀÀÀÀÈœ°AAI=Yœ°1½…°Íå¹Ñ¡•Ñ¥ŒÑ•ÍÐÁ•ÉÍ½¹„œ°mtœ°œ‘•¹½µ•}¥œèéÕÕ¥¤ìˆ)Á½ÍÑÉ•Í}¥ô¡½µÁ½Í”ÁÌ€µÄÁ½ÍÑÉ•Ì¤)…Á¥}¥µ…”ô¡½µÁ½Í”¥µ…•Ì€µÄÁ½¥¹Ðµ…Á¤¤(€‘½­•É}±½…°ÉÕ¸€´µ¹…µ”€ˆ‘¥¹Ñ•É…Ñ¥½¹}½¹Ñ…¥¹•Èˆ€´µ±…‰•°€‰½´¹‘½­•È¹½µÁ½Í”¹ÁÉ½©•Ðô‘ÁÉ½©•Ðˆ€´µ¹•ÑÝ½É¬€‰½¹Ñ…¥¹•Èè‘Á½ÍÑÉ•Í}¥ˆp(€€µ”9=}9XõÑ•ÍÐp(€€µ”Q	M}UI0ôÁ½ÍÑÉ•ÍÅ°è¼½Á½¥¹Ñ}Ý½É­•É}Ñ•ÍÐé±½…°µ½¹±äµÁ½¥¹ÐµÝ½É­•ÈµÑ•ÍÑ ÄÈÜ¸À¸À¸ÄèÔÐÌÈ½Á½¥¹Ñ}Ñ•ÍÐýÍ¡•µ„õÁÕ‰±¥Œœp(€€µ”I=M}]=I-I}%MA=M	1}QMQ}ôÄp(€€µØ€ˆ‘É•Á¼½…ÁÁÌ½…Á¤½Ñ•ÍÐè½Ý½É­ÍÁ…”½…ÁÁÌ½…Á¤½Ñ•ÍÐéÉ¼ˆp(€€µØ€ˆ‘É•Á¼½Á…­…•Ì½‘ˆ½ÁÉ¥Íµ„½µ¥É…Ñ¥½¹Ìè½Ý½É­ÍÁ…”½Á…­…•Ì½‘ˆ½ÁÉ¥Íµ„½µ¥É…Ñ¥½¹ÌéÉ¼ˆp(€€´µ•¹ÑÉåÁ½¥¹ÐÁ¹Á´€ˆ‘…Á¥}¥µ…”ˆ€´µ™¥±Ñ•ÈÁ½¥¹Ð½…Á¤•á•Œ¹½‘”€´µ¥µÁ½ÉÐÑÍà€´µÑ•ÍÐp(€Ñ•ÍÐ½•É½ÌµÝ½É­•Èµ½¹ÑÉ…Ð¹Ñ•ÍÐ¹ÑÌÑ•ÍÐ½•É½ÌµÝ½É­•Èµ…¹•°¹¥¹Ñ•É…Ñ¥½¸¹Ñ•ÍÐ¹ÑÌ)•¡¼1=1}É}A=%9Q}EUU}I1M}Q99Q}%M=1Q%=8õAML™¥áÑÕÉ•}É½±”õÁ½¥¹Ñ}Ý½É­•É}Ñ•ÍÐ)½µÁ½Í”€´µÁÉ½™¥±”Ý½É­•ÈÕÀ€µ€´µ¹¼µ‘•ÁÌÁ½¥¹ÐµÝ½É­•È)¥˜€„½µÁ½Í”•á•Œ€µÜ€½Ý½É­ÍÁ…”½…ÁÁÌ½…Á¤€µPÁ½¥¹Ðµ…Á¤¹½‘”€´µ¥µÁ½ÉÐÑÍà€½Ý½É­ÍÁ…”½Í•ÉÙ¥•Ì½•É½Ìµ•¹¥¹”½±½…°µÑ•ÍÐµ”É”¹µ©Ì€øˆ‘ÑµÀ½”É”¹½ÕÐˆ€Èø˜ÄìÑ¡•¸Ñ…¥°€´ÐÀ€ˆ‘ÑµÀ½”É”¹½ÕÐˆ€ø˜Èì•á¥Ð€Äì™¤)…Ð€ˆ‘ÑµÀ½”É”¹½ÕÐˆ)É•±…Ñ¥½¹Í¡¥Á}µ…ÁÁ¥¹}½Õ¹Ðô¡½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µÁ½¥¹Ñ}Ñ•ÍÐ€µÑŒ€M1P½Õ¹Ð ¨¤I=4€‰É½ÍI•±…Ñ¥½¹Í¡¥Á5…ÁÁ¥¹œˆìœ¤)l€ˆ‘É•±…Ñ¥½¹Í¡¥Á}µ…ÁÁ¥¹}½Õ¹Ðˆ€ô€Ätñðì•¡¼€‰1=1}É}A=%9Q}I1Q%=9M!%A}5AA%9õ%0½Õ¹Ðô‘É•±…Ñ¥½¹Í¡¥Á}µ…ÁÁ¥¹}½Õ¹Ðˆ€ø˜Èì•á¥Ð€Äìô)•¡¼1=1}É}A=%9Q}I1Q%=9M!%A}5AA%9õAML)Í•ÍÍ¥½¹}½Õ¹Ðô¡½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µ•É½Í}Ñ•ÍÐ€µÑŒ€‰M1P½Õ¹Ð ¨¤I=4•¹¥¹”¹¡…Ñ}Í•ÍÍ¥½¹Ì]!I¡…¹¹•°€ðø€É½ÕÀœìˆ¤)l€ˆ‘Í•ÍÍ¥½¹}½Õ¹Ðˆ€ô€Ätñðì•¡¼€‰1=1}É}55=Ie}%aQUI}MMM%=9Lõ%0½Õ¹Ðô‘Í•ÍÍ¥½¹}½Õ¹Ðˆ€ø˜Èì•á¥Ð€Äìô)Í•ÍÍ¥½¹}¥ô¡½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µ•É½Í}Ñ•ÍÐ€µÑŒ€‰M1P¥I=4•¹¥¹”¹¡…Ñ}Í•ÍÍ¥½¹Ì]!I¡…¹¹•°€ðø€É½ÕÀœ=IH	dÉ•…Ñ•‘}…ÐM1%5%P€Äìˆ¤)l€µ¸€ˆ‘Í•ÍÍ¥½¹}¥ˆtñðì•¡¼1=1}É}55=Ie}%aQUI}MMM%=8õ%0€ø˜Èì•á¥Ð€Äìô)Í•ÍÍ¥½¹}¥ô¡ÁåÑ¡½¸Ì€µŒ€¥µÁ½ÉÐÍåÌ±ÕÕ¥ìÁÉ¥¹Ð¡ÕÕ¥¹UU%¡ÍåÌ¹…ÉÙlÅt¤¤œ€ˆ‘Í•ÍÍ¥½¹}¥ˆ¤ñðì•¡¼1=1}É}55=Ie}%aQUI}MMM%=8õ%0€ø˜Èì•á¥Ð€Äìô)Í…¹}ÍÑ…Ñ•}Á•¹‘¥¹œô¡½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µ•É½Í}Ñ•ÍÐ€µØ=9}II=I}MQ=@ôÄ€µÑŒp(€€‰]%Q …•‘}Í…¹}ÍÑ…Ñ”L€¡UAQ•¹¥¹”¹É•±…Ñ¥½¹Í¡¥Á}Í…¹}ÍÑ…Ñ”MP±…ÍÑ}ÑÕÉ¹}…Ð€ô¹½Ü ¤€´¥¹Ñ•ÉÙ…°€œÈµ¥¹ÕÑ•Ìœ]!I¥¹ÍÑ…¹•}¥€ô€¡M1P¥¹ÍÑ…¹•}¥I=4•¹¥¹”¹¡…Ñ}Í•ÍÍ¥½¹Ì]!I¥€ô€œ‘Í•ÍÍ¥½¹}¥œèéÕÕ¥¤9Á•¹‘¥¹}ÑÕÉ¹Ì€øô€ÌIQUI9%9Á•¹‘¥¹}ÑÕÉ¹Ì¤M1PÁ•¹‘¥¹}ÑÕÉ¹ÌI=4…•‘}Í…¹}ÍÑ…Ñ”ìˆ¤)ml€ˆ‘Í…¹}ÍÑ…Ñ•}Á•¹‘¥¹œˆ€õøylÀ´åt¬ut€˜˜l€ˆ‘Í…¹}ÍÑ…Ñ•}Á•¹‘¥¹œˆ€µ”€Ìtñðì(€•¡¼€‰1=1}É}55=Ie}%aQUI}M9}MQQõ%0Á•¹‘¥¹}ÑÕÉ¹Ìô‘Í…¹}ÍÑ…Ñ•}Á•¹‘¥¹œˆ€ø˜È(€•á¥Ð€Ä)ô)µ•µ½Éå}ÍÑ…Ñ”ô)™½È…ÑÑ•µÁÐ¥¸€¡Í•Ä€Ä€ØÀ¤ì‘¼(€µ•µ½Éå}ÍÑ…Ñ”ô¡½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µ•É½Í}Ñ•ÍÐ€µÑŒp(€€€€‰M1P½Õ¹Ð ¨¤I=4•¹¥¹”¹½µÁ…¹¥½¹}µ•µ½É¥•Ì]!IÍ•ÍÍ¥½¹}¥€ô€œ‘Í•ÍÍ¥½¹}¥œèéÕÕ¥9…Ñ•½Éä%L9=P9U109½¹Ñ•¹Ð1%-€Me9Q!|”œìˆ¤(€l€ˆ‘µ•µ½Éå}ÍÑ…Ñ”ˆ€ô€ˆÈˆt€˜˜‰É•…¬(€Í±••À€Ä)‘½¹”)¥˜l€ˆ‘µ•µ½Éå}ÍÑ…Ñ”ˆ€„ô€ˆÈˆtìÑ¡•¸(€•¡¼€‰1=1}É}UI	1}55=Idõ%0ÍÑ…Ñ”ô‘µ•µ½Éå}ÍÑ…Ñ”ˆ€ø˜È(€½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µÁ½¥¹Ñ}Ñ•ÍÐ€µÑŒp(€€€€‰M1P€I=M}EUU}%9=MQ%ôœñð©½‰}ÑåÁ”ñð€œèœñðÍÑ…ÑÕÌñð€œèœñð½…±•Í”¡•ÉÉ½É}½‘”°€¹½¹”œ¤ñð€œé…ÑÑ•µÁÑÌôœñð…ÑÑ•µÁÑÌI=4•¹¥¹”¹•É½Í}¥¹™•É•¹•}©½‰Ì=IH	dÉ•…Ñ•‘}…Ðìˆ€ø˜ÈñðÑÉÕ”(€‘¥…¹½ÍÑ¥}Ý½É­•Èô¡½µÁ½Í”€´µÁÉ½™¥±”Ý½É­•ÈÁÌ€µ„€µÄÁ½¥¹ÐµÝ½É­•È¤(€¥˜l€µ¸€ˆ‘‘¥…¹½ÍÑ¥}Ý½É­•ÈˆtìÑ¡•¸(€€€•¡¼1=1}É}]=I-I}%9=MQ%}	%8€ø˜È(€€€‘½­•É}±½…°±½Ì€´µÑ…¥°€àÀ€ˆ‘‘¥…¹½ÍÑ¥}Ý½É­•Èˆ€ø˜ÈñðÑÉÕ”(€€€•¡¼1=1}É}]=I-I}%9=MQ%}9€ø˜È(€™¤(€•á¥Ð€Ä)™¤)•¡¼1=1}É}I5%9}M8õAML…¹‘¥‘…Ñ•ÌôÈ)•¡¼1=1}É}UI	1}55=IdõAML…¹‘¥‘…Ñ•ÌôÈ)¥˜€„½µÁ½Í”•á•Œ€µÜ€½Ý½É­ÍÁ…”½…ÁÁÌ½…Á¤€µPÁ½¥¹Ðµ…Á¤¹½‘”€´µ¥µÁ½ÉÐÑÍà€½Ý½É­ÍÁ…”½Í•ÉÙ¥•Ì½•É½Ìµ•¹¥¹”½±½…°µÑ•ÍÐµ”É”¹µ©Ì€´µÉ•…±°µ½¹±ä€øˆ‘ÑµÀ½É•…±°¹½ÕÐˆ€Èø˜ÄìÑ¡•¸Ñ…¥°€´ÐÀ€ˆ‘ÑµÀ½É•…±°¹½ÕÐˆ€ø˜Èì•á¥Ð€Äì™¤)…Ð€ˆ‘ÑµÀ½É•…±°¹½ÕÐˆ)Ý½É­•É}¥ô¡½µÁ½Í”€´µÁÉ½™¥±”Ý½É­•ÈÁÌ€µ„€µÄÁ½¥¹ÐµÝ½É­•È¤)l€µ¸€ˆ‘Ý½É­•É}¥ˆtñðì•¡¼1=1}É}]=I-I}=9Q%9I}5%MM%9õ%0€ø˜Èì•á¥Ð€Äìô)‘½­•É}±½…°­¥±°€´µÍ¥¹…°QI4€ˆ‘Ý½É­•É}¥ˆ€ø½‘•Ø½¹Õ±°€Èø˜ÄñðÑÉÕ”)Ý½É­•É}ÍÑ…ÑÕÌô¡‘½­•É}±½…°Ý…¥Ð€ˆ‘Ý½É­•É}¥ˆ¤)l€ˆ‘Ý½É­•É}ÍÑ…ÑÕÌˆ€ô€Àtñðì•¡¼1=1}É}]=I-I}a%Põ%0€ø˜Èì‘½­•É}±½…°±½Ì€ˆ‘Ý½É­•É}¥ˆ€ø˜Èì•á¥Ð€Äìô)Ý½É­•É}±½œô¡‘½­•É}±½…°±½Ì€ˆ‘Ý½É­•É}¥ˆ¤(€€€½µÁ±•Ñ•‘}©½‰Ìô¡ÁÉ¥¹Ñ˜€œ•Íq¸œ€ˆ‘Ý½É­•É}±½œˆðÉ•À€µŒ€1=1}QMQ}]=I-I}=5A1QôÄœñðÑÉÕ”¤)l€ˆ‘½µÁ±•Ñ•‘}©½‰Ìˆ€µ”€ÄØtñðì•¡¼€‰1=1}É}]=I-I})=	Lõ%0½Õ¹Ðô‘½µÁ±•Ñ•‘}©½‰Ìˆ€ø˜ÈìÁÉ¥¹Ñ˜€œ•Íq¸œ€ˆ‘Ý½É­•É}±½œˆ€ø˜Èì•á¥Ð€Äìô)½¹Ñ•áÑ}É•ÍÕ±Ðô¡ÁÉ¥¹Ñ˜€œ•Íq¸œ€ˆ‘Ý½É­•É}±½œˆð¹½‘”€ˆ‘É•Á¼½Í•ÉÙ¥•Ì½•É½Ìµ•¹¥¹”½ÁÉ½Ù¥‘•Èµ½¹Ñ•áÐµ¡•¬¹µ©Ìˆ¤)ÁÉ¥¹Ñ˜€œ•Íq¸œ€ˆ‘½¹Ñ•áÑ}É•ÍÕ±Ðˆ(€€€¥˜ÁÉ¥¹Ñ˜€œ•Íq¸œ€ˆ‘½¹Ñ•áÑ}É•ÍÕ±ÐˆðÉ•À€µÄ€y1=1}É}AI=Y%I}=9QaPõAML€œìÑ¡•¸(€µ•µ½Éå}É•…±±}ÍÑ…ÑÕÌõAML)•±Í”(€µ•µ½Éå}É•…±±}ÍÑ…ÑÕÌõ	1=-)™¤(€€€ÁÉ¥¹Ñ˜€œ•Íq¸œ€ˆ‘Ý½É­•É}±½œˆðÉ•À€µ€1=1}QMQ}AI=Y%I}=9QaQñ1=1}QMQ}]=I-I}=5A1Qôœ)•¡¼1=1}É}a%MQ%9}A=%9Q}]=I-I}EUUõAML)‘½­•É}±½…°É´€ˆ‘Ý½É­•É}¥ˆ€ø½‘•Ø½¹Õ±°ìÝ½É­•É}¥ô)½µÁ½Í”É•ÍÑ…ÉÐ•É½Ì)½µÁ½Í”ÕÀ€µ€´µÝ…¥Ð€´µÝ…¥ÐµÑ¥µ•½ÕÐ€äÀ•É½Ì)½µÁ½Í”•á•Œ€µÜ€½Ý½É­ÍÁ…”½…ÁÁÌ½…Á¤€µPÁ½¥¹Ðµ…Á¤¹½‘”€´µ¥µÁ½ÉÐÑÍà€½Ý½É­ÍÁ…”½Í•ÉÙ¥•Ì½•É½Ìµ•¹¥¹”½±½…°µÑ•ÍÐµ”É”¹µ©Ì€´µ¡¥ÍÑ½Éäµ½¹±ä)½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µ•É½Í}Ñ•ÍÐ€µÑŒ€‰M1P€I=M}!Q}5MMLôœñð½Õ¹Ð ¨¤I=4•¹¥¹”¹¡…Ñ}µ•ÍÍ…•ÌìM1P€I=M}UI	1}55=Ie}I=]Lôœñð½Õ¹Ð ¨¤I=4•¹¥¹”¹½µÁ…¹¥½¹}µ•µ½É¥•Ì]!I…Ñ•½Éä%L9=P9U109½¹Ñ•¹Ð1%-€Me9Q!|”œìˆ)¥˜½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µÁ½¥¹Ñ}Ñ•ÍÐ€µØ=9}II=I}MQ=@ôÄ€µŒ€1QI=4€‰UÍ•Èˆ]!I¥€ô€pœœÄÀÀÀÀÀÀÀ´ÀÀÀÀ´ÐÀÀÀ´àÀÀÀ´ÀÀÀÀÀÀÀÀÀÀÀÄpœœœ€øˆ‘ÑµÀ½ÕÍ•Èµ‘•±•Ñ”¹½ÕÐˆ€Èø˜ÄìÑ¡•¸(€•¡¼1=1}É}A=%9Q}5AA%9}=]9IM!%@õ%0ÕÍ•É}É•™•É•¹•}Ý…Í}¹½Ñ}É•ÍÑÉ¥Ñ•€ø˜È(€•á¥Ð€Ä)™¤)É•À€µÄ€É½ÍI•±…Ñ¥½¹Í¡¥Á5…ÁÁ¥¹}ÕÍ•É%‘}™­•äœ€ˆ‘ÑµÀ½ÕÍ•Èµ‘•±•Ñ”¹½ÕÐˆñðì•¡¼1=1}É}A=%9Q}5AA%9}=]9IM!%@õ%0ÕÍ•É}É•™•É•¹•}½¹ÍÑÉ…¥¹Ñ}µ¥ÍÍ¥¹œ€ø˜Èì•á¥Ð€Äìô)½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µÁ½¥¹Ñ}Ñ•ÍÐ€µØ=9}II=I}MQ=@ôÄ€µŒ€1QI=4€‰É•…Ñ½ÉAÉ½™¥±”ˆ]!I¥€ô€pœ•É½Í}Ñ•ÍÑ}ÁÉ½™¥±”pœœœ€ø½‘•Ø½¹Õ±°)¥˜½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µÁ½¥¹Ñ}Ñ•ÍÐ€µØ=9}II=I}MQ=@ôÄ€µŒ€1QI=4€‰É•…Ñ½Èˆ]!I¥€ô€pœœÈÀÀÀÀÀÀÀ´ÀÀÀÀ´ÐÀÀÀ´àÀÀÀ´ÀÀÀÀÀÀÀÀÀÀÀÈpœœœ€øˆ‘ÑµÀ½É•…Ñ½Èµ‘•±•Ñ”¹½ÕÐˆ€Èø˜ÄìÑ¡•¸(€•¡¼1=1}É}A=%9Q}5AA%9}=]9IM!%@õ%0É•…Ñ½É}É•™•É•¹•}Ý…Í}¹½Ñ}É•ÍÑÉ¥Ñ•€ø˜È(€•á¥Ð€Ä)™¤)É•À€µÄ€É½ÍI•±…Ñ¥½¹Í¡¥Á5…ÁÁ¥¹}É•…Ñ½É%‘}™­•äœ€ˆ‘ÑµÀ½É•…Ñ½Èµ‘•±•Ñ”¹½ÕÐˆñðì•¡¼1=1}É}A=%9Q}5AA%9}=]9IM!%@õ%0É•…Ñ½É}É•™•É•¹•}½¹ÍÑÉ…¥¹Ñ}µ¥ÍÍ¥¹œ€ø˜Èì•á¥Ð€Äìô)•¡¼1=1}É}A=%9Q}5AA%9}=]9IM!%@õAML…½Õ¹Ñ}É•…Ñ½É}É•™•É•¹•Í}ÁÉ•Í•ÉÙ•)½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µÁ½¥¹Ñ}Ñ•ÍÐ€µÑŒ€‰M1P€A=%9Q}I=M}EUU})=	Lôœñð½Õ¹Ð ¨¤I=4•¹¥¹”¹•É½Í}¥¹™•É•¹•}©½‰Ììˆ)¥˜l€ˆ‘µ•µ½Éå}É•…±±}ÍÑ…ÑÕÌˆ€ôAMLtìÑ¡•¸(€•¡¼1=1}É}55=Ie}I10õAML)•±Í”(€•¡¼1=1}É}55=Ie}I10õ	1=-É•…Í½¸õÁÉ½Ù¥‘•É}½¹Ñ•áÑ}µ¥ÍÍ¥¹œ)™¤)•¡¼1=1}É}I1}%9I9õ9=Q}IU8)•¡¼1=1}É}I=M}Q	M}UMI}I1Lõ9=Q}Y%1	1ÍÑ½­}…Á¥}½Ý¹•ÉÍ¡¥Á}Ñ•ÍÐõAML)•¡¼1=1}É}%MA=M	1}MQ-}19U@õI5)Ñ¥•É}™¥áÑÕÉ•}©Í½¸ô¡½µÁ½Í”•á•Œ€µÜ€½Ý½É­ÍÁ…”½…ÁÁÌ½…Á¤€µP€µ”€‰I=M}QMQ}9=5}%ô‘•¹½µ•}¥ˆp(€Á½¥¹Ðµ…Á¤¹½‘”€½Ý½É­ÍÁ…”½Í•ÉÙ¥•Ì½•É½Ìµ•¹¥¹”½±½…°µÑ•ÍÐµÑ¥•Èµµ•µ½Éäµ”É”¹µ©Ì€´µÁÉ•Á…É”¤ñðì(€•¡¼1=1}É}%9%Qe}%aQUI}AIAIõ%0€ø˜È(€•á¥Ð€Ä)ô)ÁÉ¥¹Ñ˜€œ•Íq¸œ€ˆ‘Ñ¥•É}™¥áÑÕÉ•}©Í½¸ˆ€øˆ‘ÑµÀ½Ñ¥•Èµ™¥áÑÕÉ•Ì¹©Í½¸ˆ)ÁåÑ¡½¸Ì€µŒ€¥µÁ½ÉÐ©Í½¸±ÍåÌìÉ½ÝÌõ©Í½¸¹±½…¡½Á•¸¡ÍåÌ¹…ÉÙlÅt¤¤ì…ÍÍ•ÉÐ±•¸¡É½ÝÌ¤ôôÄÀì…ÍÍ•ÉÐ…±°¡±•¸¡É½Ýl‰ÕÍ•É}¥‰t¤ôôÌØ…¹±•¸¡É½Ýl‰Í•ÍÍ¥½¹}¥‰t¤ôôÌØ…¹±•¸¡É½Ýl‰¥¹ÍÑ…¹•}¥‰t¤ôôÌØ™½ÈÉ½Ü¥¸É½ÝÌ¤ìÁÉ¥¹Ð ‰1=1}É}%9%Qe}%aQUI}AIAIõAMLÍ•¹…É¥½ÌôÄÀˆ¤œ€ˆ‘ÑµÀ½Ñ¥•Èµ™¥áÑÕÉ•Ì¹©Í½¸ˆ)ÁåÑ¡½¸Ì€ˆ‘É•Á¼½Í•ÉÙ¥•Ì½•É½Ìµ•¹¥¹”½±½…°µÑ•ÍÐµÑ¥•Èµµ•µ½Éäµ™¥áÑÕÉ•Ì¹Áäˆ€ˆ‘ÑµÀ½Ñ¥•Èµ™¥áÑÕÉ•Ì¹©Í½¸ˆ€øˆ‘ÑµÀ½Ñ¥•Èµ™¥áÑÕÉ•Ì¹ÍÅ°ˆ)½µÁ½Í”•á•Œ€µPÁ½ÍÑÉ•ÌÁÍÅ°€µT•É½Í}Ñ•ÍÑ}…‘µ¥¸€µ•É½Í}Ñ•ÍÐ€µØ=9}II=I}MQ=@ôÄ€ðˆ‘ÑµÀ½Ñ¥•Èµ™¥áÑÕÉ•Ì¹ÍÅ°ˆ€øˆ‘ÑµÀ½Ñ¥•Èµ™¥áÑÕÉ•Ì¹½ÕÐˆ)É•À€y1=1}É}%9%Qe}%aQUIôœ€ˆ‘ÑµÀ½Ñ¥•Èµ™¥áÑÕÉ•Ì¹½ÕÐˆ)Ñ¥•É}™¥áÑÕÉ•}ˆØÐô¡ÁåÑ¡½¸Ì€µŒ€¥µÁ½ÉÐ‰…Í”ØÐ±ÍåÌìÁÉ¥¹Ð¡‰…Í”ØÐ¹ˆØÑ•¹½‘”¡½Á•¸¡ÍåÌ¹…ÉÙlÅt°‰Éˆˆ¤¹É•… ¤¤¹‘•½‘” ¤¤œ€ˆ‘ÑµÀ½Ñ¥•Èµ™¥áÑÕÉ•Ì¹©Í½¸ˆ¤)¥˜€„½µÁ½Í”•á•Œ€µÜ€½Ý½É­ÍÁ…”½…ÁÁÌ½…Á¤€µP€µ”€‰1=1}Q%I}%aQUIM}ØÐô‘Ñ¥•É}™¥áÑÕÉ•}ˆØÐˆÁ½¥¹Ðµ…Á¤¹½‘”€½Ý½É­ÍÁ…”½Í•ÉÙ¥•Ì½•É½Ìµ•¹¥¹”½±½…°µÑ•ÍÐµÑ¥•Èµµ•µ½Éäµ”É”¹µ©Ì€´µÙ•É¥™äp(€€øˆ‘ÑµÀ½Ñ¥•Èµ”É”¹½ÕÐˆ€Èø˜ÄìÑ¡•¸(€Ñ…¥°€´àÀ€ˆ‘ÑµÀ½Ñ¥•Èµ”É”¹½ÕÐˆ€ø˜È(€•¡¼1=1}É}%9%Qe}Q%Hõ%0€ø˜È(€•á¥Ð€Ä)™¤)…Ð€ˆ‘ÑµÀ½Ñ¥•Èµ”É”¹½ÕÐˆ(
+    () => validateDockerEndpoint('unix:///Users/synthetic/.docker/run/docker.sock', {
+      home: '/Users/synthetic',
+      socketExists: () => false,
+    }),
+    /docker_socket_unavailable/,
+  );
+});
+
+test('GitHub Prepare accepts only its pinned setup-docker Unix socket context', () => {
+  const runnerBase = '/home/runner/_temp/gpoint-setup-docker';
+  const socket = `${runnerBase}/run-12345678/docker.sock`;
+  const socketExists = (path) => path === socket;
+  assert.equal(validateDockerEndpoint(`unix://${socket}`, {
+    home: '/home/runner',
+    socketExists,
+    githubActions: true,
+    dockerContext: 'gpoint-setup-docker',
+    runnerTemp: '/home/runner/_temp',
+    runtimeBasedir: runnerBase,
+  }), socket);
+  assert.throws(() => validateDockerEndpoint(`unix://${socket}`, {
+    home: '/home/runner', socketExists, githubActions: false,
+    dockerContext: 'gpoint-setup-docker', runtimeBasedir: runnerBase,
+  }), /unapproved_docker_socket/);
+  assert.throws(() => validateDockerEndpoint('tcp://192.0.2.7:2376', {
+    home: '/home/runner', socketExists, githubActions: true,
+    dockerContext: 'gpoint-setup-docker', runtimeBasedir: runnerBase,
+  }), /local_unix_socket_required/);
+  assert.throws(() => validateDockerEndpoint('unix:///tmp/forwarded-docker.sock', {
+    home: '/home/runner', socketExists, githubActions: true,
+    dockerContext: 'gpoint-setup-docker', runtimeBasedir: runnerBase,
+  }), /unapproved_docker_socket/);
+  assert.throws(() => validateDockerEndpoint(`unix://${socket}`, {
+    home: '/home/runner', socketExists, githubActions: true,
+    dockerContext: 'other', runtimeBasedir: runnerBase,
+  }), /unapproved_docker_socket/);
+  assert.throws(() => validateDockerEndpoint(`unix://${runnerBase}/forwarded.sock`, {
+    home: '/home/runner', socketExists, githubActions: true,
+    dockerContext: 'gpoint-setup-docker', runtimeBasedir: runnerBase,
+    runnerTemp: '/home/runner/_temp',
+  }), /unapproved_docker_socket/);
+});
+
+test('Native release uses its pinned Buildx action and has no legacy Prepare workflow', () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/gpoint-native-release.yml', directory), 'utf8');
+  assert.match(workflow, /uses: docker\/setup-buildx-action@[0-9a-f]{40}/);
+  assert.match(workflow, /name: Build stock Eros test image/);
+  assert.doesNotMatch(workflow, /setup-docker-action|gpoint-setup-docker|gpoint-prepare\.yml/);
+});
+
+test('Eros image requires stock upstream provenance and rejects downstream patches', () => {
+  const policy = readFileSync(new URL('local-test-policy.mjs', directory), 'utf8');
+  assert.match(policy, /com\.gpoint\.integration\.revision/);
+  const upstream = readFileSync(new URL('upstream.sha', directory), 'utf8').trim();
+  const reference = `gpoint-eros:stock-${upstream}`;
+  const metadata = {
+    id: `sha256:${'a'.repeat(64)}`,
+    os: 'linux',
+    architecture: 'amd64',
+    source: 'https://github.com/etherfunlab/eros-engine',
+    upstreamRevision: upstream,
+    patchSha256: 'none',
+    buildRevision: upstream,
+  };
+  assert.equal(validateErosImageInspection(reference, metadata), metadata.id);
+  const candidateSha = 'b'.repeat(40);
+  assert.equal(validateErosImageInspection(`gpoint-eros-pilot:${candidateSha}`, {
+    ...metadata,
+    integrationRevision: candidateSha,
+  }), metadata.id);
+  assert.throws(() => validateErosImageInspection(`gpoint-eros-pilot:${candidateSha}`, {
+    ...metadata,
+    integrationRevision: 'c'.repeat(40),
+  }), /eros_integration_revision_mismatch/);
+  assert.throws(() => validateErosImageInspection(`gpoint-eros-pilot:${candidateSha}`, metadata), /eros_integration_revision_missing/);
+  assert.throws(() => validateErosImageInspection('gpoint-eros:latest', metadata), /stock_eros_image_tag_required/);
+  assert.throws(() => validateErosImageInspection(reference, { ...metadata, patchSha256: 'sha256-of-a-patch' }), /eros_downstream_patch_forbidden/);
+  assert.throws(() => validateErosImageInspection(reference, { ...metadata, id: 'mutable-tag' }), /immutable_image_id_required/);
+});
+
+test('the Eros patch applier is disabled and the stock builder pins a clean source', () => {
+  const applier = readFileSync(new URL('apply-patches.sh', directory), 'utf8');
+  const builder = readFileSync(new URL('build-stock-image.sh', directory), 'utf8');
+  assert.match(applier, /fails closed|patches_disabled/i);
+  assert.doesNotMatch(applier, /git .* apply/);
+  assert.match(builder, /eros_source_not_clean/);
+  assert.match(builder, /upstream\.sha/);
+  assert.match(builder, /patch-set\.sha256=none/);
+});
+
+test('the local fixture provisions stock persona data with the official seed CLI and maps it in GPoint', () => {
+  const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  const persona = readFileSync(new URL('test-personas/synthetic-eros-persona.toml', directory), 'utf8');
+  const schema = readFileSync(new URL('../../packages/db/prisma/schema.prisma', directory), 'utf8');
+  assert.match(runner, /eros-engine seed-personas \/etc\/eros-engine\/test-personas/);
+  assert.match(runner, /LOCAL_E2E_STOCK_PERSONA_SEED=PASS/);
+  assert.match(runner, /grep 'Synthetic Eros Persona'/);
+  assert.match(runner, /CreatorProfile.*erosGenomeId/s);
+  assert.match(persona, /name = "Synthetic Eros Persona"/);
+  assert.match(schema, /model ErosRelationshipMapping/);
+  assert.match(schema, /erosGenomeId String\? @unique @db\.Uuid/);
+});
+
+test('restart-history assertions cover all turns and initial temporal facts', () => {
+  const e2e = readFileSync(new URL('local-test-e2e.mjs', directory), 'utf8');
+  assert.match(e2e, /assertCompleteHistory/);
+  assert.match(e2e, /SYNTH_CITY_ZEPHYRBAY/);
+  assert.match(e2e, /SYNTH_OLD_2026-10-22_18:40/);
+  assert.match(e2e, /SYNTH_CURRENT_2026-10-23_19:15/);
+  assert.match(e2e, /users\.length,\s*expectedTurns/);
+  assert.match(e2e, /assistants\.length,\s*expectedTurns/);
+  assert.match(e2e, /--recall-only/);
+  assert.match(e2e, /SYNTH_RECALL_CONFIRMED/);
+  assert.equal((e2e.match(/LOCAL_E2E_RESTART_HISTORY=PASS/g) ?? []).length, 1);
+});
+
+test('stock Eros API E2E exercises owner-bound session listing and foreign-session denial', () => {
+  const e2e = readFileSync(new URL('local-test-e2e.mjs', directory), 'utf8');
+  const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  assert.match(e2e, /LOCAL_E2E_STOCK_API_USER_ISOLATION=PASS/);
+  assert.match(e2e, /foreignUserId/);
+  assert.match(e2e, /client\.sessions\(foreignUserId\)/);
+  assert.match(e2e, /client\.history\(foreignUserId, ownSession\.sessionId/);
+  assert.match(e2e, /result\.reason\.status === 403/);
+  assert.match(runner, /exec -w \/workspace\/apps\/api -T gpoint-api node --import tsx \/workspace\/services\/eros-engine\/local-test-e2e\.mjs/);
+  assert.match(runner, /LOCAL_E2E_GPOINT_QUEUE_RLS_TENANT_ISOLATION=PASS fixture_role=gpoint_worker_test/);
+  assert.match(runner, /LOCAL_E2E_EROS_DATABASE_USER_RLS=NOT_AVAILABLE stock_api_ownership_test=PASS/);
+});
+
+test('provider context evidence reports PASS when one context contains every recall fact', () => {
+  const log = JSON.stringify({
+    event: 'LOCAL_TEST_PROVIDER_CONTEXT',
+    message_count: 14,
+    recent_history_count: 12,
+    user_message_count: 7,
+    last_user_is_recall_probe: true,
+    city_durable_memory_section_present: true,
+    old_meeting_durable_memory_section_present: true,
+    current_meeting_durable_memory_section_present: true,
+    city_absent_from_recent_history: true,
+    old_meeting_absent_from_recent_history: true,
+    current_meeting_absent_from_recent_history: true,
+  });
+  assert.deepEqual(readProviderContextEvidence(log), {
+    status: 'PASS',
+    record_count: 1,
+    ignored_record_count: 0,
+    message_count: 14,
+    recent_history_count: 12,
+    missing_facts: [],
+  });
+});
+
+test('provider context evidence rejects absent or malformed recall records', () => {
+  const complete = {
+    event: 'LOCAL_TEST_PROVIDER_CONTEXT',
+    message_count: 14,
+    recent_history_count: 12,
+    user_message_count: 7,
+    last_user_is_recall_probe: true,
+    city_durable_memory_section_present: true,
+    old_meeting_durable_memory_section_present: true,
+    current_meeting_durable_memory_section_present: true,
+    city_absent_from_recent_history: true,
+    old_meeting_absent_from_recent_history: true,
+    current_meeting_absent_from_recent_history: true,
+  };
+  assert.throws(() => readProviderContextEvidence(''), /provider_context_record_missing/);
+  assert.throws(() => readProviderContextEvidence('{"event":"LOCAL_TEST_PROVIDER_CONTEXT"'), /provider_context_record_malformed/);
+  assert.throws(() => readProviderContextEvidence(JSON.stringify({ ...complete, city_durable_memory_section_present: 'yes' })), /provider_context_fact_invalid:city_durable_memory_section_present/);
+  assert.throws(() => readProviderContextEvidence(JSON.stringify({ ...complete, message_count: 0 })), /provider_context_message_count_invalid/);
+  assert.throws(() => readProviderContextEvidence(JSON.stringify({ ...complete, recent_history_count: -1 })), /provider_context_recent_history_count_invalid/);
+  assert.throws(() => readProviderContextEvidence(JSON.stringify({ ...complete, last_user_is_recall_probe: 'yes' })), /provider_context_probe_flag_invalid/);
+});
+
+test('provider context fixture attributes old facts to durable memory sections outside recent history', () => {
+  const worker = readFileSync(new URL('./local-test-worker.py', import.meta.url), 'utf8');
+  assert.match(worker, /durable_memory_section_present/);
+  assert.match(worker, /get\('role'\) == 'system'/);
+  assert.match(worker, /recent_history/);
+  assert.match(worker, /absent_from_recent_history/);
+  assert.match(worker, /\[user_profile\]/);
+});
+
+test('multiple provider contexts report BLOCKED when any lacks a recall fact', () => {
+  const complete = {
+    event: 'LOCAL_TEST_PROVIDER_CONTEXT',
+    message_count: 14,
+    recent_history_count: 12,
+    user_message_count: 7,
+    last_user_is_recall_probe: true,
+    city_durable_memory_section_present: true,
+    old_meeting_durable_memory_section_present: true,
+    current_meeting_durable_memory_section_present: true,
+    city_absent_from_recent_history: true,
+    old_meeting_absent_from_recent_history: true,
+    current_meeting_absent_from_recent_history: true,
+  };
+  const repeated = `${JSON.stringify(complete)}\n${JSON.stringify({ ...complete, message_count: 15, current_meeting_durable_memory_section_present: false })}`;
+  assert.deepEqual(readProviderContextEvidence(repeated), {
+    status: 'BLOCKED',
+    record_count: 2,
+    ignored_record_count: 0,
+    message_count: 15,
+    recent_history_count: 12,
+    missing_facts: ['current_meeting_durable_memory_section_present'],
+  });
+  assert.deepEqual(readProviderContextEvidence(JSON.stringify({ ...complete, city_absent_from_recent_history: false })), {
+    status: 'BLOCKED', record_count: 1, ignored_record_count: 0, message_count: 14, recent_history_count: 12, missing_facts: ['city_absent_from_recent_history'],
+  });
+});
+
+test('provider context ignores Eros system tasks whose latest user message is not the recall probe', () => {
+  const relevant = {
+    event: 'LOCAL_TEST_PROVIDER_CONTEXT', message_count: 14, recent_history_count: 12,
+    user_message_count: 7, last_user_is_recall_probe: true,
+    city_durable_memory_section_present: true, old_meeting_durable_memory_section_present: true,
+    current_meeting_durable_memory_section_present: true, city_absent_from_recent_history: true,
+    old_meeting_absent_from_recent_history: true, current_meeting_absent_from_recent_history: true,
+  };
+  const irrelevant = { ...relevant, message_count: 2, user_message_count: 1, last_user_is_recall_probe: false,
+    recent_history_count: 1,
+    city_durable_memory_section_present: false, old_meeting_durable_memory_section_present: false,
+    current_meeting_durable_memory_section_present: false };
+  assert.deepEqual(readProviderContextEvidence(`${JSON.stringify(irrelevant)}\n${JSON.stringify(relevant)}`), {
+    status: 'PASS', record_count: 1, ignored_record_count: 1, message_count: 14,
+    recent_history_count: 12, missing_facts: [],
+  });
+  assert.throws(() => readProviderContextEvidence(JSON.stringify({ ...irrelevant, last_user_is_recall_probe: true })), /provider_context_probe_record_missing/);
+});
+
+test('cleanup path verifies the disposable Compose project is gone', () => {
+  const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  assert.ok(runner.indexOf('compose restart eros') < runner.indexOf('--history-only'), 'history pass must follow an Eros restart');
+  assert.match(runner, /docker_local logs --tail 100 "\$migrator_container"/);
+  assert.match(runner, /LOCAL_E2E_MIGRATOR_LOG_BEGIN/);
+  assert.match(runner, /cleanup_failed/);
+  assert.match(runner, /compose down --volumes --remove-orphans/);
+  assert.match(runner, /for container in \$\{containers:-\}/);
+  assert.match(runner, /docker_local inspect "\$container" --format/);
+  assert.match(runner, /if \[ "\$container_owner" = "\$project" \]/);
+  assert.match(runner, /docker_local rm -f "\$container"/);
+  assert.match(runner, /docker_local ps -aq --filter/);
+  assert.match(runner, /docker_local network ls -q --filter/);
+  assert.match(runner, /network_name.*\$\{project\}_eros_test/);
+  assert.match(runner, /network_containers" = 0/);
+  assert.match(runner, /docker_local network rm "\$network"/);
+  assert.match(runner, /LOCAL_E2E_CLEANUP=PASS/);
+});
+
+test('dreaming scan, durable retrieval and provider context are checked by the runner', () => {
+  const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  assert.match(runner, /context_result=\$\(printf/);
+  assert.match(runner, /LOCAL_E2E_PROVIDER_CONTEXT=PASS/);
+  assert.match(runner, /LOCAL_E2E_DREAMING_SCAN=PASS/);
+  assert.match(runner, /LOCAL_E2E_DURABLE_MEMORY=PASS/);
+  assert.match(runner, /--recall-only/);
+  assert.doesNotMatch(runner, /classified_at/);
+  assert.match(runner, /SELECT count\(\*\) FROM engine\.companion_memories WHERE session_id =/);
+});
+
+test('dreaming idle fixture ages the stock Eros scan-state clock', () => {
+  const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  assert.match(runner, /WITH aged_scan_state AS \(UPDATE engine\.relationship_scan_state SET last_turn_at = now\(\) - interval '2 minutes' WHERE instance_id =/);
+  assert.match(runner, /AND pending_turns >= 3 RETURNING pending_turns\) SELECT pending_turns FROM aged_scan_state/);
+});
+
+test('standalone PostgreSQL integration container is owned by and cleaned with its project', () => {
+  const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  assert.match(runner, /integration_container="\$\{project\}-worker-integration"/);
+  assert.match(runner, /--label "com\.docker\.compose\.project=\$project"/);
+  assert.match(runner, /inspect_run_container "\$integration_container"/);
+  assert.match(runner, /docker_local rm -f "\$integration_container"/);
+});
+
+test('runner records each verified image immediately and fails closed on unmanifested partial builds', () => {
+  const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  const imageTools = readFileSync(new URL('local-e2e-image-tools.sh', directory), 'utf8');
+  assert.match(runner, /run_manifest=/);
+  assert.match(runner, /\$\{project\}-gpoint-api:latest/);
+  assert.match(runner, /\$\{project\}-gpoint-api-migrate:latest/);
+  assert.match(runner, /\$\{project\}-gpoint-worker:latest/);
+  assert.match(runner, /case "\$image_ref" in/);
+  assert.match(runner, /compose --profile worker build "\$service"/);
+  assert.match(runner, /manifest_entry=\$\(awk/);
+  assert.match(runner, /LOCAL_E2E_IMAGE_OWNERSHIP=UNVERIFIED/);
+  assert.match(runner, /not_in_manifest/);
+  assert.match(runner, /local-e2e-image-tools\.sh/);
+  assert.match(imageTools, /No such image: \$1/);
+  assert.match(imageTools, /grep -Fiq/);
+  assert.doesNotMatch(imageTools, /\brg\b/);
+  assert.match(imageTools, /reason=daemon_or_cli_error/);
+  assert.match(imageTools, /No such object: \$1/);
+  assert.match(imageTools, /LOCAL_E2E_CONTAINER_INSPECT=FAIL/);
+  assert.match(runner, /reason=manifest_image_missing/);
+  assert.match(runner, /phase=preflight/);
+  assert.match(runner, /image_identity=\$\(inspect_run_image "\$image_ref"\)/);
+  assert.match(runner, /Record each image immediately/);
+  assert.match(runner, /grep -Ei -C 2/);
+  assert.doesNotMatch(runner, /\brg\b/);
+  assert.doesNotMatch(runner, /image_tags_eligible/);
+  assert.match(runner, /image_id=/);
+  assert.match(runner, /com\.gpoint\.me36\.run/);
+  assert.match(runner, /expected_image_id/);
+  assert.match(runner, /image_labels.*project/);
+  assert.match(runner, /docker_local image rm "\$image_ref"/);
+  assert.doesNotMatch(runner, /docker (?:system|builder) prune/);
+  assert.doesNotMatch(runner, /docker_local image rm .*\*/);
+});
+
+test('image inspection distinguishes found, explicitly missing, empty, and daemon error results', () => {
+  const helperPath = fileURLToPath(new URL('local-e2e-image-tools.sh', directory));
+  const script = `
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+. "$1"
+docker_local(){
+  case "$MOCK_MODE" in
+    found) printf 'sha256:abc|me36_run|gpoint-api' ;;
+    missing) printf 'Error response from daemon: no such image: %s\\n' "$MOCK_TAG" >&2; return 1 ;;
+    daemon) printf 'Cannot connect to the Docker daemon\\n' >&2; return 1 ;;
+    empty) return 0 ;;
+  esac
+}
+if output=$(inspect_run_image "$MOCK_TAG"); then status=0; else status=$?; fi
+printf 'status=%s output=%s\\n' "$status" "$output"
+`;
+  const inspect = (mode) => spawnSync('sh', ['-c', script, 'sh', helperPath], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: '/usr/bin:/bin', MOCK_MODE: mode, MOCK_TAG: 'me36_test-gpoint-api:latest' },
+  });
+  const found = inspect('found');
+  assert.equal(found.status, 0);
+  assert.match(found.stdout, /status=0 output=sha256:abc\|me36_run\|gpoint-api/);
+  const missing = inspect('missing');
+  assert.equal(missing.status, 0);
+  assert.equal(missing.stdout.trim(), 'status=2 output=');
+  const daemon = inspect('daemon');
+  assert.equal(daemon.status, 0);
+  assert.equal(daemon.stdout.trim(), 'status=1 output=');
+  assert.match(daemon.stderr, /reason=daemon_or_cli_error/);
+  const empty = inspect('empty');
+  assert.equal(empty.status, 0);
+  assert.equal(empty.stdout.trim(), 'status=1 output=');
+  assert.match(empty.stderr, /reason=empty_result/);
+});
+
+test('container inspection distinguishes found, explicitly missing, empty, and daemon error results', () => {
+  const helperPath = fileURLToPath(new URL('local-e2e-image-tools.sh', directory));
+  const script = `
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+. "$1"
+docker_local(){
+  case "$MOCK_MODE" in
+    found) printf 'container-id|me36_run' ;;
+    missing) printf 'error: no such object: %s\\n' "$MOCK_TAG" >&2; return 1 ;;
+    daemon) printf 'Cannot connect to the Docker daemon\\n' >&2; return 1 ;;
+    empty) return 0 ;;
+  esac
+}
+if output=$(inspect_run_container "$MOCK_TAG"); then status=0; else status=$?; fi
+printf 'status=%s output=%s\\n' "$status" "$output"
+`;
+  const inspect = (mode) => spawnSync('sh', ['-c', script, 'sh', helperPath], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: '/usr/bin:/bin', MOCK_MODE: mode, MOCK_TAG: 'me36_test-worker-integration' },
+  });
+  const found = inspect('found');
+  assert.equal(found.status, 0);
+  assert.equal(found.stdout.trim(), 'status=0 output=container-id|me36_run');
+  const missing = inspect('missing');
+  assert.equal(missing.status, 0);
+  assert.equal(missing.stdout.trim(), 'status=2 output=');
+  const daemon = inspect('daemon');
+  assert.equal(daemon.status, 0);
+  assert.equal(daemon.stdout.trim(), 'status=1 output=');
+  assert.match(daemon.stderr, /reason=daemon_or_cli_error/);
+  const empty = inspect('empty');
+  assert.equal(empty.status, 0);
+  assert.equal(empty.stdout.trim(), 'status=1 output=');
+  assert.match(empty.stderr, /reason=empty_result/);
+});
