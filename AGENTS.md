@@ -9,6 +9,15 @@
 - For design work, use the repo-local [gpoint-design skill](.agents/skills/gpoint-design/SKILL.md).
 - For editable Pen work, use the canonical connected Pen MCP/CLI only; Computer Use/GUI may inspect but must not modify canvas, files, artboards, or properties. Validate render/read-back and preserve OWNER visual approval.
 
+## Две постоянные ветки и одна рабочая папка — OWNER policy
+
+- Вся разработка GPoint ведётся в основной папке `/Users/akhripuniov/Downloads/Codex/GPoint` на ветке `dev`. `main` хранит проверенный production-код. Не создавай новые worktree, клоны, временные ветки или параллельные рабочие копии. Задачи выполняются последовательно.
+- В начале задачи зафиксируй scope, исходную ветку/SHA и статус рабочей папки; сохраняй существующие изменения. Затем реализуй согласованный scope и выполни подходящие локальные проверки. Не сбрасывай, не очищай и не перезаписывай чужую или незавершённую работу.
+- Незавершённые изменения держи в `dev` как локальную работу или отдельный явно помеченный WIP-коммит. Не включай незавершённый код, AGATA/GSales-черновики, release-эксперименты или несвязанные изменения в production PR.
+- Готовые изменения переходят из `dev` в `main` через PR `dev → main` после проверки scope, diff и локальных тестов. Push, публикация PR, GitHub Actions, merge и production Deploy требуют соответствующего явного разрешения OWNER; эта инструкция сама по себе таких разрешений не даёт.
+- После разрешённого merge синхронизируй `dev` с `main` штатным fast-forward/merge без переписывания истории и без потери локальной работы.
+- Используй только существующие GitHub Actions и Kamal Native Release. Не создавай собственные системы релизов и не обходи Environment gates, provenance, миграционные проверки, backup, rollback или Runtime Verify.
+
 ## Обязательный preflight GitHub/GHCR
 
 При любой ошибке GitHub или GHCR сначала прочитать актуальный стандарт [«GitHub доступ» в Linear](https://linear.app/bestuzhev/document/github-dostup-7970682d1b80), затем проверить штатные доступные способы подключения до объявления BLOCKED. Уточнить конкретную операцию и OWNER scope; execution context (Codex sandbox, разрешённый host Mac, GitHub connector/API или GitHub-hosted runner); DNS/HTTPS доступность именно из этого context; нужные CLI и credential helpers; авторизацию и operation-specific permissions. Секреты и значения token/header не выводить.
