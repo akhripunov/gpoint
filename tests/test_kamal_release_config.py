@@ -125,7 +125,8 @@ def test_kamal_agata_and_miniapp_are_separate_services():
 def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
     jobs = workflow["jobs"]
-    assert {"tests", "build", "deploy"} == set(jobs)
+    assert {"tests", "build", "deploy", "layer7_eros_deploy"} == set(jobs)
+    assert jobs["layer7_eros_deploy"]["environment"]["name"] == "layer7-staging"
     assert not ({"workspace", "python"} & set(jobs))
     assert jobs["build"]["needs"] == ["tests"]
     assert "needs.tests.result == 'success'" in jobs["build"]["if"]

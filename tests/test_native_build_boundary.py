@@ -19,7 +19,9 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
 
     def test_pipeline_has_release_gate_and_one_isolated_rehearsal_job(self):
         jobs = self.workflow["jobs"]
-        self.assertEqual(set(jobs), {"tests", "build", "deploy"})
+        self.assertEqual(set(jobs), {"tests", "build", "deploy", "layer7_eros_deploy"})
+        self.assertEqual(jobs["layer7_eros_deploy"]["needs"], ["tests", "build"])
+        self.assertEqual(jobs["layer7_eros_deploy"]["environment"]["name"], "layer7-staging")
         rollback = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())["jobs"]["deploy"]
         self.assertIn("inputs.mode == 'rollback'", rollback["if"])
         self.assertEqual(rollback["environment"]["name"],
