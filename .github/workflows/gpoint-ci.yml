@@ -102,7 +102,7 @@ jobs:
           pnpm -r build
           pnpm -r typecheck
           pnpm -r test
-          NODE_ENV=test API_HOST=127.0.0.1 API_PORT=3000 pnpm --filter @gpoint/api start \
+          NODE_ENV=development API_HOST=127.0.0.1 API_PORT=3000 pnpm --filter @gpoint/api start \
             > "$RUNNER_TEMP/gpoint-api.log" 2>&1 &
           api_pid=$!
           cleanup_api() {
