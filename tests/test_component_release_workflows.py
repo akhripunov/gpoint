@@ -43,6 +43,9 @@ def test_required_ci_runs_full_contract_without_path_filters():
     assert "pnpm -r typecheck" in commands
     assert "pnpm -r test" in commands
     assert "pnpm test:integration" in commands
+    assert "pnpm --filter @gpoint/api start" in commands
+    assert "http://127.0.0.1:3000/health/live" in commands
+    assert 'trap cleanup_api EXIT' in commands
     assert "pnpm test:release" in commands
     assert "python -m pytest -q" in commands
     assert "actionlint" in commands
