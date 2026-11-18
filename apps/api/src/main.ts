@@ -26,4 +26,4 @@ export async function bootstrap() { const app = await NestFactory.create<NestFas
 if (process.env.NODE_ENV !== 'test') bootstrap();
 
 // OWNER-requested migration smoke: force this candidate's Core image through Build and Kamal.
-// TEMP GPOINT BUILD VERIFY PROBE: CORE
+// TEMP GPOINT BUILD VERIFY PROBE V2: CORE
