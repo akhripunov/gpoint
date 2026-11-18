@@ -186,7 +186,7 @@ jobs:
           image="$IMAGE_REF@$IMAGE_DIGEST"
           docker buildx imagetools inspect --raw "$image" > "$RUNNER_TEMP/image-index.json"
           docker buildx imagetools inspect "$image" --format '{{json .SBOM.SPDX}}' > "$RUNNER_TEMP/image-sbom.json"
-          docker buildx imagetools inspect "$image" --format '{{json .Provenance.SLSA}}' > "$RUNNER_TEMP/image-provenance.json"
+          docker buildx imagetools inspect "$image" --format '{{json .Provenance}}' > "$RUNNER_TEMP/image-provenance.json"
           docker buildx imagetools inspect "$image" --format '{{json .Image.Config.Labels}}' > "$RUNNER_TEMP/image-labels.json"
           python3 - "$RUNNER_TEMP/image-index.json" "$RUNNER_TEMP/image-sbom.json" "$RUNNER_TEMP/image-provenance.json" "$RUNNER_TEMP/image-labels.json" "$CANDIDATE_SHA" "$SOURCE_LABEL" <<'PY'
           import json, sys
@@ -197,7 +197,8 @@ jobs:
           with open(sbom_path, encoding="utf-8") as f: sbom = json.load(f)
           assert sbom and sbom.get("SPDXID") == "SPDXRef-DOCUMENT", "BuildKit SBOM missing"
           with open(provenance_path, encoding="utf-8") as f: provenance = json.load(f)
-          assert provenance and provenance.get("buildType"), "BuildKit provenance missing"
+          attestation = provenance.get("SLSA", provenance)
+assert attestation and attestation.get("buildType"), "BuildKit provenance missing"
           with open(labels_path, encoding="utf-8") as f: labels = json.load(f)
           assert labels.get(source_label) == sha, f"source SHA label mismatch: {source_label}"
           print("platform=linux/amd64 PASS")
