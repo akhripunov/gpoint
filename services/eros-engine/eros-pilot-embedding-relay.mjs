@@ -153,3 +153,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 }
 
 // TEMP GPOINT PATH TRIGGER PROBE: eros-relay-only
+
+// TEMP GPOINT PATH TRIGGER PROBE: core+relay-relay

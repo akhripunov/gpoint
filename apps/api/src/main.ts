@@ -28,3 +28,5 @@ if (process.env.NODE_ENV !== 'test') bootstrap();
 // OWNER-requested migration smoke: force this candidate's Core image through Build and Kamal.
 
 // TEMP GPOINT PATH TRIGGER PROBE: core-only
+
+// TEMP GPOINT PATH TRIGGER PROBE: core+relay-core
