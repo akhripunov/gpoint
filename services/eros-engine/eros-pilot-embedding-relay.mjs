@@ -151,5 +151,3 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.on(signal, () => server.close(() => process.exit(0)));
   }
 }
-
-

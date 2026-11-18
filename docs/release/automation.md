@@ -913,4 +913,3 @@ runtime, migrations, SHA, production ref, server release ID или acceptance.
 manifest, canonical state и Linear. Красная публикация ledger/Linear остаётся
 видимым bookkeeping failure и не доказывает ошибку runtime. Новый contract
 не финализирует автоматически старый run и не разрешает новый production apply.
-
