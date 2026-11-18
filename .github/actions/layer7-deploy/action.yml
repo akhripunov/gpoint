@@ -1,5 +1,5 @@
 name: Layer7 immutable deploy and runtime verify
-description: Deploy the exact prepared Core image to Layer7 with stock Kamal 2 and verify it.
+description: Apply the exact approved Core or Eros scope to isolated Layer7 with stock Kamal 2 and verify it.
 inputs:
   mode:
     required: false
@@ -54,7 +54,7 @@ runs:
         GEM_HOME="$gem_root" GEM_PATH="$gem_root" "$gem_root/bin/kamal" help >/dev/null
     - name: Read Layer7 API and Eros versions with stock Kamal
       id: kamal_inventory
-      if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.mode == 'full' || inputs.mode == 'core-config-prepare'))
+      if: (github.event_name == 'push' && inputs.mode != 'eros-auto') || (github.event_name == 'workflow_dispatch' && (inputs.mode == 'full' || inputs.mode == 'core-config-prepare'))
       shell: bash
       run: |
         set -euo pipefail
@@ -118,7 +118,7 @@ runs:
           "$STAGING_IMAGE_SHA" <<< "$comparison"
     - name: Detect the narrow Core and active Eros config scope
       id: protected_scope
-      if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.mode == 'full' || inputs.mode == 'core-config-prepare'))
+      if: (github.event_name == 'push' && inputs.mode != 'eros-auto') || (github.event_name == 'workflow_dispatch' && (inputs.mode == 'full' || inputs.mode == 'core-config-prepare'))
       env:
         GH_TOKEN: ${{ github.token }}
         REQUESTED_SHA: ${{ inputs.candidate_sha || github.sha }}
@@ -412,12 +412,12 @@ runs:
               json.dumps(plan,sort_keys=True,separators=(",",":")))
         PY
     - name: Rehearse or release only the Eros engine on Layer7
-      if: inputs.mode == 'eros-prepare' || inputs.mode == 'eros-deploy'
+      if: inputs.mode == 'eros-prepare' || inputs.mode == 'eros-deploy' || inputs.mode == 'eros-auto'
       env:
         MODE: ${{ inputs.mode }}
         PREVIOUS_REHEARSAL: ${{ inputs.eros_rehearsal }}
         EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
-        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.protected_scope.outputs.image_version }}
+        IMAGE_VERSION: ${{ inputs.scoped_image_version || steps.prepared.outputs.image_version || steps.protected_scope.outputs.image_version }}
         GH_TOKEN: ${{ inputs.github_token }}
       shell: bash
       run: |
@@ -428,6 +428,7 @@ runs:
         run_id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
         upstream="$(cat services/eros-engine/upstream.sha)"
         [[ "$upstream" =~ ^[0-9a-f]{40}$ && "$IMAGE_VERSION" == "$CANDIDATE_SHA-"* ]]
+        [[ "$EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
         transport=scripts/layer7-transport.sh
         baseline="$RUNNER_TEMP/layer7-eros-before.json"
         after="$RUNNER_TEMP/layer7-eros-after.json"
@@ -453,22 +454,26 @@ runs:
         test "$(docker image inspect --format '{{index .Config.Labels "com.gpoint.eros.upstream-revision"}}' "$1")" = "$4"
         test "$(docker image inspect --format '{{index .Config.Labels "com.gpoint.eros.patch-set.sha256"}}' "$1")" = none
         REMOTE
-        if [[ "$MODE" == eros-prepare ]]; then
+        if [[ "$MODE" == eros-prepare || "$MODE" == eros-auto ]]; then
           test -z "$PREVIOUS_REHEARSAL"
           database prepare "$run_id"
           database verify-prepared "$run_id"
           collect > "$after"
           cmp "$baseline" "$after"
           echo "LAYER7_EROS_REHEARSAL=PASS SHA=$CANDIDATE_SHA DIGEST=$EROS_DIGEST RUN=$run_id" >> "$GITHUB_STEP_SUMMARY"
-          exit 0
+          [[ "$MODE" == eros-auto ]] || exit 0
         fi
 
-        [[ "$PREVIOUS_REHEARSAL" =~ ^[0-9]+-[0-9]+$ ]]
-        gh api "repos/$GITHUB_REPOSITORY/actions/runs/${PREVIOUS_REHEARSAL%-*}/attempts/${PREVIOUS_REHEARSAL##*-}" |
-          jq -e --arg sha "$CANDIDATE_SHA" '
-            .head_sha == $sha and .head_branch == "main" and .event == "workflow_dispatch" and
-            .path == ".github/workflows/gpoint-layer7-staging.yml" and .conclusion == "success" and
-            .display_title == ("Layer7 eros-prepare " + $sha)' >/dev/null
+        if [[ "$MODE" == eros-auto ]]; then
+          PREVIOUS_REHEARSAL="$run_id"
+        else
+          [[ "$PREVIOUS_REHEARSAL" =~ ^[0-9]+-[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/${PREVIOUS_REHEARSAL%-*}/attempts/${PREVIOUS_REHEARSAL##*-}" |
+            jq -e --arg sha "$CANDIDATE_SHA" '
+              .head_sha == $sha and .head_branch == "main" and .event == "workflow_dispatch" and
+              .path == ".github/workflows/gpoint-layer7-staging.yml" and .conclusion == "success" and
+              .display_title == ("Layer7 eros-prepare " + $sha)' >/dev/null
+        fi
         prepared="$(database verify-prepared "$PREVIOUS_REHEARSAL")"
         pending="$(sed -n 's/^EROS_SQLX_PENDING=//p' <<< "$prepared")"
         [[ "$pending" =~ ^[0-9]+$ ]]

@@ -36,7 +36,7 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert build["needs"] == ["tests"]
     assert "outputs.mode == 'DEPLOY'" in build["if"]
     assert "outputs.mode == 'REHEARSAL'" not in build["if"]
-    assert set(workflow["jobs"]) == {"tests", "build", "deploy"}
+    assert set(workflow["jobs"]) == {"tests", "build", "deploy", "layer7_eros_deploy"}
     assert (ROOT / ".github/workflows/gpoint-operations.yml").exists()
     assert "outputs.mode == 'ARTIFACT_PREPARE'" in build["if"]
     assert "environment" not in build

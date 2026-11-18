@@ -1,6 +1,72 @@
 # Как выпускать GPoint
 
-> **2026-11-12:** обычный релиз — только `gpoint-native-release.yml`.
+> **2026-11-18 — переходная проверка упрощённых workflow:** текущий production
+> маршрут всё ещё `gpoint-native-release.yml`. Новые компонентные workflow
+> опубликованы только после PR и пока слушают push в `dev` для TEST; их BUILD и
+> protected DEPLOY разрешены только на `main`. Автоматические production
+> triggers на `main` для них намеренно не включены. Их нельзя вручную запускать
+> на `main` без отдельного OWNER разрешения на production Apply.
+>
+> | Workflow | Path scope на `dev` | BUILD / DEPLOY |
+> |---|---|---|
+> | `gpoint-ci.yml` | Все PR в `main` и `dev`; полный release/security набор | Нет |
+> | `gpoint-core-deploy.yml` | API, Worker, Bot, shared packages и Core Kamal config | Только после проверки `main` и `production` Environment |
+> | `gpoint-miniapp-deploy.yml` | Mini App, nginx, shared packages и Mini App config | Только после проверки `main` и `production` Environment |
+> | `gpoint-eros-deploy.yml` | Закреплённый stock Eros, модельный config и SQLx procedure | Только после проверки `main` и `production` Environment |
+> | `gpoint-eros-relay-deploy.yml` | Relay, Ollama model lock и shared runtime inputs | Только после проверки `main` и `production` Environment |
+>
+> Каждый выбранный workflow сначала вызывает `gpoint-ci.yml`. Документы не
+> попадают в компонентные path filters. Все component jobs на `dev` выполняют
+> только CI; Docker build jobs проверяют `refs/heads/main`. После PR merge в
+> `main` автоматический запуск новых production workflows ещё не включён.
+> Перед таким переключением нужно доказать порядок объединённых изменений и
+> единый выпуск `gpoint-runtime` для Core и Relay; `concurrency` само по себе
+> этот порядок не задаёт. До этого production продолжает обслуживать Native
+> workflow.
+
+## Как проходит staged component workflow
+
+Codex готовит scoped-коммиты в `dev`; компонентный PR проверяет общий
+`gpoint-ci.yml`. После merge в `dev` path filter запускает соответствующий
+component workflow и повторно вызывает тот же полный CI. Это пока CI-only
+проверка маршрутизации. `workflow_dispatch` сохраняется для ручной репетиции на
+непроизводственной ветке.
+
+При отдельно разрешённом production переключении OWNER меняет только branch
+filter с `dev` на `main` после проверки маршрутизации нескольких компонентов и
+общего `gpoint-runtime`. До этого изменения новые workflow не выполняют
+автоматический production build/deploy.
+
+BUILD запускает Docker Buildx на GitHub runner и публикует SHA/run-bound image в
+GHCR с digest output, SBOM и provenance. VPS только получает image по digest.
+Protected Deploy использует pinned Kamal 2.12.0 image и существующий Kamal
+config соответствующего сервиса. Core сначала проверяет live migration
+inventory и разрешённый Prisma набор, выполняет backup/restore gates при
+pending migrations, затем останавливает Bot перед Kamal Deploy. Eros Engine
+использует прежнюю SQLx prepare/apply/verify процедуру. Relay обновляет только
+роль `relay` после read-only проверки pinned Ollama accessory и model digest.
+
+Ошибка CI блокирует BUILD и DEPLOY. Ошибка проверки image или live preflight
+блокирует Apply. Ошибка Kamal/Runtime Verify останавливает workflow; новый
+путь не выполняет DB downgrade и не делает автоматический rollback. Для Core
+остаётся существующий защищённый Native rollback/forward-recovery маршрут с
+проверкой совместимости схемы. Для Eros SQLx применяется только текущий
+forward-recovery процесс из существующей Native процедуры. Rollback в staging
+нужно подтвердить отдельно до удаления старого workflow.
+
+### Список legacy-кода для последующего рассмотрения
+
+После hosted CI и отдельной OWNER приёмки можно рассмотреть удаление старого
+управляющего `gpoint-native-release.yml` и тех scope-planner функций, на которые
+не останется ссылок. Файл сейчас не удалять: он остаётся единственным
+автоматическим production маршрутом и содержит recovery, Layer7, миграционные
+и Runtime Verify gates. `gpoint-operations.yml`, `gpoint-layer7-staging.yml`,
+`scripts/eros-native-database.py`, backup/restore, migration tests и Kamal
+runtime verifiers не включать в список удаления без отдельной проверки ссылок
+и эквивалентной защиты. Сокращение release-кода пока не заявляется: legacy
+workflow не удалён.
+
+> **2026-11-12:** ordinary release used only `gpoint-native-release.yml`.
 > Legacy Prepare/Deploy, first-Kamal-cutover, interrupted recovery и публикация
 > релизных фактов в Linear удалены. Всё, что ниже описывает эти механизмы, —
 > исторический контекст, а не действующая процедура.
@@ -20,25 +86,28 @@
 
 Pin the upstream commit in `services/eros-engine/upstream.sha` and review the
 upstream migration requirements and Layer7 model TOML. Use the
-`GPOINT-LAYER7-EROS` line in the authorized main commit message. Native Tests
-and Build publish only the Eros image. Production Deploy is skipped.
+`GPOINT-LAYER7-EROS` line only for an OWNER-authorized task-scoped update. Native
+Tests and Build publish only the Eros image. The separate `layer7_eros_deploy`
+job then targets only the fixed Layer7 staging host through the protected
+`layer7-staging` Environment and `gpoint-layer7-staging` concurrency group;
+public production Deploy remains skipped. The job rechecks the owner actor,
+exact current-main SHA, marker and immutable Eros digest.
 
-Dispatch `gpoint-layer7-staging.yml` on exact current main with
-`mode=eros-prepare`, the successful Native Build run ID and the Eros digest.
-Set `approve_layer7_staging=true` and `deploy_layer7_staging=false`. The protected
-job restores an encrypted backup to a temporary PostgreSQL database, rehearses
-stock migrations and compares before/after runtime and ledger snapshots.
+The automatic `eros-auto` action first restores the staging database snapshot
+into an isolated temporary database, rehearses stock SQLx migrations and
+compares before/after runtime and ledger snapshots. It then applies only after
+the rehearsal succeeds and the job's Environment approval is satisfied. If SQLx
+migrations are pending, it checks the inference queue, stops only the Eros
+engine, snapshots the quiesced staging database and applies the stock migration
+chain. It never downgrades the database. Kamal redeploys only the `engine` role
+using the exact GHCR digest, then Runtime Verify checks engine health and the
+Core API route. A failure after migration requires the documented forward
+recovery path; it does not restart an incompatible pre-migration image.
 
-After review of that rehearsal and approval for the exact candidate, dispatch
-`mode=eros-deploy` with the same SHA, Build run and digest, set
-`deploy_layer7_staging=true`, and supply the successful rehearsal ID and attempt
-as `eros_rehearsal`. Use the same candidate SHA for `staging_image_sha`.
-If there are pending SQLx migrations, the job checks the queue, stops only the
-Eros engine with Kamal, snapshots the quiesced database, then applies the stock
-migration chain. After a successful Apply, recover any deployment failure
-forward with the approved artifact. A pre-migration image may be restarted only
-after independently proving the source ledger and runtime configuration are
-still compatible. Record the verified Layer7 runtime and conversation checks.
+The protected manual `eros-prepare` / `eros-deploy` route remains available for
+reviewed staging rehearsal and recovery operations outside the authorized
+automatic task-scoped path. It retains its exact-run, exact-SHA, rehearsal and
+Environment checks.
 
 ### Layer7 Core API and model config release
 
