@@ -914,4 +914,3 @@ manifest, canonical state и Linear. Красная публикация ledger/
 видимым bookkeeping failure и не доказывает ошибку runtime. Новый contract
 не финализирует автоматически старый run и не разрешает новый production apply.
 
-<!-- TEMP GPOINT PATH TRIGGER PROBE: docs-only -->
