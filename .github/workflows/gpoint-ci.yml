@@ -59,6 +59,30 @@ jobs:
           cache: pip
           cache-dependency-path: services/agata/pyproject.toml
       - run: pnpm install --frozen-lockfile
+      - name: Run pinned actionlint on release workflows
+        run: |
+          set -euo pipefail
+          version=1.7.12
+          archive="$RUNNER_TEMP/actionlint_${version}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' \
+            '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8' "$archive" \
+            | sha256sum --check --status
+          install -d "$RUNNER_TEMP/actionlint"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/actionlint" actionlint
+          "$RUNNER_TEMP/actionlint/actionlint" \
+            .github/workflows/gpoint-ci.yml \
+            .github/workflows/gpoint-core-deploy.yml \
+            .github/workflows/gpoint-miniapp-deploy.yml \
+            .github/workflows/gpoint-eros-deploy.yml \
+            .github/workflows/gpoint-eros-relay-deploy.yml \
+            .github/workflows/gpoint-layer7-staging.yml
+      - name: Validate Kamal configs with the pinned CLI image
+        env:
+          KAMAL_IMAGE: ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625
+        run: bash scripts/check-kamal-configs.sh
       - name: Generate Prisma client and validate test migrations
         run: |
           set -euo pipefail

@@ -1,6 +1,16 @@
 name: GPoint Eros Engine Deploy (manual)
 
 on:
+  push:
+    branches: [dev]
+    paths:
+      - services/eros-engine/upstream.sha
+      - services/eros-engine/eros-production-model-config.toml
+      - services/eros-engine/eros.env.example
+      - config/deploy.eros.yml
+      - scripts/eros-native-database.py
+      - scripts/eros-production-secrets.py
+      - services/eros-engine/run-local-e2e.sh
   workflow_dispatch:
 
 permissions:
@@ -130,13 +140,14 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f
-        with:
-          ruby-version: '3.3.6'
-      - name: Install pinned Kamal 2.12.0
+      - name: Pull and verify pinned Kamal CLI image
+        env:
+          KAMAL_IMAGE: ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625
         run: |
-          gem install kamal --version 2.12.0 --no-document
-          test "$(kamal version)" = 2.12.0
+          set -euo pipefail
+          docker pull --platform linux/amd64 "$KAMAL_IMAGE"
+          docker image inspect "$KAMAL_IMAGE" --format '{{.Os}}/{{.Architecture}} {{json .RepoDigests}}' \
+            | grep -F 'linux/amd64' | grep -F 'ghcr.io/basecamp/kamal@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625'
       - name: Verify exact main SHA and SSH host key
         run: |
           set -euo pipefail
@@ -211,12 +222,24 @@ jobs:
             --candidate "$CANDIDATE_SHA" --image "$EROS_IMAGE" --run-id "$EROS_RUN_ID" < scripts/eros-native-database.py
       - name: Deploy Eros Engine with stock Kamal
         env:
+          KAMAL_IMAGE: ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625
           KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           GPOINT_COMMIT_SHA: ${{ github.sha }}
           GPOINT_APP_SOURCE_SHA: ${{ github.sha }}
           GPOINT_KAMAL_SERVICE: gpoint-eros-pilot
           GPOINT_KAMAL_EXPECTED_DIGEST: ${{ needs.build.outputs.digest }}
-        run: kamal deploy --skip-push --version "$EROS_VERSION" --roles engine --config-file config/deploy.eros.yml
+        run: |
+          set -euo pipefail
+          docker run --rm --pull=never --platform linux/amd64 \
+            --volume "$GITHUB_WORKSPACE:/workdir" \
+            --volume "$HOME/.ssh:$HOME/.ssh:ro" \
+            --workdir /workdir \
+            --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA \
+            --env KAMAL_REGISTRY_PASSWORD --env GPOINT_PRODUCTION_HOST \
+            --env GPOINT_SSH_KEY --env GPOINT_KNOWN_HOSTS_FILE \
+            --env GPOINT_KAMAL_EXPECTED_DIGEST --env GPOINT_KAMAL_SERVICE \
+            "$KAMAL_IMAGE" deploy --skip-push --version "$EROS_VERSION" \
+            --roles engine --config-file config/deploy.eros.yml
       - name: Verify Eros runtime and preserve existing services
         run: |
           set -euo pipefail
