@@ -58,6 +58,14 @@ permissions:
 
 
 jobs:
+  test:
+    name: Required GPoint CI for exact Layer7 candidate
+    uses: ./.github/workflows/gpoint-ci.yml
+    with:
+      candidate_sha: ${{ inputs.candidate_sha }}
+    permissions:
+      contents: read
+
   layer7_staging:
     name: Protected Layer7 staging Kamal deploy and verify
     if: >-
@@ -70,6 +78,7 @@ jobs:
        (inputs.mode != 'eros-prepare' && inputs.mode != 'core-config-prepare' && inputs.deploy_layer7_staging == true && inputs.approve_layer7_staging == true)) &&
       inputs.staging_image_sha != ''
     # ruby/setup-ruby's pinned 3.3.6 binary is unavailable on Ubuntu 26.04.
+    needs: test
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     environment:

@@ -47,7 +47,11 @@ def test_kamal_step_uses_the_materialized_key_and_pinned_known_hosts():
 def test_both_workflows_materialize_the_documented_variables():
     for path in (NATIVE, MANUAL):
         workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
-        steps = [step for job in workflow["jobs"].values() for step in job["steps"]]
+        steps = [
+            step
+            for job in workflow["jobs"].values()
+            for step in job.get("steps", [])
+        ]
         materialize = next(step for step in steps
                            if step.get("name") == "Materialize Layer7 SSH credentials")
         run = materialize["run"]

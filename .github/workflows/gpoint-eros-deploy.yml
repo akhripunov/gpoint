@@ -1,0 +1,254 @@
+name: GPoint Eros Engine Deploy (manual)
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - services/eros-engine/upstream.sha
+      - services/eros-engine/eros-production-model-config.toml
+      - services/eros-engine/eros.env.example
+      - config/deploy.eros.yml
+      - scripts/eros-native-database.py
+      - scripts/eros-production-secrets.py
+      - services/eros-engine/run-local-e2e.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/gpoint-ci.yml
+    permissions:
+      contents: read
+
+  eros_e2e:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+        with:
+          platforms: linux/amd64
+      - name: Build pinned stock Eros test image
+        id: upstream
+        run: |
+          upstream="$(cat services/eros-engine/upstream.sha)"
+          [[ "$upstream" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=$upstream" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
+        with:
+          context: https://github.com/etherfunlab/eros-engine.git#${{ steps.upstream.outputs.sha }}
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: gpoint-eros:stock-${{ steps.upstream.outputs.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.upstream.outputs.sha }}
+            com.gpoint.source.revision=${{ github.sha }}
+            com.gpoint.eros.upstream-revision=${{ steps.upstream.outputs.sha }}
+            com.gpoint.eros.patch-set.sha256=none
+      - name: Run stock Eros SQLx and synthetic conversation E2E
+        env:
+          EROS_UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          set -euo pipefail
+          image="gpoint-eros:stock-$EROS_UPSTREAM_SHA"
+          test "$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
+          test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$EROS_UPSTREAM_SHA"
+          bash services/eros-engine/run-local-e2e.sh "$image"
+
+  build:
+    needs: [test, eros_e2e]
+    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
+      upstream_sha: ${{ steps.upstream.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Read pinned upstream version
+        id: upstream
+        run: |
+          upstream="$(cat services/eros-engine/upstream.sha)"
+          [[ "$upstream" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=$upstream" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+      - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build immutable stock Eros image
+        id: image
+        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
+        with:
+          context: https://github.com/etherfunlab/eros-engine.git#${{ steps.upstream.outputs.sha }}
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/akhripunov/gpoint-eros:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/etherfunlab/eros-engine
+            org.opencontainers.image.revision=${{ steps.upstream.outputs.sha }}
+            com.gpoint.source.revision=${{ github.sha }}
+            com.gpoint.eros.upstream-revision=${{ steps.upstream.outputs.sha }}
+            com.gpoint.eros.patch-set.sha256=none
+            service=gpoint-eros-pilot
+          cache-from: type=gha,scope=gpoint-eros-release
+          cache-to: type=gha,scope=gpoint-eros-release,mode=max
+          sbom: true
+          provenance: mode=max
+
+  deploy:
+    needs: [test, eros_e2e, build]
+    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    environment: production
+    concurrency:
+      group: gpoint-production-release
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read
+      deployments: write
+    env:
+      CANDIDATE_SHA: ${{ github.sha }}
+      EROS_DIGEST: ${{ needs.build.outputs.digest }}
+      EROS_UPSTREAM_SHA: ${{ needs.build.outputs.upstream_sha }}
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
+      SSH_PRIVATE_KEY: ${{ secrets.GPOINT_KAMAL_SSH_PRIVATE_KEY }}
+      VERIFIED_KNOWN_HOSTS: ${{ secrets.GPOINT_KAMAL_KNOWN_HOSTS }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pull and verify pinned Kamal CLI image
+        env:
+          KAMAL_IMAGE: ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 "$KAMAL_IMAGE"
+          docker image inspect "$KAMAL_IMAGE" --format '{{.Os}}/{{.Architecture}} {{json .RepoDigests}}' \
+            | grep -F 'linux/amd64' | grep -F 'ghcr.io/basecamp/kamal@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625'
+      - name: Verify exact main SHA and SSH host key
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ && "$EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$EROS_UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
+          test -n "$SSH_PRIVATE_KEY" && test -n "$VERIFIED_KNOWN_HOSTS"
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$VERIFIED_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
+          ssh-keygen -F "$GPOINT_PRODUCTION_HOST" -f "$HOME/.ssh/known_hosts" >/dev/null
+          cat > "$HOME/.ssh/config" <<EOF
+          Host $GPOINT_PRODUCTION_HOST
+            User root
+            IdentityFile $HOME/.ssh/id_ed25519
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            UserKnownHostsFile $HOME/.ssh/known_hosts
+          EOF
+          chmod 600 "$HOME/.ssh/config"
+          echo "GPOINT_SSH_KEY=$HOME/.ssh/id_ed25519" >> "$GITHUB_ENV"
+          echo "GPOINT_KNOWN_HOSTS_FILE=$HOME/.ssh/known_hosts" >> "$GITHUB_ENV"
+      - name: Prepare exact Eros image and unchanged model config
+        id: prepare_image
+        env:
+          VERSION: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST"
+          run_id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          stage="/run/gpoint-eros-$run_id"
+          [[ "$stage" =~ ^/run/gpoint-eros-[0-9]+-[0-9]+$ ]]
+          model_config_sha="$(sha256sum services/eros-engine/eros-production-model-config.toml | awk '{print $1}')"
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" install -d -o root -g root -m 0700 /opt/gpoint/env "$stage/docker-config"
+          model_stage="/opt/gpoint/env/.eros-model-config-$run_id"
+          scp -q services/eros-engine/eros-production-model-config.toml "root@$GPOINT_PRODUCTION_HOST:$model_stage"
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" bash -s -- "$model_stage" "$model_config_sha" <<'REMOTE_CONFIG'
+          set -euo pipefail
+          stage="$1" expected="$2" target=/opt/gpoint/env/eros-production-model-config.toml
+          trap 'rm -f -- "$stage"' EXIT
+          test -f "$stage" && test ! -L "$stage"
+          chmod 0600 "$stage"
+          test "$(sha256sum "$stage" | awk '{print $1}')" = "$expected"
+          install -o root -g root -m 0600 "$stage" "$target.tmp"
+          test "$(sha256sum "$target.tmp" | awk '{print $1}')" = "$expected"
+          mv -f -- "$target.tmp" "$target"
+          test "$(sha256sum "$target" | awk '{print $1}')" = "$expected"
+          REMOTE_CONFIG
+          printf '%s' "$GHCR_TOKEN" | ssh -T "root@$GPOINT_PRODUCTION_HOST" \
+            "DOCKER_CONFIG='$stage/docker-config' docker login ghcr.io --username '$GITHUB_ACTOR' --password-stdin" >/dev/null
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" env DOCKER_CONFIG="$stage/docker-config" docker pull --platform linux/amd64 "$image"
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" env DOCKER_CONFIG="$stage/docker-config" docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}' | grep -qx linux/amd64
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" env DOCKER_CONFIG="$stage/docker-config" docker image inspect "$image" --format '{{index .Config.Labels "com.gpoint.source.revision"}}' | grep -qx "$CANDIDATE_SHA"
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" env DOCKER_CONFIG="$stage/docker-config" docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' | grep -qx "$EROS_UPSTREAM_SHA"
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" env DOCKER_CONFIG="$stage/docker-config" docker image inspect "$image" --format '{{json .RepoDigests}}' | grep -F "$image" >/dev/null
+          {
+            echo "EROS_IMAGE=$image"
+            echo "EROS_VERSION=$VERSION"
+            echo "EROS_RUN_ID=$run_id"
+            echo "EROS_STAGE=$stage"
+          } >> "$GITHUB_ENV"
+      - name: Rehearse and apply exact SQLx migration chain with backup restore
+        run: |
+          set -euo pipefail
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" env DOCKER_CONFIG="$EROS_STAGE/docker-config" python3 - \
+            --source-sha "$CANDIDATE_SHA" --image "$EROS_IMAGE" \
+            --write-native-engine-env --write-native-api-env < scripts/eros-production-secrets.py
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" env DOCKER_CONFIG="$EROS_STAGE/docker-config" python3 - --mode prepare \
+            --candidate "$CANDIDATE_SHA" --image "$EROS_IMAGE" --run-id "$EROS_RUN_ID" < scripts/eros-native-database.py
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" env DOCKER_CONFIG="$EROS_STAGE/docker-config" python3 - --mode apply \
+            --candidate "$CANDIDATE_SHA" --image "$EROS_IMAGE" --run-id "$EROS_RUN_ID" < scripts/eros-native-database.py
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" env DOCKER_CONFIG="$EROS_STAGE/docker-config" python3 - --mode verify-applied \
+            --candidate "$CANDIDATE_SHA" --image "$EROS_IMAGE" --run-id "$EROS_RUN_ID" < scripts/eros-native-database.py
+      - name: Deploy Eros Engine with stock Kamal
+        env:
+          KAMAL_IMAGE: ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625
+          KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GPOINT_COMMIT_SHA: ${{ github.sha }}
+          GPOINT_APP_SOURCE_SHA: ${{ github.sha }}
+          GPOINT_KAMAL_SERVICE: gpoint-eros-pilot
+          GPOINT_KAMAL_EXPECTED_DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker run --rm --pull=never --platform linux/amd64 \
+            --volume "$GITHUB_WORKSPACE:/workdir" \
+            --volume "$HOME/.ssh:$HOME/.ssh:ro" \
+            --workdir /workdir \
+            --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA \
+            --env KAMAL_REGISTRY_PASSWORD --env GPOINT_PRODUCTION_HOST \
+            --env GPOINT_SSH_KEY --env GPOINT_KNOWN_HOSTS_FILE \
+            --env GPOINT_KAMAL_EXPECTED_DIGEST --env GPOINT_KAMAL_SERVICE \
+            "$KAMAL_IMAGE" deploy --skip-push --version "$EROS_VERSION" \
+            --roles engine --config-file config/deploy.eros.yml
+      - name: Verify Eros runtime and preserve existing services
+        run: |
+          set -euo pipefail
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" bash -s -- gpoint-eros-pilot-engine "$EROS_VERSION" "$CANDIDATE_SHA" < scripts/verify-kamal-role.sh
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" env DOCKER_CONFIG="$EROS_STAGE/docker-config" python3 - --mode verify-applied \
+            --candidate "$CANDIDATE_SHA" --image "$EROS_IMAGE" --run-id "$EROS_RUN_ID" < scripts/eros-native-database.py
+          curl --fail --silent --show-error --max-time 15 https://gpoint.one/api/health/live >/dev/null
+      - name: Remove temporary production registry credentials
+        if: always() && env.GPOINT_PRODUCTION_HOST != ''
+        run: ssh -T "root@$GPOINT_PRODUCTION_HOST" rm -rf -- "/run/gpoint-eros-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
