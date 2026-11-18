@@ -186,13 +186,15 @@ jobs:
           apply="$(sed -n 's/^apply=//p' <<< "$plan")"
           pending="$(sed -n 's/^pending=//p' <<< "$plan")"
           [[ "$apply" == true || "$apply" == false ]]
-          echo "apply=$apply" >> "$GITHUB_OUTPUT"
-          echo "pending=$pending" >> "$GITHUB_OUTPUT"
-          echo "pending_checksums=$(sed -n 's/^pending_checksums=//p' <<< "$plan")" >> "$GITHUB_OUTPUT"
-          echo "applied=$applied" >> "$GITHUB_OUTPUT"
-          echo "checksums=$checksums" >> "$GITHUB_OUTPUT"
-          echo "prisma_head=$prisma_head" >> "$GITHUB_OUTPUT"
-          echo "agata_head=$agata_head" >> "$GITHUB_OUTPUT"
+          {
+            echo "apply=$apply"
+            echo "pending=$pending"
+            echo "pending_checksums=$(sed -n 's/^pending_checksums=//p' <<< "$plan")"
+            echo "applied=$applied"
+            echo "checksums=$checksums"
+            echo "prisma_head=$prisma_head"
+            echo "agata_head=$agata_head"
+          } >> "$GITHUB_OUTPUT"
       - name: Backup and restore before approved migration Apply
         if: steps.migration.outputs.apply == 'true'
         run: |

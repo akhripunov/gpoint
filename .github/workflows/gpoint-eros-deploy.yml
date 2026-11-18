@@ -204,10 +204,12 @@ jobs:
           ssh -T "root@$GPOINT_PRODUCTION_HOST" env DOCKER_CONFIG="$stage/docker-config" docker image inspect "$image" --format '{{index .Config.Labels "com.gpoint.source.revision"}}' | grep -qx "$CANDIDATE_SHA"
           ssh -T "root@$GPOINT_PRODUCTION_HOST" env DOCKER_CONFIG="$stage/docker-config" docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' | grep -qx "$EROS_UPSTREAM_SHA"
           ssh -T "root@$GPOINT_PRODUCTION_HOST" env DOCKER_CONFIG="$stage/docker-config" docker image inspect "$image" --format '{{json .RepoDigests}}' | grep -F "$image" >/dev/null
-          echo "EROS_IMAGE=$image" >> "$GITHUB_ENV"
-          echo "EROS_VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "EROS_RUN_ID=$run_id" >> "$GITHUB_ENV"
-          echo "EROS_STAGE=$stage" >> "$GITHUB_ENV"
+          {
+            echo "EROS_IMAGE=$image"
+            echo "EROS_VERSION=$VERSION"
+            echo "EROS_RUN_ID=$run_id"
+            echo "EROS_STAGE=$stage"
+          } >> "$GITHUB_ENV"
       - name: Rehearse and apply exact SQLx migration chain with backup restore
         run: |
           set -euo pipefail
