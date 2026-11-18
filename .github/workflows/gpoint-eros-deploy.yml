@@ -76,16 +76,7 @@ jobs:
 
   build:
     needs: [test, eros_e2e]
-    if: >-
-      github.actor == github.repository_owner &&
-      (
-        github.ref == 'refs/heads/main' ||
-        (
-          github.ref == 'refs/heads/dev' &&
-          github.event_name == 'push' &&
-          contains(github.event.head_commit.message || '', '[GPOINT-BUILD-VERIFY]')
-        )
-      )
+    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -118,7 +109,59 @@ jobs:
           file: docker/Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/akhripunov/gpoint-eros:${{ github.ref == 'refs/heads/dev' && format('verify-{0}-{1}-{2}', github.sha, github.run_id, github.run_attempt) || format('{0}-{1}-{2}', github.sha, github.run_id, github.run_attempt) }}
+          tags: ghcr.io/akhripunov/gpoint-eros:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/etherfunlab/eros-engine
+            org.opencontainers.image.revision=${{ steps.upstream.outputs.sha }}
+            com.gpoint.source.revision=${{ github.sha }}
+            com.gpoint.eros.upstream-revision=${{ steps.upstream.outputs.sha }}
+            com.gpoint.eros.patch-set.sha256=none
+            service=gpoint-eros-pilot
+          cache-from: type=gha,scope=gpoint-eros-release
+          cache-to: type=gha,scope=gpoint-eros-release,mode=max
+          sbom: true
+          provenance: mode=max
+
+  verification_build:
+    needs: [test, eros_e2e]
+    if: >-
+      github.ref == 'refs/heads/dev' &&
+      github.actor == github.repository_owner &&
+      github.event_name == 'push' &&
+      contains(github.event.head_commit.message || '', '[GPOINT-BUILD-VERIFY]')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
+      upstream_sha: ${{ steps.upstream.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Read pinned upstream version
+        id: upstream
+        run: |
+          upstream="$(cat services/eros-engine/upstream.sha)"
+          [[ "$upstream" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=$upstream" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+      - uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build verification stock Eros image
+        id: image
+        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
+        with:
+          context: https://github.com/etherfunlab/eros-engine.git#${{ steps.upstream.outputs.sha }}
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/akhripunov/gpoint-eros:verify-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           labels: |
             org.opencontainers.image.source=https://github.com/etherfunlab/eros-engine
             org.opencontainers.image.revision=${{ steps.upstream.outputs.sha }}
@@ -147,14 +190,14 @@ jobs:
           python3 - "$RUNNER_TEMP/image-index.json" "$RUNNER_TEMP/image-sbom.json" "$RUNNER_TEMP/image-provenance.json" "$RUNNER_TEMP/image-labels.json" "$CANDIDATE_SHA" "$SOURCE_LABEL" <<'PY'
           import json, sys
           index_path, sbom_path, provenance_path, labels_path, sha, source_label = sys.argv[1:]
-          index = json.load(open(index_path, encoding="utf-8"))
+          with open(index_path, encoding="utf-8") as f: index = json.load(f)
           manifests = index.get("manifests", [])
           assert any(m.get("platform", {}).get("os") == "linux" and m.get("platform", {}).get("architecture") == "amd64" for m in manifests), "linux/amd64 manifest missing"
-          sbom = json.load(open(sbom_path, encoding="utf-8"))
+          with open(sbom_path, encoding="utf-8") as f: sbom = json.load(f)
           assert sbom and sbom.get("SPDXID") == "SPDXRef-DOCUMENT", "BuildKit SBOM missing"
-          provenance = json.load(open(provenance_path, encoding="utf-8"))
+          with open(provenance_path, encoding="utf-8") as f: provenance = json.load(f)
           assert provenance and provenance.get("buildType"), "BuildKit provenance missing"
-          labels = json.load(open(labels_path, encoding="utf-8"))
+          with open(labels_path, encoding="utf-8") as f: labels = json.load(f)
           assert labels.get(source_label) == sha, f"source SHA label mismatch: {source_label}"
           print("platform=linux/amd64 PASS")
           print("sbom=SPDX PASS")
