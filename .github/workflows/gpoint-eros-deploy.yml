@@ -60,6 +60,7 @@ jobs:
           push: false
           tags: gpoint-eros:stock-${{ steps.upstream.outputs.sha }}
           labels: |
+            org.opencontainers.image.source=https://github.com/etherfunlab/eros-engine
             org.opencontainers.image.revision=${{ steps.upstream.outputs.sha }}
             com.gpoint.source.revision=${{ github.sha }}
             com.gpoint.eros.upstream-revision=${{ steps.upstream.outputs.sha }}
