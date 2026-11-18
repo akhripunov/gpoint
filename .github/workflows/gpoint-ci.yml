@@ -112,6 +112,9 @@ jobs:
           trap cleanup_api EXIT
           ready=false
           for attempt in {1..30}; do
+            if [[ "$attempt" == 1 ]]; then
+              echo "Waiting for the API health endpoint"
+            fi
             if curl --fail --silent http://127.0.0.1:3000/health/live >/dev/null; then
               ready=true
               break
