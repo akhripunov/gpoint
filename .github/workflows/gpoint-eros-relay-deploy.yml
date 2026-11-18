@@ -136,7 +136,7 @@ jobs:
           assert sbom and sbom.get("SPDXID") == "SPDXRef-DOCUMENT", "BuildKit SBOM missing"
           with open(provenance_path, encoding="utf-8") as f: provenance = json.load(f)
           attestation = provenance.get("SLSA", provenance)
-assert attestation and attestation.get("buildType"), "BuildKit provenance missing"
+          assert attestation and attestation.get("buildType"), "BuildKit provenance missing"
           with open(labels_path, encoding="utf-8") as f: labels = json.load(f)
           assert labels.get(source_label) == sha, f"source SHA label mismatch: {source_label}"
           print("platform=linux/amd64 PASS")
