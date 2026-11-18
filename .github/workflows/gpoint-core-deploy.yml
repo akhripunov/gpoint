@@ -113,48 +113,24 @@ jobs:
           cache-to: type=gha,scope=gpoint-runtime,mode=max
           sbom: true
           provenance: mode=max
-      - name: Verify immutable BUILD digest, platform, SBOM, provenance, and source SHA
+      - name: Verify immutable image digest, platform, SBOM, and source provenance
         env:
           IMAGE_REF: ghcr.io/akhripunov/gpoint-runtime
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
           CANDIDATE_SHA: ${{ github.sha }}
-          SOURCE_LABEL: org.opencontainers.image.revision
         run: |
           set -euo pipefail
           [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           image="$IMAGE_REF@$IMAGE_DIGEST"
-          docker buildx imagetools inspect --raw "$image" > "$RUNNER_TEMP/image-index.json"
-          docker buildx imagetools inspect "$image" --format '{{json .SBOM.SPDX}}' > "$RUNNER_TEMP/image-sbom.json"
-          docker buildx imagetools inspect "$image" --format '{{json .Provenance}}' > "$RUNNER_TEMP/image-provenance.json"
-          docker buildx imagetools inspect "$image" --format '{{json .Image.Config.Labels}}' > "$RUNNER_TEMP/image-labels.json"
-          python3 - "$RUNNER_TEMP/image-index.json" "$RUNNER_TEMP/image-sbom.json" "$RUNNER_TEMP/image-provenance.json" "$RUNNER_TEMP/image-labels.json" "$CANDIDATE_SHA" "$SOURCE_LABEL" <<'PY'
-          import json, sys
-          index_path, sbom_path, provenance_path, labels_path, sha, source_label = sys.argv[1:]
-          with open(index_path, encoding="utf-8") as f: index = json.load(f)
-          manifests = index.get("manifests", [])
-          assert any(m.get("platform", {}).get("os") == "linux" and m.get("platform", {}).get("architecture") == "amd64" for m in manifests), "linux/amd64 manifest missing"
-          with open(sbom_path, encoding="utf-8") as f: sbom = json.load(f)
-          assert sbom and sbom.get("SPDXID") == "SPDXRef-DOCUMENT", "BuildKit SBOM missing"
-          with open(provenance_path, encoding="utf-8") as f: provenance = json.load(f)
-          attestation = provenance.get("SLSA", provenance)
-          assert attestation and attestation.get("buildType"), "BuildKit provenance missing"
-          with open(labels_path, encoding="utf-8") as f: labels = json.load(f)
-          assert labels.get(source_label) == sha, f"source SHA label mismatch: {source_label}"
-          print("platform=linux/amd64 PASS")
-          print("sbom=SPDX PASS")
-          print("provenance=SLSA PASS")
-          print(f"source_sha={sha} PASS")
-          PY
-          {
-            echo '### Hosted Build verification'
-            echo "- Candidate SHA: $CANDIDATE_SHA"
-            echo "- Image: $image"
-            echo "- Digest: $IMAGE_DIGEST"
-            echo '- Platform: linux/amd64 — PASS'
-            echo '- SBOM (SPDX): PASS'
-            echo '- Provenance (SLSA): PASS'
-          } >> "$GITHUB_STEP_SUMMARY"
-
+          docker pull --platform linux/amd64 "$image"
+          docker image inspect "$image" --format '{{json .}}' > "$RUNNER_TEMP/image.json"
+          docker buildx imagetools inspect "$image" --format '{{json .SBOM.SPDX}}' > "$RUNNER_TEMP/sbom.json"
+          docker buildx imagetools inspect "$image" --format '{{json .Provenance}}' > "$RUNNER_TEMP/provenance.json"
+          python3 scripts/verify_native_image_readback.py \
+            "$RUNNER_TEMP/image.json" "$IMAGE_REF" "$IMAGE_DIGEST" "$CANDIDATE_SHA"
+          python3 scripts/verify_native_image_attestation.py \
+            "$RUNNER_TEMP/sbom.json" "$RUNNER_TEMP/provenance.json" "$CANDIDATE_SHA" \
+            https://github.com/akhripunov/gpoint.git
   deploy:
     needs: [test, build]
     if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner
