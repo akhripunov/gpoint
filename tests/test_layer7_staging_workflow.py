@@ -422,7 +422,9 @@ def test_layer7_staging_requires_exact_successful_prepare_and_explicit_staging_i
     assert inputs["staging_image_sha"]["required"] == "false"
 
     job = workflow["jobs"]["layer7_staging"]
-    assert "needs" not in job
+    assert job["needs"] == "test"
+    assert workflow["jobs"]["test"]["uses"] == "./.github/workflows/gpoint-ci.yml"
+    assert workflow["jobs"]["test"]["with"]["candidate_sha"] == "${{ inputs.candidate_sha }}"
     assert "inputs.deploy_layer7_staging == true" in job["if"]
     assert "inputs.approve_layer7_staging == true" in job["if"]
     assert "inputs.staging_image_sha != ''" in job["if"]
@@ -487,7 +489,7 @@ def test_layer7_staging_and_automatic_eros_are_separate_from_production_deploy()
     native = yaml.load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text(), Loader=yaml.BaseLoader)
     staging = workflow["jobs"]["layer7_staging"]
     assert set(native["jobs"]) == {"tests", "build", "deploy", "layer7_eros_deploy"}
-    assert set(workflow["jobs"]) == {"layer7_staging"}
+    assert set(workflow["jobs"]) == {"test", "layer7_staging"}
     assert staging["env"]["KAMAL_REGISTRY_PASSWORD"] == "${{ secrets.GITHUB_TOKEN }}"
     assert staging["permissions"]["packages"] == "read"
     assert staging["permissions"].get("contents") == "read"

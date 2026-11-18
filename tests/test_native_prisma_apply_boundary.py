@@ -39,7 +39,7 @@ def test_approved_prisma_apply_is_inside_the_protected_deploy_before_kamal():
     assert set(jobs) == {"tests", "build", "deploy", "layer7_eros_deploy"}
     assert "ARTIFACT_PREPARE" not in jobs["deploy"]["if"]
     staging = yaml.safe_load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text())["jobs"]["layer7_staging"]
-    assert "needs" not in staging
+    assert staging["needs"] == "test"
     assert staging["environment"]["name"] == "layer7-staging"
     assert "production" not in staging["environment"].values()
     assert "GPOINT_KAMAL_HOST" not in staging.get("env", {})
