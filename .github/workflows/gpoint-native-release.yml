@@ -435,7 +435,6 @@ jobs:
           tests/test_kamal_migration_parity_dependencies.py
           tests/test_native_prepared_run.py
           tests/test_release_pre_push_mode.py
-          tests/test_native_environment_deployment.py
           tests/test_native_prisma_apply_boundary.py
           tests/test_prisma_migration_release_plan.py
           tests/test_eros_pilot_no_agata_transfer.py

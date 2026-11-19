@@ -1093,6 +1093,16 @@ def test_workflow_plan_keeps_extra_builds_separate_from_runtime_scope(tmp_path, 
     assert outputs["core_api_source_sha"] == baseline
 
 
+def test_python_workflow_suite_references_existing_test_files():
+    import yaml
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    run = workflow["jobs"]["tests"]["steps"]
+    test_step = next(step for step in run if step.get("name") == "Run workflow, Native First and Kamal boundary tests")
+    missing = [path for path in test_step["run"].split() if path.startswith("tests/") and path.endswith(".py")
+               and not (ROOT / path).is_file()]
+    assert missing == []
+
+
 def test_workflow_engine_only_preserves_core_and_relay_without_core_build(tmp_path, monkeypatch, capsys):
     import yaml
     repo, baseline, candidate, inventory = _component_repo(
