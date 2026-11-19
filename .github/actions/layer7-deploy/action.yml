@@ -33,6 +33,32 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Verify isolated Layer7 staging host identity
+      id: staging_identity
+      if: github.event_name == 'workflow_dispatch'
+      shell: bash
+      run: |
+        set -euo pipefail
+        identity="$(scripts/layer7-transport.sh ssh "root@$GPOINT_LAYER7_STAGING_HOST" bash -s <<'REMOTE'
+        set -euo pipefail
+        hostname="$(hostname -f | tr '[:upper:]' '[:lower:]')"
+        marker=/etc/gpoint/staging-identity
+        test -f "$marker" && test ! -L "$marker"
+        test "$(stat -c '%u:%a' "$marker")" = '0:600'
+        printf '%s\n%s\n' "$hostname" "$(cat "$marker")"
+        REMOTE
+        )"
+        python3 - "$identity" <<'PY'
+        import sys
+        facts = sys.argv[1].splitlines()
+        if len(facts) != 2:
+            raise SystemExit("Layer7 staging host identity response is malformed")
+        hostname, marker = facts
+        if hostname == "vps.gpoint.one":
+            raise SystemExit("Layer7 staging target resolves to the production GPoint host")
+        if marker != "gpoint-layer7-staging-v1":
+            raise SystemExit("Layer7 staging host identity marker is missing or invalid")
+        PY
     - if: inputs.mode != 'eros-prepare'
       uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
       with:

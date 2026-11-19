@@ -107,7 +107,6 @@ def test_staging_ssh_keeps_silent_transfers_alive_without_weakening_host_keys():
     assert text.count('scripts/layer7-transport.sh') >= 20
     assert 'ssh -F /dev/null' not in text
     assert 'scp -q -F /dev/null' not in text
-
     transport = (ROOT / 'scripts/layer7-transport.sh').read_text()
     assert '-o ServerAliveInterval=15 -o ServerAliveCountMax=3' in transport
     assert '-o StrictHostKeyChecking=yes' in transport
@@ -115,6 +114,46 @@ def test_staging_ssh_keeps_silent_transfers_alive_without_weakening_host_keys():
     assert '-o ConnectionAttempts=3' in transport
     assert '-o UserKnownHostsFile="$known_hosts"' in transport
     assert 'infra/staging/layer7_known_hosts' in transport
+
+
+def test_staging_rejects_production_host_before_remote_inventory_or_apply():
+    steps = _staging_steps()
+    identity = next(step for step in steps if step.get('id') == 'staging_identity')
+    inventory = next(step for step in steps if step.get('id') == 'kamal_inventory')
+    protected_scope = next(step for step in steps if step.get('id') == 'protected_scope')
+    deployment = next(step for step in steps if step.get('id') == 'deployment')
+    assert steps.index(identity) < steps.index(inventory)
+    assert steps.index(identity) < steps.index(protected_scope)
+    assert steps.index(identity) < steps.index(deployment)
+    assert 'vps.gpoint.one' in identity['run']
+    assert '/etc/gpoint/staging-identity' in identity['run']
+    assert 'gpoint-layer7-staging-v1' in identity['run']
+
+
+@pytest.mark.parametrize(
+    'hostname,marker,expected',
+    [
+        ('vps.gpoint.one', 'gpoint-layer7-staging-v1', 1),
+        ('layer7-test.internal', 'gpoint-layer7-staging-v1', 0),
+        ('layer7-test.internal', 'missing', 1),
+    ],
+)
+def test_staging_identity_guard_allows_only_marked_nonproduction_host(tmp_path, hostname, marker, expected):
+    steps = _staging_steps()
+    identity = next(step for step in steps if step.get('id') == 'staging_identity')
+    workspace = tmp_path / 'workspace'
+    transport = workspace / 'scripts' / 'layer7-transport.sh'
+    transport.parent.mkdir(parents=True)
+    transport.write_text(f'#!/bin/sh\nprintf \'%s\\n%s\\n\' {hostname} {marker}\n')
+    transport.chmod(0o755)
+    result = subprocess.run(
+        ['bash', '-euo', 'pipefail', '-c', identity['run']],
+        cwd=workspace,
+        env={**os.environ, 'GITHUB_WORKSPACE': str(workspace),
+             'GPOINT_LAYER7_STAGING_HOST': '192.0.2.10'},
+        text=True, capture_output=True,
+    )
+    assert (result.returncode == 0) == (expected == 0), result.stderr
 
 
 

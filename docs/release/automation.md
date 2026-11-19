@@ -320,6 +320,13 @@ not a second production controller. Its real deployment tests require current
 read-only evidence that the host, credentials, containers, volumes and database
 are isolated from production; static configuration or a successful historical
 run is not current isolation evidence.
+Before any remote inventory or Apply, the composite action also requires the
+target's FQDN to differ from `vps.gpoint.one` and an operator-provisioned
+`/etc/gpoint/staging-identity` file owned by root with mode `0600` and exact
+contents `gpoint-layer7-staging-v1`. This marker is a fail-closed host identity
+check, not a substitute for proving that the database, credentials, containers
+and volumes are isolated. The currently configured target is the production
+host and must fail this check; do not install the staging marker there.
 
 ### ME-62 release-code audit and reduction status
 
