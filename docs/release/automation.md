@@ -334,13 +334,7 @@ migration, compatibility, worker, Runtime Verify или recovery gates.
 | `check-kamal-configs.sh` | Keep | Pulls the pinned Kamal image, verifies linux/amd64 and its digest, then loads all three configs with synthetic credentials and network disabled. It does not read production. |
 ## Local test selection under FULL
 
-FULL is a risk level, not a mandate to run every local test. `classify-release-prepush.py` stays the single canonical FAST/FULL procedure; to pick which local tests are worth running, use the same surface classifier that CI uses:
-
-```sh
-python3 scripts/native_change_surface.py --base origin/main --head HEAD --output /tmp/surface
-```
-
-Run it after the candidate commit (it compares commits, not the working tree), then take the `--output` flags: `eros`, `miniapp`, `database`, `full_ci`. A FULL candidate for a narrow component runs that component's tests locally, while the hosted PR CI remains the authoritative full check. Measured administrative overhead for this flow is single-digit seconds (fetch ≈2.5 s, surface <0.2 s, focused tests <1 s, commit <0.1 s); the remaining pre-push time is the edit itself and the network push. Do not add a second pre-push procedure: the classifier above owns the FAST/FULL decision, and `native_change_surface.py` only reports the changed surface.
+FULL is a risk level, not a mandate to run every local test. `classify-release-prepush.py` remains the canonical FAST/FULL procedure. Hosted CI uses the pinned `dorny/paths-filter` action in `gpoint-native-release.yml` for declarative component and shared-dependency selection. Run the directly affected local checks; GitHub CI remains authoritative for the exact PR SHA. The production baseline planner remains separate because it compares each installed component source with the exact candidate and fails closed on unknown paths. Do not recreate a second component path map for CI.
 
 | `classify-release-prepush.py` | Keep outside CI | Implements local FAST/FULL preparation rules only; it is not a release router and does not weaken hosted gates. |
 

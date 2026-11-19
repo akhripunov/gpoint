@@ -65,6 +65,8 @@ KNOWN_RETIRED_NON_RUNTIME_FILES = frozenset({
     "scripts/eros-postgres-acl-deploy.test.mjs",
     "scripts/eros-production-deployment.mjs",
     "scripts/eros-production-deployment.test.mjs",
+    # Replaced by pinned declarative dorny filters in the Native workflow.
+    "scripts/native_change_surface.py",
     "scripts/ghcr-receipt.mjs",
     "scripts/ghcr-receipt.test.mjs",
     "scripts/github-deployments.mjs",
@@ -211,7 +213,6 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "scripts/layer7_release_scope.py",
     "scripts/layer7_staging_database.py",
     "scripts/layer7_staging_env.py",
-    "scripts/native_change_surface.py",
     "scripts/native_release_intent.py",
     "scripts/prepush.py",
     "scripts/prisma_migration_release_plan.py",
@@ -360,7 +361,6 @@ LAYER7_CORE_CONFIG_TOOLING_PATHS = frozenset({
     ".github/workflows/gpoint-native-release.yml",
     "docs/release/automation.md",
     "scripts/layer7_release_scope.py",
-    "scripts/native_change_surface.py",
     "scripts/native_release_intent.py",
     "scripts/verify_native_prepared_run.py",
     "tests/test_kamal_native_automatic_release.py",
@@ -390,8 +390,25 @@ LAYER7_API_RUNTIME_PATHS = frozenset({
 }) | EROS_MODEL_CONFIG_PATHS
 
 
+INFRASTRUCTURE_PREFIXES = (".github/", ".kamal/", "infra/production/", "scripts/", "systemd/")
+PRODUCTION_KAMAL_CONFIGS = frozenset({
+    "config/deploy.yml", "config/deploy.agata.yml", "config/deploy.eros-api.yml",
+    "config/deploy.eros-relay.yml", "config/deploy.eros.yml", "config/deploy.miniapp.yml",
+})
+
+
+def is_infrastructure_change(changed_paths: set[str] | frozenset[str]) -> bool:
+    return any(path in PRODUCTION_KAMAL_CONFIGS
+               or any(path.startswith(prefix) for prefix in INFRASTRUCTURE_PREFIXES)
+               for path in changed_paths)
+
+
 def push_deploy_authorized(*, mode: str, changed_paths: set[str] | frozenset[str]) -> bool:
-    """Keep tooling-only Core builds available without applying them to Layer7."""
+    """Require explicit dispatch approval before production infrastructure Apply."""
+    # Production topology and release-control changes require an explicit
+    # workflow_dispatch through the existing protected production Environment.
+    if is_infrastructure_change(changed_paths):
+        return False
     if mode == "DEPLOY":
         return True
     return mode == "LAYER7_API" and bool(LAYER7_API_RUNTIME_PATHS & changed_paths)
@@ -521,9 +538,9 @@ def classify_push(*, event_name: str, ref: str,
     # Prisma schema changes must reach hosted Tests, which compare the full
     # migration history with schema.prisma before Build. Production Apply still
     # requires an exact migration set in the approved migration manifest.
-    # Publishing to main authorizes the complete reviewed candidate. Docs,
-    # release fixes and their app changes use the same Tests -> Build -> Deploy
-    # run; no second manual run repeats CI just because a path is operational.
+    # App and documentation commits use the ordinary Tests -> Build -> Deploy
+    # route. Production topology and release-control changes are held for a
+    # separately approved workflow_dispatch in the protected Environment.
     return "DEPLOY"
 
 
@@ -654,7 +671,6 @@ def _component_paths(path: str) -> set[str]:
     if path in {
         "config/deploy.yml",
         "config/deploy.eros-api.yml",
-        "services/eros-engine/eros-pilot-embedding-relay.mjs",
     }:
         return {"CORE"}
     if path == "apps/miniapp/index.html" or path.startswith(("apps/miniapp/src/", "apps/miniapp/public/")):

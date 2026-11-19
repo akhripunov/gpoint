@@ -1,152 +1,118 @@
-"""Contract of the shared changed-surface classifier used by CI and release."""
+"""Contracts for declarative Native Release path filters."""
 
 import re
-import sys
+import subprocess
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-
-from native_change_surface import classify  # noqa: E402
 
 
-def test_docs_only_selection_is_minimal():
-    surface = classify(["docs/release/README.md", "README.md"])
-    assert surface["docs_only"] is True
-    assert surface["full_ci"] is False
-    assert surface["eros"] is False
-    assert surface["miniapp"] is False
+def _filters():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    steps = workflow["jobs"]["tests"]["steps"]
+    step = next(step for step in steps if step.get("id") == "filter")
+    return workflow, step, yaml.safe_load(step["with"]["filters"])
 
 
-def test_staging_eros_config_does_not_select_the_eros_image_build():
-    # Config-only Eros change must not rebuild the stock Eros image, but it is
-    # still an Eros change for reporting purposes.
-    surface = classify(["config/deploy.layer7-staging.eros.yml"])
-    assert surface["eros"] is False
-    assert surface["eros_config"] is True
-    assert surface["full_ci"] is False
+def test_pinned_dorny_filters_cover_five_logical_components():
+    workflow, step, filters = _filters()
 
-
-def test_eros_toml_alone_does_not_select_the_image_build():
-    surface = classify(["services/eros-engine/eros-layer7-staging-model-config.toml"])
-    assert surface["eros"] is False
-    assert surface["eros_config"] is True
-
-
-def test_eros_engine_code_selects_the_image_build():
-    surface = classify(["services/eros-engine/run-local-e2e.sh"])
-    assert surface["eros"] is True
-    assert surface["eros_config"] is False
-
-
-def test_protected_instructions_fail_closed():
-    surface = classify(["AGENTS.md"])
-    assert surface["protected_paths"] == ["AGENTS.md"]
-    assert surface["full_ci"] is True
-    assert surface["docs_only"] is False
-
-
-def test_miniapp_change_selects_only_miniapp_checks():
-    surface = classify(["apps/miniapp/src/main.tsx"])
-    assert surface["miniapp"] is True
-    assert surface["core"] is False   # a Mini App change must not select CORE
-    assert surface["docs_only"] is False
-
-
-def test_backend_change_selects_backend_checks():
-    surface = classify(["apps/api/src/messages.ts"])
-    assert surface["core"] is True
-    assert surface["app_backend"] is True
-    assert surface["database"] is False
-
-
-def test_core_kamal_configs_and_eros_relay_share_component_scope():
-    import native_release_intent as intent
-
-    cases = {
-        "config/deploy.yml": {"CORE"},
-        "config/deploy.eros-api.yml": {"CORE"},
-        "services/eros-engine/eros-pilot-embedding-relay.mjs": {"CORE"},
+    assert step["uses"] == "dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d"
+    assert step["with"]["base"] == (
+        "${{ github.event_name == 'pull_request' && "
+        "github.event.pull_request.base.sha || github.event.before }}"
+    )
+    assert "pull-requests" in workflow["jobs"]["tests"]["permissions"]
+    assert {"core", "miniapp", "agata", "eros_engine", "eros_relay"} <= set(filters)
+    expected_paths = {
+        "core": "apps/api/**",
+        "miniapp": "apps/miniapp/**",
+        "agata": "services/agata/**",
+        "eros_engine": "services/eros-engine/**",
+        "eros_relay": "services/eros-engine/eros-pilot-embedding-relay.mjs",
     }
-    for path, expected in cases.items():
-        assert intent._component_paths(path) == expected
-        surface = classify([path])
-        assert surface["core"] is True
-        assert surface["eros"] is False
-        assert surface["eros_config"] is False
+    for component, path in expected_paths.items():
+        assert path in filters[component]
+    assert "services/eros-engine/eros-pilot-embedding-relay.mjs" not in filters["core"]
+    assert "!services/eros-engine/eros-pilot-embedding-relay.mjs" in filters["eros_engine"]
 
 
-def test_migration_change_fails_closed_to_the_full_suite():
-    surface = classify(["packages/db/prisma/migrations/20261016120000_x/migration.sql"])
-    assert surface["database"] is True
-    assert surface["full_ci"] is True
+def test_shared_build_dependencies_select_core_and_miniapp_filters():
+    _workflow, _step, filters = _filters()
+
+    shared_paths = (
+        "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json",
+        "packages/**", "infra/production/Gpoint.Dockerfile",
+    )
+    for path in shared_paths:
+        assert path in filters["core"]
+        assert path in filters["miniapp"]
+    for path in ("apps/api/package.json", "apps/bot/package.json", "apps/worker/package.json"):
+        assert path in filters["miniapp"]
 
 
-def test_unknown_path_fails_closed():
-    surface = classify(["weird/unmapped.file"])
-    assert surface["unknown_paths"] == ["weird/unmapped.file"]
-    assert surface["full_ci"] is True
+def test_database_and_production_infrastructure_filters_are_explicit():
+    workflow, _step, filters = _filters()
+    assert "packages/db/prisma/schema.prisma" in filters["database"]
+    assert "packages/db/prisma/migrations/**" in filters["database"]
+    assert "services/agata/migrations/**" in filters["database"]
+    for path in (".github/**", ".kamal/**", "config/deploy.eros-relay.yml",
+                 "infra/production/**", "scripts/**", "systemd/**"):
+        assert path in filters["infrastructure"]
+    assert "paths" not in workflow.get("on", workflow.get(True))["push"]
 
 
-def test_empty_change_fails_closed():
-    surface = classify([])
-    assert surface["full_ci"] is True
+def test_relay_kamal_change_is_not_core_and_never_auto_applies():
+    import sys
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import native_release_intent as intent  # noqa: E402
+
+    relay_config = "config/deploy.eros-relay.yml"
+    relay_runtime = "services/eros-engine/eros-pilot-embedding-relay.mjs"
+    assert intent._component_paths(relay_config) == {"EROS"}
+    assert intent._component_paths(relay_runtime) == {"EROS"}
+    assert intent.is_infrastructure_change({relay_config})
+    assert not intent.push_deploy_authorized(mode="DEPLOY", changed_paths={relay_config})
+    assert intent.push_deploy_authorized(mode="DEPLOY", changed_paths={"apps/api/src/messages.ts"})
+    deploy = _filters()[0]["jobs"]["deploy"]
+    assert "production" in deploy["environment"]["name"]
 
 
-def test_release_infrastructure_change_fails_closed():
-    surface = classify(["scripts/native_change_surface.py"])
-    assert surface["release_infra"] is True
-    assert surface["full_ci"] is True
+def test_eros_relay_kamal_config_stays_separate_from_engine_and_protected_config():
+    _workflow, _step, filters = _filters()
+    assert "config/deploy.eros-relay.yml" in filters["eros_relay"]
+    assert "config/deploy.eros.yml" not in filters["eros_relay"]
+    assert "config/deploy.eros-relay.yml" in filters["infrastructure"]
+    assert "config/deploy.layer7-staging.eros.yml" not in filters["infrastructure"]
 
 
-def test_staging_only_merge_runs_no_heavy_production_checks():
-    # Exact path set of the staging-only merge b997e1a8 that used to run the
-    # stock Eros build, Playwright and a production Deploy attempt.
-    surface = classify([
-        "config/deploy.layer7-staging.eros.yml",
-        "tests/test_layer7_staging_workflow.py",
-    ])
-    assert surface["eros"] is False        # no stock Eros image build
-    assert surface["eros_config"] is True
-    assert surface["miniapp"] is False     # no Chromium/E2E
-    assert surface["database"] is False
-    assert surface["release_infra"] is False
-    assert surface["full_ci"] is False
-
-
-def test_production_eros_api_publishes_only_a_loopback_worker_endpoint():
-    import yaml
-    root = Path(__file__).resolve().parents[1]
-    text = (root / "config/deploy.eros-api.yml").read_text()
+def test_eros_api_remains_loopback_only():
+    text = (ROOT / "config/deploy.eros-api.yml").read_text()
     config = yaml.safe_load(re.sub(r"<%=.*?%>", "rendered", text))
-    publish = config["servers"]["api"]["options"]["publish"]
-    assert publish == ["127.0.0.1:13003:3000"]
-    # Never a public interface, and a different port from staging.
-    assert all(entry.startswith("127.0.0.1:") for entry in publish)
-    staging = yaml.safe_load(
-        re.sub(r"<%=.*?%>", "rendered", (root / "config/deploy.layer7-staging.eros-api.yml").read_text()))
-    assert staging["servers"]["api"]["options"]["publish"] == ["127.0.0.1:13001:3000"]
-    assert publish != staging["servers"]["api"]["options"]["publish"]
-    # The public route keeps using kamal-proxy.
+    assert config["servers"]["api"]["options"]["publish"] == ["127.0.0.1:13003:3000"]
     assert config["servers"]["api"]["proxy"]["path_prefixes"] == ["/api"]
 
 
-def test_latest_merge_has_no_unmapped_component_paths():
-    """A release merge must not be blocked by a path the scope map forgot."""
-    import subprocess
-    import native_release_intent as intent
+def test_latest_commit_paths_are_mapped_or_explicitly_non_runtime():
+    import sys
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import native_release_intent as intent  # noqa: E402
 
-    root = Path(__file__).resolve().parents[1]
     try:
         changed = subprocess.check_output(
-            ["git", "-C", str(root), "diff", "--name-only", "HEAD~1", "HEAD"],
-            text=True, stderr=subprocess.DEVNULL).split()
+            ["git", "-C", str(ROOT), "diff", "--name-only", "HEAD~1", "HEAD"],
+            text=True, stderr=subprocess.DEVNULL,
+        ).split()
     except subprocess.CalledProcessError:
         import pytest
         pytest.skip("single-commit checkout")
     if not changed:
         import pytest
         pytest.skip("no parent diff")
-    unmapped = [p for p in changed
-                if not intent._component_paths(p) and not intent._known_non_runtime_path(p)]
-    assert not unmapped, f"unmapped component paths would block the release: {unmapped}"
+    unmapped = [path for path in changed
+                if not intent._component_paths(path)
+                and not intent._known_non_runtime_path(path)
+                and path not in intent.KNOWN_RETIRED_NON_RUNTIME_FILES]
+    assert not unmapped

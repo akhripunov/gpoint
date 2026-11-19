@@ -79,6 +79,7 @@ jobs:
     permissions:
       contents: read
       deployments: read
+      pull-requests: read
     # All suites compute identical intent outputs from the same event and checkout.
     outputs:
       mode: ${{ steps.intent.outputs.mode }}
@@ -111,6 +112,64 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Filter changed components
+        id: filter
+        if: >-
+          github.event_name == 'pull_request' ||
+          (github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000')
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          filters: |
+            core:
+              - 'apps/api/**'
+              - 'apps/bot/**'
+              - 'apps/worker/**'
+              - 'config/deploy.yml'
+              - 'config/deploy.eros-api.yml'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'tsconfig.base.json'
+              - 'packages/**'
+              - 'infra/production/Gpoint.Dockerfile'
+            miniapp:
+              - 'apps/miniapp/**'
+              - 'apps/api/package.json'
+              - 'apps/bot/package.json'
+              - 'apps/worker/package.json'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'tsconfig.base.json'
+              - 'packages/**'
+              - 'infra/production/Gpoint.Dockerfile'
+              - 'infra/production/nginx-miniapp.conf'
+            agata:
+              - 'services/agata/**'
+            eros_engine:
+              - 'services/eros-engine/**'
+              - '!services/eros-engine/*.toml'
+              - '!services/eros-engine/eros-pilot-embedding-relay.mjs'
+            eros_relay:
+              - 'services/eros-engine/eros-pilot-embedding-relay.mjs'
+              - 'config/deploy.eros-relay.yml'
+            database:
+              - 'packages/db/prisma/schema.prisma'
+              - 'packages/db/prisma/migrations/**'
+              - 'services/agata/migrations/**'
+            infrastructure:
+              - '.github/**'
+              - '.kamal/**'
+              - 'config/deploy.yml'
+              - 'config/deploy.agata.yml'
+              - 'config/deploy.eros-api.yml'
+              - 'config/deploy.eros-relay.yml'
+              - 'config/deploy.eros.yml'
+              - 'config/deploy.miniapp.yml'
+              - 'infra/production/**'
+              - 'scripts/**'
+              - 'systemd/**'
       - name: Read pinned Eros upstream source
         shell: bash
         run: |
@@ -118,14 +177,6 @@ jobs:
           upstream="$(cat services/eros-engine/upstream.sha)"
           [[ "$upstream" =~ ^[0-9a-f]{40}$ ]]
           echo "EROS_UPSTREAM_SHA=$upstream" >> "$GITHUB_ENV"
-      - name: Resolve changed surface
-        id: surface
-        env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          python3 scripts/native_change_surface.py --base "$BASE_SHA" --head "$HEAD_SHA" --output "$GITHUB_OUTPUT"
       - name: Fail closed unless the event and complete path set allow a release
         id: intent
         env:
@@ -189,12 +240,12 @@ jobs:
           ./scripts/check-kamal-configs.sh
           ./scripts/test-kamal-proxy-integration.sh
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-        if: matrix.suite == 'eros' && (steps.surface.outputs.eros == 'true' || steps.surface.outputs.full_ci == 'true')
+        if: matrix.suite == 'eros' && (steps.filter.outputs.eros_engine == 'true' || steps.filter.outputs.infrastructure == 'true' || steps.filter.outputs.database == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
         with:
           platforms: linux/amd64
       - name: Build stock Eros test image
         id: eros_test_image
-        if: matrix.suite == 'eros' && (steps.surface.outputs.eros == 'true' || steps.surface.outputs.full_ci == 'true')
+        if: matrix.suite == 'eros' && (steps.filter.outputs.eros_engine == 'true' || steps.filter.outputs.infrastructure == 'true' || steps.filter.outputs.database == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
           context: https://github.com/etherfunlab/eros-engine.git#${{ env.EROS_UPSTREAM_SHA }}
@@ -215,7 +266,7 @@ jobs:
           # PRs may read main's cache. Only runs on main export layers for releases.
           cache-to: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && 'type=gha,scope=gpoint-eros-test,mode=max,timeout=45s,ignore-error=true' || '' }}
       - name: Run stock Eros SQLx and synthetic conversation E2E
-        if: matrix.suite == 'eros' && (steps.surface.outputs.eros == 'true' || steps.surface.outputs.full_ci == 'true')
+        if: matrix.suite == 'eros' && (steps.filter.outputs.eros_engine == 'true' || steps.filter.outputs.infrastructure == 'true' || steps.filter.outputs.database == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
         run: |
           set -euo pipefail
           image="gpoint-eros:stock-$EROS_UPSTREAM_SHA"
@@ -268,11 +319,14 @@ jobs:
         run: |
           pnpm test:release
       - name: Install Playwright Chromium
-        if: matrix.suite == 'workspace' && (steps.surface.outputs.miniapp == 'true' || steps.surface.outputs.full_ci == 'true')
+        if: matrix.suite == 'workspace' && (steps.filter.outputs.miniapp == 'true' || steps.filter.outputs.infrastructure == 'true' || steps.filter.outputs.database == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
         run: pnpm exec playwright install --with-deps chromium
       - name: Run Mini App end-to-end tests
-        if: matrix.suite == 'workspace' && (steps.surface.outputs.miniapp == 'true' || steps.surface.outputs.full_ci == 'true')
+        if: matrix.suite == 'workspace' && (steps.filter.outputs.miniapp == 'true' || steps.filter.outputs.infrastructure == 'true' || steps.filter.outputs.database == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
         run: pnpm test:e2e
+      - name: Run Eros Relay unit tests
+        if: matrix.suite == 'workspace' && (steps.filter.outputs.eros_relay == 'true' || steps.filter.outputs.infrastructure == 'true' || steps.filter.outputs.database == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
+        run: node --test services/eros-engine/eros-pilot-embedding-relay.test.mjs
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         if: matrix.suite == 'python'
@@ -311,7 +365,7 @@ jobs:
           "$install_dir/oras" version | grep -E 'Version:[[:space:]]+1\.3\.0([[:space:]]|$)' >/dev/null
           echo "ORAS_1_3_BIN=$install_dir/oras" >> "$GITHUB_ENV"
       - name: Detect pending schema dependencies before Build
-        if: matrix.suite == 'python' && (steps.surface.outputs.database == 'true' || steps.surface.outputs.full_ci == 'true')
+        if: matrix.suite == 'python' && (steps.filter.outputs.database == 'true' || steps.filter.outputs.infrastructure == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
@@ -380,7 +434,7 @@ jobs:
           tests/test_kamal_production_manifest.py
           tests/test_kamal_ordinary_manifest.py
       - name: Run isolated PostgreSQL 16 migration and integration suites
-        if: matrix.suite == 'python' && (steps.surface.outputs.database == 'true' || steps.surface.outputs.full_ci == 'true')
+        if: matrix.suite == 'python' && (steps.filter.outputs.database == 'true' || steps.filter.outputs.infrastructure == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
         run: |
           unset DATABASE_URL SHADOW_DATABASE_URL
           python tests/integration/gpoint-chat-schema-docker.py --image pgvector/pgvector:0.8.6-pg16

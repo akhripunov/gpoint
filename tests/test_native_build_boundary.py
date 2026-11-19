@@ -162,6 +162,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             "Validate pinned Kamal configs and shared proxy routing": "release-tooling",
             "Build and typecheck workspace": "workspace",
             "Run Mini App end-to-end tests": "workspace",
+            "Run Eros Relay unit tests": "workspace",
             "Run workflow, Native First and Kamal boundary tests": "python",
             "Run isolated PostgreSQL 16 migration and integration suites": "python",
             "Run stock Eros SQLx and synthetic conversation E2E": "eros",
@@ -170,7 +171,13 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         for name, suite in required_steps.items():
             self.assertIn(f"matrix.suite == '{suite}'", steps[name]["if"])
         eros = next(step for step in tests["steps"] if step.get("id") == "eros_test_image")
-        self.assertIn("steps.surface.outputs.full_ci == 'true'", eros["if"])
+        self.assertIn("steps.filter.outputs.infrastructure == 'true'", eros["if"])
+        self.assertIn("steps.filter.outputs.database == 'true'", eros["if"])
+        self.assertIn("steps.filter.outputs.eros_engine == 'true'", eros["if"])
+        relay = steps["Run Eros Relay unit tests"]
+        self.assertIn("steps.filter.outputs.eros_relay == 'true'", relay["if"])
+        self.assertIn("steps.filter.outputs.infrastructure == 'true'", relay["if"])
+        self.assertIn("node --test services/eros-engine/eros-pilot-embedding-relay.test.mjs", relay["run"])
         python = [steps[name] for name, suite in required_steps.items() if suite == "python"]
         for step in python:
             self.assertIn("unset DATABASE_URL SHADOW_DATABASE_URL", step["run"])
@@ -185,6 +192,19 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("always()", deploy["if"])
         self.assertIn("needs.build.result == 'success'", deploy["if"])
         self.assertIn("github.event_name == 'push'", deploy["if"])
+        self.assertIn("production", deploy["environment"]["name"])
+        self.assertNotIn("paths", triggers["push"])
+        approval = triggers["workflow_dispatch"]["inputs"]["approve_production"]
+        self.assertTrue(approval["required"])
+        self.assertEqual(approval["type"], "boolean")
+        self.assertIn("--approve-production", "\n".join(
+            step.get("run", "") for step in self.workflow["jobs"]["tests"]["steps"]
+        ))
+        dispatch = next(
+            step for step in self.workflow["jobs"]["tests"]["steps"]
+            if step.get("id") == "filter"
+        )
+        self.assertTrue(dispatch["uses"].startswith("dorny/paths-filter@"))
 
     def test_operational_only_push_and_migration_rehearsal_fail_closed(self):
         gate = self.workflow["jobs"]["tests"]

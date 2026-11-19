@@ -23,7 +23,6 @@ def test_core_config_release_tooling_uses_one_shared_target_allowlist():
         ".github/workflows/gpoint-native-release.yml",
         "docs/release/automation.md",
         "scripts/layer7_release_scope.py",
-        "scripts/native_change_surface.py",
         "scripts/native_release_intent.py",
         "scripts/verify_native_prepared_run.py",
         "tests/test_kamal_native_automatic_release.py",

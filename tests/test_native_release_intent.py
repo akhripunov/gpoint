@@ -223,7 +223,6 @@ def test_layer7_release_tooling_builds_core_but_does_not_auto_apply():
         ".github/workflows/gpoint-native-release.yml",
         "docs/release/automation.md",
         "scripts/layer7_release_scope.py",
-        "scripts/native_change_surface.py",
         "scripts/native_release_intent.py",
         "scripts/verify_native_prepared_run.py",
         "tests/test_kamal_native_automatic_release.py",
@@ -635,6 +634,30 @@ def test_eros_engine_source_is_an_independent_runtime_component(tmp_path):
     assert expected["roles"]["gpoint-core-api"]["version"] == inventory["roles"]["gpoint-core-api"]["version"]
     assert expected["roles"][MODULE.EROS_ROLES[1]]["sourceSha"] == candidate
     assert expected["roles"][MODULE.EROS_ROLES[1]]["repositoryDigest"] == MODULE.ROLE_REPOSITORIES[MODULE.EROS_ROLES[1]] + "@sha256:" + "8" * 64
+
+
+def test_eros_relay_source_updates_eros_without_deploying_core_roles(tmp_path):
+    relay_path = "services/eros-engine/eros-pilot-embedding-relay.mjs"
+    repo, baseline, candidate, inventory = _component_repo(tmp_path, {relay_path: "export const relay = true;\n"})
+    _add_eros_roles(inventory, baseline=baseline)
+
+    scope = MODULE.classify_component_scope(repo, candidate, inventory)
+    build = MODULE.classify_component_build_plan(
+        repo, candidate, {"CORE": baseline, "AGATA": baseline, "MINIAPP": baseline, "EROS": baseline}
+    )
+    expected = MODULE.expected_runtime_inventory(
+        "EROS", inventory, candidate, candidate + "-101-1", "sha256:" + "8" * 64, "", "",
+        eros_digest="sha256:" + "6" * 64,
+    )
+
+    assert MODULE._component_paths(relay_path) == {"EROS"}
+    assert scope["scope"] == "EROS"
+    assert scope["deploy_core"] is False
+    assert build["deploy_scope"] == "EROS"
+    assert build["build_components"] == ["CORE", "EROS"]
+    assert expected["roles"]["gpoint-core-api"]["sourceSha"] == baseline
+    assert expected["roles"]["gpoint-core-worker"]["sourceSha"] == baseline
+    assert expected["roles"]["gpoint-eros-relay-relay"]["sourceSha"] == candidate
 
 
 def test_first_eros_bootstrap_adds_engine_and_relay_with_exact_artifact_digests(tmp_path):
