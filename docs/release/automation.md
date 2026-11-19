@@ -349,11 +349,11 @@ by it:
 
 | Measure | Main baseline | Current local candidate | Change |
 |---|---:|---:|---:|
-| Main controller + five control adapters (six paths) | 4,562 | 4,421 | −3.1% |
-| Workflow LOC | 2,437 | 2,399 | −1.6% |
+| Main controller + five control adapters (six paths) | 4,562 | 4,420 | −3.1% |
+| Workflow LOC | 2,437 | 2,398 | −1.6% |
 | Referenced helper LOC | 5,439 | 4,988 | −8.3% |
-| Combined workflow + referenced scripts LOC | 7,876 | 7,387 | −6.2% |
-| Extended release/deploy/migration/backup inventory LOC | 12,486 | 11,812 | −5.4% |
+| Combined workflow + referenced scripts LOC | 7,876 | 7,386 | −6.2% |
+| Extended release/deploy/migration/backup inventory LOC | 12,486 | 11,837 | −5.2% |
 | Referenced helper files | 21 | 18 | −3 |
 | Required test matrix runs | 4 | 2 | −50% |
 | Ordinary workflow named jobs | 3 | 3 | unchanged |
@@ -380,7 +380,7 @@ removed; production dispatch now builds the required images in the same run.
 The matrix consolidation cuts redundant runners and PostgreSQL services in
 half, and `native_change_surface.py` was replaced with declarative filters.
 The six-path inventory is down 3.1%, the combined upper bound is down 6.2%,
-and the extended inventory is down 5.4%;
+and the extended inventory is down 5.2%;
 neither approaches the required 50% reduction. Release
 duration, selective GHCR image counts and deploy-target counts still need exact
 hosted/staging evidence. This status must remain incomplete until the code
