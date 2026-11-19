@@ -358,7 +358,7 @@ by it:
 | Workflow LOC | 2,437 | 2,558 | +5.0% |
 | Referenced helper LOC | 5,439 | 5,352 | −1.6% |
 | Combined workflow + referenced scripts LOC | 7,876 | 7,910 | +0.4% |
-| Extended GPoint release subsystem LOC | 10,206 | 10,169 | −0.4% |
+| Extended release/deploy/migration/backup inventory LOC | 12,486 | 12,449 | −0.3% |
 | Referenced helper files | 21 | 20 | −1 |
 | Required test matrix runs | 4 | 2 | −50% |
 | Ordinary workflow named jobs | 3 | 3 | unchanged |
@@ -368,9 +368,13 @@ The six-path controller measure is the exact executable set used by the earlier
 ME-62 count: the Native workflow, `native_change_surface.py`,
 `native_release_intent.py`, `resolve_native_build_scope.py`,
 `verify_native_rollback_evidence.py` and `write-kamal-production-manifest.py`.
-The extended subsystem measure adds the GPoint Layer7 staging/operations
-workflows, their action, and executable release/migration/deploy helpers; tests
-and documentation are excluded. The referenced-helper count includes
+The extended inventory includes workflow and action files under
+`.github/workflows/` and `.github/actions/` whose names contain `release`,
+`deploy` or `layer7`, plus tracked `.py`, `.mjs`, `.js` and `.sh` files under
+`scripts/` whose names contain `release`, `deploy`, `rollback`, `migration`,
+`backup`, `kamal`, `native` or `layer7`. Test files and scripts are excluded.
+This filename-based inventory is an upper bound, not a precise production-Apply
+LOC count. The referenced-helper count includes
 workflow-invoked CI validation scripts, so that combined figure is an upper
 bound for production Apply code. The matrix consolidation cuts redundant
 runners and PostgreSQL services in half, and `native_change_surface.py` was
