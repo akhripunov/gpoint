@@ -54,6 +54,13 @@ KNOWN_RETIRED_NON_RUNTIME_FILES = frozenset({
     # Retired local V3 readiness helper; Native release completion is proven by
     # the exact GitHub Deployment and Runtime Verify, not a standalone script.
     "scripts/release-readiness.mjs",
+    # Retired tests for the V4 static-release prototype, removed with its
+    # implementation; they are not candidate component runtime inputs.
+    "tests/test_release_component_manifest_v4.py",
+    "tests/test_release_static_exchange_v4.py",
+    "tests/test_release_static_executor_v4.py",
+    "tests/test_release_ui_artifact_v4.py",
+    "tests/test_release_ui_switch_v4.py",
     ".github/workflows/gpoint-deploy.yml",
     ".github/workflows/gpoint-first-kamal-cutover.yml",
     ".github/workflows/gpoint-linear-reconcile.yml",
