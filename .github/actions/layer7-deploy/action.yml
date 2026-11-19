@@ -16,8 +16,6 @@ inputs:
     required: true
   staging_image_sha:
     required: true
-  scoped_image_version:
-    required: false
   prepared_app_digest:
     required: true
   prepared_run_id:
@@ -54,7 +52,7 @@ runs:
         GEM_HOME="$gem_root" GEM_PATH="$gem_root" "$gem_root/bin/kamal" help >/dev/null
     - name: Read Layer7 API and Eros versions with stock Kamal
       id: kamal_inventory
-      if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.mode == 'full' || inputs.mode == 'core-config-prepare'))
+      if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'full' || inputs.mode == 'core-config-prepare')
       shell: bash
       run: |
         set -euo pipefail
@@ -118,41 +116,17 @@ runs:
           "$STAGING_IMAGE_SHA" <<< "$comparison"
     - name: Detect the narrow Core and active Eros config scope
       id: protected_scope
-      if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.mode == 'full' || inputs.mode == 'core-config-prepare'))
+      if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'full' || inputs.mode == 'core-config-prepare')
       env:
         GH_TOKEN: ${{ github.token }}
-        REQUESTED_SHA: ${{ inputs.candidate_sha || github.sha }}
-        IMAGE_BASE_SHA: ${{ inputs.staging_image_sha || github.sha }}
-        SCOPED_IMAGE_VERSION: ${{ inputs.scoped_image_version }}
+        REQUESTED_SHA: ${{ inputs.candidate_sha }}
+        IMAGE_BASE_SHA: ${{ inputs.staging_image_sha }}
         MODE: ${{ inputs.mode }}
         KAMAL_API_VERSION: ${{ steps.kamal_inventory.outputs.gpoint_core_api_version }}
         KAMAL_ENGINE_VERSION: ${{ steps.kamal_inventory.outputs.gpoint_eros_pilot_engine_version }}
       shell: bash
       run: |
         set -euo pipefail
-        if [[ "$GITHUB_EVENT_NAME" == push ]]; then
-          test "$GITHUB_REF" = refs/heads/main
-          test "$REQUESTED_SHA" = "$GITHUB_SHA"
-          test "$IMAGE_BASE_SHA" = "$GITHUB_SHA"
-          [[ "$SCOPED_IMAGE_VERSION" == "$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" ]]
-          current_main="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)"
-          test "$current_main" = "$GITHUB_SHA"
-          environment="repos/$GITHUB_REPOSITORY/environments/layer7-api-auto"
-          gh api "$environment" | python3 -c '
-        import json, sys
-        env = json.load(sys.stdin)
-        policy = env["deployment_branch_policy"]
-        rules = [rule["type"] for rule in env["protection_rules"]]
-        if policy != {"protected_branches": False, "custom_branch_policies": True} or rules != ["branch_policy"]:
-            raise SystemExit("Layer7 auto environment requires branch policy as its only protection rule")
-        '
-          gh api "$environment/deployment-branch-policies" | python3 -c '
-        import json, sys
-        result = json.load(sys.stdin)
-        if result["total_count"] != 1 or [(p["name"], p["type"]) for p in result["branch_policies"]] != [("main", "branch")]:
-            raise SystemExit("Layer7 auto environment must allow only the main branch")
-        '
-        fi
         baseline="$RUNNER_TEMP/layer7-verified-baseline.json"
         scripts/layer7-transport.sh ssh "root@$GPOINT_LAYER7_STAGING_HOST" python3 - collect \
           < scripts/layer7_release_scope.py > "$baseline"
@@ -179,20 +153,11 @@ runs:
         raise SystemExit(0 if required <= changed else 1)
         PY
         then
-          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
-            test "$(python3 scripts/layer7_release_scope.py plan "$GITHUB_SHA" "$baseline" --previous "$api_source")" = '["CORE"]'
-            test "$KAMAL_API_VERSION" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["roles"]["gpoint-core-api"]["version"])' "$baseline")"
-            test "$KAMAL_ENGINE_VERSION" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["roles"]["gpoint-eros-pilot-engine"]["version"])' "$baseline")"
-            bot_enabled="$(python3 -c 'import json,sys; print(str("gpoint-core-bot" in json.load(open(sys.argv[1]))["roles"]).lower())' "$baseline")"
-            printf 'narrow=false\nscoped=true\nimage_version=%s\nbot_enabled=%s\n' \
-              "$SCOPED_IMAGE_VERSION" "$bot_enabled" >> "$GITHUB_OUTPUT"
-          else
-            if [[ "$MODE" == core-config-prepare ]]; then
-              echo 'Core/config readiness candidate must change both the prompt and active TOML' >&2
-              exit 1
-            fi
-            printf 'narrow=false\nscoped=false\n' >> "$GITHUB_OUTPUT"
+          if [[ "$MODE" == core-config-prepare ]]; then
+            echo 'Core/config readiness candidate must change both the prompt and active TOML' >&2
+            exit 1
           fi
+          printf 'narrow=false\nscoped=false\n' >> "$GITHUB_OUTPUT"
           exit 0
         fi
         plan="$RUNNER_TEMP/layer7-core-config-plan.json"
@@ -222,8 +187,7 @@ runs:
         engine_digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["roles"]["gpoint-eros-pilot-engine"]["digest"])' "$baseline")"
         [[ "$engine_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
         bot_enabled="$(python3 -c 'import json,sys; print(str("gpoint-core-bot" in json.load(open(sys.argv[1]))["roles"]).lower())' "$baseline")"
-        printf 'narrow=true\nscoped=true\nimage_version=%s\nengine_version=%s\nengine_source_sha=%s\nengine_digest=%s\nprevious_config_sha=%s\nbot_enabled=%s\n' \
-          "$SCOPED_IMAGE_VERSION" \
+        printf 'narrow=true\nscoped=true\nengine_version=%s\nengine_source_sha=%s\nengine_digest=%s\nprevious_config_sha=%s\nbot_enabled=%s\n' \
           "$engine_version" "$engine_source_sha" "$engine_digest" "$actual" "$bot_enabled" >> "$GITHUB_OUTPUT"
         echo "plan_file=$plan" >> "$GITHUB_OUTPUT"
         scripts/layer7-transport.sh ssh "root@$GPOINT_LAYER7_STAGING_HOST" bash -s <<'BACKUP_PREFLIGHT'
@@ -417,7 +381,7 @@ runs:
         MODE: ${{ inputs.mode }}
         PREVIOUS_REHEARSAL: ${{ inputs.eros_rehearsal }}
         EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
-        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.protected_scope.outputs.image_version }}
+        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version }}
         GH_TOKEN: ${{ inputs.github_token }}
       shell: bash
       run: |
@@ -592,7 +556,7 @@ runs:
       id: staging_preflight
       env:
         CORE_DIGEST: ${{ inputs.prepared_app_digest }}
-        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.protected_scope.outputs.image_version }}
+        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version }}
       shell: bash
       run: |
         set -euo pipefail
@@ -635,7 +599,7 @@ runs:
         CORE_DIGEST: ${{ inputs.prepared_app_digest }}
         MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
         EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
-        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.protected_scope.outputs.image_version }}
+        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version }}
         SCOPED: ${{ steps.protected_scope.outputs.scoped == 'true' }}
         NARROW_SCOPE: ${{ steps.protected_scope.outputs.narrow }}
         GHCR_TOKEN: ${{ inputs.github_token }}
@@ -684,7 +648,7 @@ runs:
       env:
         CORE_DIGEST: ${{ inputs.prepared_app_digest }}
         EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
-        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.protected_scope.outputs.image_version }}
+        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version }}
       shell: bash
       run: |
         set -euo pipefail
@@ -707,7 +671,7 @@ runs:
       id: deployment
       env:
         CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.protected_scope.outputs.image_version }}
+        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version }}
         CORE_DIGEST: ${{ inputs.prepared_app_digest }}
         MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
         EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
@@ -925,7 +889,7 @@ runs:
       if: inputs.mode == 'full'
       id: runtime_verify
       env:
-        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version || steps.protected_scope.outputs.image_version }}
+        IMAGE_VERSION: ${{ steps.prepared.outputs.image_version }}
         CORE_DIGEST: ${{ inputs.prepared_app_digest }}
         MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
         EROS_DIGEST: ${{ inputs.prepared_eros_digest }}

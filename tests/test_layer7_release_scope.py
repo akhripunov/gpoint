@@ -261,7 +261,7 @@ def test_verification_allows_only_an_eros_container_restart_with_the_same_image(
                        eros_config_update=True)
 
 
-def test_layer7_core_api_apply_uses_the_existing_protected_environment_and_stock_kamal():
+def test_layer7_core_api_apply_is_separate_from_the_production_controller():
     import yaml
 
     native = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())["jobs"]
@@ -273,18 +273,16 @@ def test_layer7_core_api_apply_uses_the_existing_protected_environment_and_stock
     assert "workflow_call" not in workflow[True]
     assert "STAGING_ENV_BUNDLE" not in layer7["env"]
     assert layer7["concurrency"]["group"] == "gpoint-layer7-staging"
-    assert "github.event_name == 'push'" in deploy["if"]
-    assert "needs.tests.outputs.mode == 'LAYER7_API'" in deploy["if"]
-    assert "github.actor == github.repository_owner" in deploy["if"]
-    assert "github.triggering_actor == github.repository_owner" in deploy["if"]
-    assert deploy["environment"]["name"] == "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}"
-    assert deploy["concurrency"]["group"] == "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'gpoint-layer7-staging' || 'gpoint-production-release' }}"
+    assert "needs.tests.outputs.mode == 'LAYER7_API'" not in deploy["if"]
+    assert deploy["environment"]["name"] == "production"
+    assert deploy["concurrency"]["group"] == "gpoint-production-release"
+    assert not any(step.get("uses") == "./.github/actions/layer7-deploy" for step in deploy["steps"])
     steps = yaml.safe_load((ROOT / ".github/actions/layer7-deploy/action.yml").read_text())["runs"]["steps"]
     assert not any(step.get("id") == "scoped" for step in steps)
     scope = next(step for step in steps if step.get("id") == "protected_scope")
-    assert "github.event_name == 'push'" in scope["if"]
-    assert "repos/$GITHUB_REPOSITORY/environments/layer7-api-auto" in scope["run"]
-    assert '"$environment/deployment-branch-policies"' in scope["run"]
+    assert "github.event_name == 'push'" not in scope["if"]
+    assert "repos/$GITHUB_REPOSITORY/environments/layer7-api-auto" not in scope["run"]
+    assert "layer7-api-auto" not in scope["run"]
     assert "layer7_release_scope.py paths" in scope["run"]
     assert "PREVIOUS_SHA: ${{ github.event.before }}" not in str(scope.get("env", {}))
     for title in ("Apply isolated Prisma and SQLx migrations with recovery gates",

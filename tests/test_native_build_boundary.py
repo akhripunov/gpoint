@@ -27,10 +27,12 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(set(jobs), {"tests", "build", "deploy"})
         rollback = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())["jobs"]["deploy"]
         self.assertIn("inputs.mode == 'rollback'", rollback["if"])
-        self.assertEqual(rollback["environment"]["name"],
-                         "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}")
+        self.assertEqual(rollback["environment"]["name"], "production")
         self.assertIn("steps.verify.outputs.environment_url", rollback["environment"]["url"])
-        self.assertIn("gpoint-production-release", rollback["concurrency"]["group"])
+        self.assertEqual(rollback["concurrency"]["group"], "gpoint-production-release")
+        self.assertNotIn("LAYER7_API", rollback["if"])
+        self.assertFalse(any(step.get("uses") == "./.github/actions/layer7-deploy" for step in rollback["steps"]))
+        self.assertFalse(any("LAYER7_API" in step.get("if", "") for step in rollback["steps"]))
         rehearsal = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())["jobs"]["migration_rehearsal"]
         self.assertNotIn("needs", rehearsal)
         self.assertIn("github.ref == 'refs/heads/main'", rehearsal["if"])
@@ -91,10 +93,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         version = next(step for step in build["steps"] if step.get("id") == "image_version")
         self.assertNotIn("if", version)
         self.assertEqual(build["outputs"]["image_version"], "${{ steps.image_version.outputs.image_version }}")
-        action = next(step for step in self.workflow["jobs"]["deploy"]["steps"]
-                      if step.get("uses") == "./.github/actions/layer7-deploy")
-        self.assertEqual(action["with"]["scoped_image_version"],
-                         "${{ needs.build.outputs.image_version }}")
+        self.assertFalse(any(step.get("uses") == "./.github/actions/layer7-deploy"
+                             for step in self.workflow["jobs"]["deploy"]["steps"]))
 
     def test_image_version_selection_step_uses_current_candidate_run_identity(self):
         version_step = next(step for step in self.workflow["jobs"]["build"]["steps"]

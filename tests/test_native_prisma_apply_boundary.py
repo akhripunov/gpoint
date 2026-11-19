@@ -62,7 +62,7 @@ def test_prisma_apply_never_changes_agata_migrations_or_rolls_back_database():
 def test_prisma_migration_plan_and_apply_remain_exact_sha_and_environment_scoped():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     deploy = workflow["jobs"]["deploy"]
-    assert deploy["environment"]["name"] == "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}"
+    assert deploy["environment"]["name"] == "production"
     assert "gpoint-production-release" in deploy["concurrency"]["group"]
     assert "REQUESTED_SHA" in "\n".join(step.get("run", "") for step in deploy["steps"])
     plan = next(step for step in deploy["steps"] if step.get("id") == "migration_plan")
@@ -81,7 +81,7 @@ def test_layer7_job_has_no_old_production_host_or_ssh_environment():
     assert "GPOINT_KNOWN_HOSTS_FILE" not in deploy["env"]
     credentials = next(step for step in deploy["steps"]
                        if step.get("name") == "Install verified Kamal SSH credentials")
-    assert credentials["if"] == "needs.tests.outputs.mode != 'LAYER7_API'"
+    assert "if" not in credentials
     assert credentials["env"]["GPOINT_PRODUCTION_HOST"] == "${{ secrets.GPOINT_KAMAL_HOST }}"
 
 

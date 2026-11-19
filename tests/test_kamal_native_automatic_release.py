@@ -28,8 +28,8 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert "refs/heads/main" in deploy.get("if", "")
     assert "workflow_dispatch" in deploy.get("if", "")
     assert deploy["environment"] == {
-        "name": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}",
-        "url": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'http://95.133.236.59' || (inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url) }}",
+        "name": "production",
+        "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
     build = workflow["jobs"]["build"]
     assert "release_intent" not in workflow["jobs"]
@@ -44,7 +44,7 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert deploy["needs"] == ["tests", "build"]
 
 
-def test_three_native_release_scenarios_auto_route_test_build_kamal_and_runtime_verify():
+def test_native_production_job_does_not_embed_layer7_staging_apply():
     sys_path = str(ROOT / "scripts")
     import sys
     sys.path.insert(0, sys_path)
@@ -70,7 +70,7 @@ def test_three_native_release_scenarios_auto_route_test_build_kamal_and_runtime_
         mode=migration,
         changed_paths={"packages/db/prisma/migrations/20261116000000_fixture/migration.sql"},
     )
-    assert push_deploy_authorized(mode=layer7, changed_paths=layer7_paths)
+    assert not push_deploy_authorized(mode=layer7, changed_paths=layer7_paths)
     assert jobs["tests"]["outputs"]["deploy"] == "${{ steps.intent.outputs.deploy }}"
     assert "needs.tests.result == 'success'" in jobs["build"]["if"]
     build_scope = next(step for step in jobs["build"]["steps"] if step.get("id") == "build_scope")
@@ -80,22 +80,24 @@ def test_three_native_release_scenarios_auto_route_test_build_kamal_and_runtime_
 
     deploy = jobs["deploy"]
     condition = deploy["if"]
-    assert "needs.tests.outputs.mode == 'LAYER7_API'" in condition
+    assert "needs.tests.outputs.mode == 'LAYER7_API'" not in condition
     assert "needs.tests.outputs.deploy == 'true'" in condition
     assert "github.actor == github.repository_owner" in condition
-    assert "github.triggering_actor == github.repository_owner" in condition
-    assert deploy["environment"]["name"] == "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}"
-    assert deploy["concurrency"]["group"] == "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'gpoint-layer7-staging' || 'gpoint-production-release' }}"
-    action = next(step for step in deploy["steps"]
-                  if step.get("uses") == "./.github/actions/layer7-deploy")
-    assert action["if"] == "needs.tests.outputs.mode == 'LAYER7_API'"
-    assert action["with"]["prepared_app_digest"] == "${{ needs.build.outputs.app_digest }}"
-    assert action["with"]["scoped_image_version"] == "${{ needs.build.outputs.image_version }}"
+    approval = next(step for step in deploy["steps"]
+                    if step.get("name") == "Recheck exact SHA, current main and owner approval")
+    assert approval["env"]["OWNER_TRIGGERING_ACTOR"] == "${{ github.triggering_actor }}"
+    assert 'test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY"' in approval["run"]
+    assert deploy["environment"]["name"] == "production"
+    assert deploy["concurrency"]["group"] == "gpoint-production-release"
+    assert not any(step.get("uses") == "./.github/actions/layer7-deploy" for step in deploy["steps"])
+    assert not any("LAYER7_API" in step.get("if", "") for step in deploy["steps"])
 
     layer7_action = yaml.safe_load((ROOT / ".github/actions/layer7-deploy/action.yml").read_text())
     steps = layer7_action["runs"]["steps"]
     scope = next(step for step in steps if step.get("id") == "protected_scope")
-    assert "github.event_name == 'push'" in scope["if"]
+    assert "github.event_name == 'workflow_dispatch'" in scope["if"]
+    assert "github.event_name == 'push'" not in scope["if"]
+    assert "layer7-api-auto" not in scope["run"]
     assert "layer7_release_scope.py paths" in scope["run"]
     assert "roles.*.source" in scope["run"] or '"roles"]["gpoint-core-api"]["source"]' in scope["run"]
     assert "GITHUB_EVENT_BEFORE" not in scope.get("env", {})
@@ -418,8 +420,8 @@ def test_manual_rollback_uses_native_environment_deployment_and_target_metadata(
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     rollback = _ROLLBACK["jobs"]["deploy"]
     assert rollback["environment"] == {
-        "name": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}",
-        "url": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'http://95.133.236.59' || (inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url) }}",
+        "name": "production",
+        "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
     body = "\n".join(step.get("run", "") for step in rollback["steps"])
     assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in body
@@ -636,7 +638,7 @@ def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
     assert "inputs.mode == 'rollback'" in rollback["if"]
     assert "inputs.mode == 'rollback'" in rollback["if"]
     assert rollback["environment"] == {
-        "name": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}", "url": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'http://95.133.236.59' || (inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url) }}",
+        "name": "production", "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
     assert "gpoint-production-release" in rollback["concurrency"]["group"]
     assert rollback["concurrency"]["cancel-in-progress"] is False

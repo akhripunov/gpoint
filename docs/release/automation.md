@@ -44,45 +44,28 @@ still compatible. Record the verified Layer7 runtime and conversation checks.
 ### Layer7 Core API and model config release
 
 Use the owner-authorized `GPOINT-LAYER7-API` commit marker for a Layer7 Core
-release. The standard Native route runs Tests, then Build selects only CORE,
-without consulting public-production history or `BOOTSTRAP_FULL`. After a
-successful exact-SHA Build, the Native Deploy job automatically targets the
-existing `layer7-api-auto` GitHub Environment, serialized by the
-`gpoint-layer7-staging` concurrency group. The job requires the repository owner
-as actor and triggering actor. The environment must remain limited to `main`
-with the existing branch policy and no release secrets; the Deploy step checks
-that policy before accessing Layer7.
+candidate. The Native route runs Tests, then Build selects only CORE, without
+consulting public-production history or `BOOTSTRAP_FULL`. This route is
+build-only: Native Deploy is reserved for production `DEPLOY` mode and never
+applies Layer7 staging changes.
 
-The shared Layer7 deploy action reads current Core and Eros versions with
-pinned Kamal 2, collects Docker image/digest and DB identity only where Kamal
-cannot provide the required provenance, and derives the complete Git path set
-from installed Core source SHA through exact candidate SHA. It never uses
-`github.event.before` or the latest squash commit as a substitute. The plan
-must resolve to Core-only; extra Worker, Bot, Mini App, AGATA, Eros Engine or
-migration changes block. It verifies current main, exact image version/digest,
-active TOML hash and the external-config backup/rollback prerequisites before
-applying anything.
+Apply Layer7 Core or model config only through the separately protected
+`gpoint-layer7-staging.yml` workflow. It is owner-dispatched on exact current
+`main`, requires the `layer7-staging` Environment reviewer, verifies staging
+host and database isolation, and uses the exact successful Native Build run
+and immutable image digest. Its `core-config-prepare` mode is read-only;
+broader staging modes have their own explicit approvals and runtime checks.
+Unknown inventory, source ancestry, repository digest, TOML hash, database
+ledger or rollback state fails closed. Do not relax Environment branch policy
+or dispatch a PR branch to bypass the main-only gate.
 
-When both the response prompt and active Layer7 TOML changed, the same
-automatic Layer7 scope backs up the TOML, atomically installs the candidate
-config, redeploys only the existing Eros engine version when needed to reload
-it, then uses Kamal to switch only Core API. Runtime Verify compares untouched
-roles and DB ledgers, checks health and the API-to-Eros route, and restores the
-verified TOML and prior engine/API versions if a switch fails. Prompt-only
-Core releases do not restart Eros. No Layer7 Build or Deploy passes AGATA,
-Mini App, Worker, Bot or Eros Engine image digests.
-
-The protected `gpoint-layer7-staging.yml` workflow remains available as an
-additional read-only `core-config-prepare` route and for broader staging,
-rehearsal and recovery. It is not a prerequisite for the automatic narrow
-release. Unknown inventory, source ancestry, repository digest, TOML hash,
-database ledger or rollback state fails closed.
-
-Changes limited to this Layer7 release tooling still run the Core-only Build
-for exact-SHA readiness, but do not authorize Apply. The automatic Layer7
-Deploy additionally requires a runtime prompt, adapter, deployment-config or
-active model-config path in the candidate diff. The GitHub Environment gate and
-the live scope checks remain required for that runtime release.
+The Layer7 deploy action reads current Core and Eros versions with pinned
+Kamal 2, derives the complete Git path set from installed Core source SHA
+through exact candidate SHA, and blocks extra Worker, Bot, Mini App, AGATA,
+Eros Engine or migration changes. Runtime Verify compares untouched roles and
+DB ledgers, checks health and the API-to-Eros route, and restores the verified
+TOML and prior engine/API versions if a switch fails. No Layer7 Build or Deploy
+passes AGATA, Mini App, Worker, Bot or Eros Engine image digests.
 
 ### Резервное копирование (не является релизным job)
 

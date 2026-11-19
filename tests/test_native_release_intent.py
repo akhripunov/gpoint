@@ -217,6 +217,9 @@ def test_layer7_api_route_change_cannot_fall_through_to_production_deploy():
         event_name="push", ref="refs/heads/main", changed_paths=paths,
         commit_message="ME-36 Layer7 Core API embeddings fix\n\nGPOINT-LAYER7-API",
     ) == "LAYER7_API"
+    assert not MODULE.push_deploy_authorized(
+        mode="LAYER7_API", changed_paths={"apps/api/src/eros-response-prompt.js"},
+    )
     selector_only_paths = paths - {"config/deploy.layer7-staging.eros-api.yml"}
     assert MODULE.classify_push(
         event_name="push", ref="refs/heads/main", changed_paths=selector_only_paths,
@@ -246,7 +249,7 @@ def test_layer7_release_tooling_builds_core_but_does_not_auto_apply():
     )
     assert mode == "LAYER7_API"
     assert not MODULE.push_deploy_authorized(mode=mode, changed_paths=paths)
-    assert MODULE.push_deploy_authorized(
+    assert not MODULE.push_deploy_authorized(
         mode="LAYER7_API",
         changed_paths={"apps/api/src/eros-response-prompt.js",
                        "services/eros-engine/eros-layer7-staging-model-config.toml"},
@@ -329,6 +332,7 @@ def test_layer7_eros_adapter_source_uses_only_the_explicit_api_route():
         event_name="push", ref="refs/heads/main", changed_paths=paths,
         commit_message="ME-36 Layer7 adapter follow-up\n\nGPOINT-LAYER7-API",
     ) == "LAYER7_API"
+    assert not MODULE.push_deploy_authorized(mode="LAYER7_API", changed_paths=paths)
     assert MODULE.classify_push(
         event_name="push", ref="refs/heads/main", changed_paths=paths,
     ) == "BLOCK"

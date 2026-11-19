@@ -399,13 +399,6 @@ LAYER7_RELEASE_TOOLING_PREPARE_PATHS = frozenset({
 })
 LAYER7_API_PATHS = (LAYER7_API_PROMPT_PATHS | LAYER7_API_ADAPTER_PATHS
                     | LAYER7_API_CONFIG_PATHS | EROS_MODEL_CONFIG_PATHS)
-LAYER7_API_RUNTIME_PATHS = frozenset({
-    "apps/api/src/eros-response-prompt.js",
-    "apps/api/src/eros-adapter.ts",
-    LAYER7_API_CONFIG_PATH,
-}) | EROS_MODEL_CONFIG_PATHS
-
-
 INFRASTRUCTURE_PREFIXES = (".github/", ".kamal/", "infra/production/", "scripts/", "systemd/")
 PRODUCTION_KAMAL_CONFIGS = frozenset({
     "config/deploy.yml", "config/deploy.agata.yml", "config/deploy.eros-api.yml",
@@ -426,9 +419,7 @@ def push_deploy_authorized(*, mode: str, changed_paths: set[str] | frozenset[str
     # workflow_dispatch through the existing protected production Environment.
     if cumulative_infrastructure_change or is_infrastructure_change(changed_paths):
         return False
-    if mode == "DEPLOY":
-        return True
-    return mode == "LAYER7_API" and bool(LAYER7_API_RUNTIME_PATHS & changed_paths)
+    return mode == "DEPLOY"
 
 
 def _path_kind(path: str) -> str:
