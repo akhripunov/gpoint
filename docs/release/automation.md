@@ -268,71 +268,110 @@ edit/check/commit, существенного ожидания и каждого
 `LOCAL_PENDING_RELEASE`; поля push/Actions/Runtime Verify отметить `NOT_RUN`.
 
 
-## ME-52: Native Kamal release (Native First V3)
+## Current GPoint Native Release (ME-62 candidate)
 
-Production переводится на Kamal отдельным workflow
-`.github/workflows/gpoint-first-kamal-cutover.yml`; он требует свежий inventory,
-encrypted backup/isolated restore, migration parity, паузу старых consumers и
-полную runtime Verify. После cutover обычный workflow
-`.github/workflows/gpoint-native-release.yml` выполняет
-`Tests → immutable Build/GHCR → protected Deploy job (Prisma при необходимости
-→ stock Kamal 2 → Runtime Verify)`. Exact SHA, immutable digest/provenance,
-platform/revision, production Environment, runtime identity, backup и migration
-gates сохраняются.
+`.github/workflows/gpoint-native-release.yml` remains the single production
+controller. Its ordinary path is `Tests → Build/GHCR → protected Deploy →
+Runtime Verify`. A permitted push to `main` starts the path automatically. PRs
+run the same required tests and do not receive production secrets or GHCR write.
 
-Основной релизный граф содержит ровно три jobs: `tests` matrix параллельно
-запускает workspace/Prisma/Playwright и Python/PostgreSQL suites, затем `build`
-публикует только нужные неизменяемые образы, затем защищённый `deploy`
-проверяет baseline, применяет только разрешённые миграции при необходимости,
-выполняет Kamal и Runtime Verify. Rollback, backup maintenance и isolated
-migration rehearsal остаются отдельными защищёнными эксплуатационными jobs;
-они не входят в обычный граф Tests → Build → Deploy. Event/path gate выполняется
-в начале Tests. PR запускает тесты и безопасную проверку pinned Kamal image,
-не получает production Environment/secrets или GHCR write.
+The required test matrix is exactly `workspace` and `python`. Workspace also
+contains actionlint, pinned Kamal configuration/proxy checks, and the conditional
+stock Eros SQLx/conversation test. Python owns the release-boundary tests and
+conditional isolated database suites. Every matrix run evaluates the same
+fail-closed release intent and push baseline so combined job outputs do not
+depend on matrix completion order. Documentation-only candidates still pass the
+required tests but select no images and no production Deploy.
 
-Разрешённый push в main проходит Tests и Build, после чего тот же workflow
-выполняет protected Deploy и Runtime Verify. Prisma migration SQL допускается
-только с точным именем и SHA-256 checksum в
-`packages/db/prisma/production-approved-migrations.json`; неизвестные,
-несовпадающие и AGATA migrations блокируются. Изменение Prisma schema проходит
-в обязательные Tests, которые сверяют его с полной migration history на
-изолированной PostgreSQL; удаление/перемещение migration и неизвестные schema
-paths блокируются. Production Apply по-прежнему требует точный migration
-allowlist. Deploy проверяет полный applied prefix/checksums, свежий backup/isolated-restore
-manifest, применяет точный pending allowlist через `prisma migrate deploy` один
-раз, проверяет итоговые heads/checksums и только потом вызывает Kamal. Ошибка
-или неопределённый Apply останавливает Kamal; автоматический downgrade или
-слепой повтор не выполняется. Production allowlist сейчас пуст.
+There are five independently scoped logical components, eight Kamal role
+deployments, and four unique images:
 
-Для plan-first кандидата OWNER может пометить сообщение main push отдельной
-строкой `GPOINT-ARTIFACT-PREPARE`. Такой run выполняет Tests и selective
-Build/GHCR, записывает точные `COMPONENT_IMAGE=repository@sha256:...` в summary,
-но не создаёт GitHub Deployment и не запускает Deploy. Обычный main push без
-этой строки сохраняет автоматический Tests → Build → Deploy flow.
-
-Чтобы применить заранее проверенные образы, OWNER запускает workflow dispatch на
-том же exact main SHA с `approve_production=true`,
-`use_prepared_images=true`, `prepared_run_id` и digest inputs из Build summary
-для каждого компонента текущего scope. Build job проверяет, что указан успешный
-Native workflow run с событием main push и exact SHA, затем сверяет набор
-component digests с логом его успешного Build job. После этого он скачивает
-каждый образ по digest и заново проверяет source SHA, SBOM/provenance и
-`linux/amd64`; Build actions не пересобирают и не публикуют эти образы. Любой
-неверный run, отсутствующий, лишний или несовпадающий digest блокирует Deploy.
-Artifact preparation не является production authorization и не заменяет backup,
-migration, compatibility, worker, Runtime Verify или recovery gates.
-
-### Release tooling audit (Native First V3)
-
-| Mechanism | Decision | Reason |
+| Logical component | Kamal roles | Image |
 |---|---|---|
-| `native_release_intent.py` | Keep | One fail-closed event/OWNER/path gate and component-scope calculation; GitHub `if` alone cannot enforce the cumulative path and migration rules. Its outputs feed the built-in job graph. |
-| `resolve_native_build_scope.py` | Keep | Reads the latest successful Native GitHub Deployment and its component-source manifest, then compares each component baseline with the exact candidate; needed for selective Build. Unknown baseline fails closed. |
-| `resolve_native_environment_deployment.py` | Keep | Resolves the GitHub-created Environment Deployment for exact-SHA readback; does not create a separate Deployment or status controller. |
-| `prisma_migration_release_plan.py` | Keep | Checks the exact approved migration names/checksums and applied prefix before the one protected Apply; Prisma does not enforce this OWNER allowlist. |
-| `verify-kamal-production-baseline.py` | Keep | Supplements Kamal with six-role source/image digest/ID facts and runtime invariants Kamal does not expose. |
-| `write-kamal-production-manifest.py` | Keep | Writes the verified per-component source facts used by the native GitHub Deployment URL and the next selective Build. |
-| `check-kamal-configs.sh` | Keep | Pulls the pinned Kamal image, verifies linux/amd64 and its digest, then loads all three configs with synthetic credentials and network disabled. It does not read production. |
+| Core | API, Worker, Bot | `gpoint-runtime` |
+| Mini App | Web | `gpoint-miniapp` |
+| AGATA | API, memory Worker | `gpoint-agata-runtime` |
+| Eros Engine | Pilot Engine | `gpoint-eros` |
+| Eros Relay | Relay | `gpoint-runtime` |
+
+Core and Eros Relay share the runtime image but retain separate installed source
+baselines and deploy targets. Build publishes that image at most once per run;
+a Relay-only change does not redeploy Core. The other images are built only when
+their component scope requires them. Buildx publishes the exact candidate SHA
+with immutable digests, SBOM and provenance; Deploy verifies read-back and uses
+those digests without rebuilding.
+
+`dorny/paths-filter` supplies declarative path classification for five
+components. The build-scope adapter compares each path set with its recorded
+installed component source SHA; an unrecognized path, unavailable/invalid
+baseline, or non-ancestor blocks. Deploy re-reads installed Kamal/Docker identity
+and component baselines before mutation. The workflow-level
+`gpoint-native-production-transaction` concurrency group serializes every
+non-PR release from baseline discovery through Verify; PR runs use a separate
+group. The Deploy job keeps its environment-specific lock as a second guard.
+
+Migration planning and isolated PostgreSQL checks run only for schema or
+infrastructure scope. Apply accepts only the exact approved pending migration
+set with checksum and compatibility proof, then requires the applicable backup
+and restore evidence. No pending migration means those gates are skipped. A
+failed Apply blocks Kamal; database downgrade is never automatic. Eros Engine
+changes require the exact candidate's stock Eros SQLx and synthetic conversation
+E2E. Eros Relay changes run its unit suite without implying an Engine release.
+Infrastructure changes require the protected manual route and its OWNER gate;
+an ordinary automatic Deploy is not admitted.
+
+Deploy applies only selected targets through stock Kamal 2, verifies health,
+image digest, source SHA, topology and short HTTP smoke, and marks the native
+GitHub Environment Deployment successful only after Runtime Verify. A skipped
+Deploy makes no runtime claim. Failed or partial Apply blocks blind retry; the
+operator must read the actual baseline and use the existing recovery/rollback
+gates. Rollback selects a previously verified compatible component version and
+never downgrades the database. Telegram Bot remains a single Kamal role, so
+selective updates preserve its one-poller invariant.
+
+Layer7 staging remains a separate owner-dispatched, protected workflow and is
+not a second production controller. Its real deployment tests require current
+read-only evidence that the host, credentials, containers, volumes and database
+are isolated from production; static configuration or a successful historical
+run is not current isolation evidence.
+
+### ME-62 release-code audit and reduction status
+
+| Function | Current code | Native mechanism | Decision |
+|---|---|---|---|
+| Component path filters | `dorny/paths-filter`; retired `native_change_surface.py` (131 LOC at baseline) | Git and the pinned `dorny/paths-filter` action | **REPLACE / DELETE** — declarative filters now supply the component paths. |
+| Event admission and exact-scope fail-closed rules | `scripts/native_release_intent.py` (947 LOC in this checkout) | GitHub event/dispatch context and workflow conditions | **KEEP, reduce** — policy checks still reject unauthorized events, unsafe paths and migration scope; current helper is larger than the minimal-adapter target. |
+| Installed component source baselines | `scripts/resolve_native_build_scope.py`, `scripts/resolve_native_environment_deployment.py` | GitHub Deployments API, stock Kamal app commands and Docker inspect | **KEEP, reduce** — native sources provide facts, these adapters bind component identity and exact-SHA evidence. |
+| Build and OCI provenance | Build steps plus `scripts/verify_native_image_readback.py`, `verify_native_image_attestation.py`, `verify_native_eros_image.py` | Docker Buildx, GHCR digest, SBOM and GitHub artifact provenance | **KEEP** — retain only digest/source/platform/provenance checks not supplied by the native outputs. |
+| Migration admission and parity | `scripts/prisma_migration_release_plan.py`, `scripts/verify-kamal-migration-parity.py` | Prisma, SQLx, isolated PostgreSQL and Alembic tools | **KEEP, reduce** — stock tools execute migrations; exact approval, checksum and compatibility boundaries remain custom. |
+| Live role topology and component manifest | `scripts/verify-kamal-production-baseline.py`, `scripts/write-kamal-production-manifest.py` | Kamal 2 app inventory and Docker inspect | **KEEP, reduce** — the adapters verify identities and per-component provenance absent from Kamal's required machine-readable output. |
+| Eros database backup, rehearsal and recovery | `scripts/eros-native-database.py` | PostgreSQL `pg_dump`/`pg_restore`, stock Eros SQLx migrations | **KEEP, reduce** — preserve isolated restore, ledger and recovery checks; remove duplicate orchestration only after equivalent integration proof. |
+| Standalone release readiness report | `scripts/release-readiness.mjs` (71 LOC) | Native GitHub Deployment plus Runtime Verify | **DELETE** — no active workflow/package caller; historical audit remains in the archive. |
+
+Measured against `3d680fa153fd6aebf786455d6f36d3b1a67cc78f` (current main at task
+start), using the Native workflow plus the unique `scripts/` files referenced
+by it:
+
+| Measure | Main baseline | Current local candidate | Change |
+|---|---:|---:|---:|
+| Workflow LOC | 2,437 | 2,558 | +5.0% |
+| Referenced helper LOC | 5,439 | 5,352 | −1.6% |
+| Combined workflow + referenced scripts LOC | 7,876 | 7,910 | +0.4% |
+| Referenced helper files | 21 | 20 | −1 |
+| Required test matrix runs | 4 | 2 | −50% |
+| Ordinary workflow named jobs | 3 | 3 | unchanged |
+| Ordinary release wall time | not measured | not measured | pending hosted exact-SHA run |
+
+The helper count includes workflow-invoked CI validation scripts, so the combined
+figure is an upper-bound inventory rather than only the code executed during
+production Apply. The matrix consolidation cuts redundant runners and
+PostgreSQL services in half, and `native_change_surface.py` was replaced with
+declarative filters. This does **not** yet meet the required 50% reduction in
+custom production release code; the aggregate inventory is currently slightly
+higher than the baseline. Release
+duration, selective GHCR image counts and deploy-target counts still need exact
+hosted/staging evidence. This status must remain incomplete until the code
+reduction and required acceptance evidence are achieved.
 ## Local test selection under FULL
 
 FULL is a risk level, not a mandate to run every local test. `classify-release-prepush.py` remains the canonical FAST/FULL procedure. Hosted CI uses the pinned `dorny/paths-filter` action in `gpoint-native-release.yml` for declarative five-component and shared-dependency selection. Run the directly affected local checks; GitHub CI remains authoritative for the exact PR SHA. The production planner tracks Core, AGATA, Mini App, Eros Engine and Eros Relay independently. Engine-only changes build the Eros image. Relay-only changes build the shared Core runtime image and deploy only Relay. The first Eros installation still requires both services. Runtime Verify records separate source SHAs and digests for Engine and Relay. Older successful deployments with a single Eros source SHA use that SHA for both because those deployments updated the pair together. An ambiguous or partial runtime still requires the existing authorized recovery path. The planner compares installed component sources with the exact candidate and fails closed on unknown paths. Do not recreate a second component path map for CI.

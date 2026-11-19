@@ -683,7 +683,7 @@ def test_pinned_setup_go_uses_official_digest_pinned_tool_cache_seed():
     seed = steps[seed_index]
     setup = steps[setup_index]
     assert seed_index < setup_index
-    assert seed["if"] == setup["if"] == "matrix.suite == 'release-tooling'"
+    assert seed["if"] == setup["if"] == "matrix.suite == 'workspace'"
     assert "api.github.com/repos/actions/go-versions/releases/assets/303957986" in seed["run"]
     assert "Accept: application/octet-stream" in seed["run"]
     assert "1b6c5c84f587ab036ca904638a39cf4bd272d1e8d439eb9c8bc60f91793e0765" in seed["run"]
@@ -907,7 +907,7 @@ def test_core_hook_binds_component_source_to_release_candidate_before_ssh(tmp_pa
 def test_component_identity_regression_is_in_mandatory_test_job_before_deploy():
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
     tests_job = workflow["jobs"]["tests"]
-    assert tests_job["strategy"]["matrix"]["suite"] == ["workspace", "python", "release-tooling", "eros"]
+    assert tests_job["strategy"]["matrix"]["suite"] == ["workspace", "python"]
     assert workflow["jobs"]["build"]["needs"] == ["tests"]
     assert "needs.tests.result == 'success'" in workflow["jobs"]["build"]["if"]
     assert "tests" in workflow["jobs"]["deploy"]["needs"]

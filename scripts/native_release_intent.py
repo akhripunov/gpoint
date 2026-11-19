@@ -48,6 +48,12 @@ PRISMA_MIGRATION = re.compile(
 # ME-36 OWNER-approved removal of the parallel Mac installer and stale shared
 # Worker test. This is an exact path exception; all other deletions still block.
 KNOWN_RETIRED_NON_RUNTIME_FILES = frozenset({
+    # OWNER-approved retirement in ME-62; this stale benchmark is not an
+    # executable release procedure or a runtime input.
+    "docs/release/RELEASE_PERFORMANCE.md",
+    # Retired local V3 readiness helper; Native release completion is proven by
+    # the exact GitHub Deployment and Runtime Verify, not a standalone script.
+    "scripts/release-readiness.mjs",
     ".github/workflows/gpoint-deploy.yml",
     ".github/workflows/gpoint-first-kamal-cutover.yml",
     ".github/workflows/gpoint-linear-reconcile.yml",

@@ -66,11 +66,9 @@ permissions:
   contents: read
 
 concurrency:
-  # One queue per operation, not per branch: a staging dispatch must not wait for
-  # a rollback, and neither waits for an unrelated production push. Mutating jobs
-  # still share the per-environment groups below, which is what actually
-  # guarantees a single Apply per environment.
-  group: gpoint-${{ github.event_name }}-release-${{ github.ref }}
+  # Serialize production baseline reads, Build and Apply as one transaction.
+  # PR validation has its own group and cannot occupy the release queue.
+  group: gpoint-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'native-production-transaction' }}
   cancel-in-progress: false
 
 jobs:
@@ -80,7 +78,8 @@ jobs:
       contents: read
       deployments: read
       pull-requests: read
-    # All suites compute the same intent. Empty E2E outputs from other suites are unset.
+    # Both required suites compute identical intent outputs. Empty Eros outputs
+    # from the Python run do not replace the non-empty workspace evidence.
     outputs:
       mode: ${{ steps.intent.outputs.mode }}
       deploy: ${{ steps.intent.outputs.deploy }}
@@ -90,7 +89,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [workspace, python, release-tooling, eros]
+        suite: [workspace, python]
     services:
       postgres:
         image: pgvector/pgvector:0.8.6-pg16
@@ -227,8 +226,28 @@ jobs:
           [[ "$USE_PREPARED_IMAGES" == true ]] && args+=(--use-prepared-images)
           [[ -n "$INFRASTRUCTURE_BASELINE_SHA" ]] && args+=(--infrastructure-baseline-sha "$INFRASTRUCTURE_BASELINE_SHA")
           python3 scripts/native_release_intent.py "${args[@]}" >> "$GITHUB_OUTPUT"
+      - name: Resolve exact production component scope for manual Deploy
+        id: dispatch_build_scope
+        if: github.event_name == 'workflow_dispatch' && matrix.suite == 'workspace' && steps.intent.outputs.mode == 'DEPLOY'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          plan="$RUNNER_TEMP/gpoint-dispatch-build-scope.json"
+          python3 scripts/resolve_native_build_scope.py \
+            --candidate-sha "$CANDIDATE_SHA" --repository "$REPOSITORY" > "$plan"
+          python3 - "$plan" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, sys
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              plan = json.load(stream)
+          if plan.get("status") not in {"VERIFIED", "BOOTSTRAP_FULL"}:
+              raise SystemExit("production component baseline is unknown for manual Deploy")
+          print("eros_engine=" + str("EROS" in plan["build_components"]).lower())
+          PY
       - name: Seed pinned Go 1.25.3 in Actions tool cache
-        if: matrix.suite == 'release-tooling'
+        if: matrix.suite == 'workspace'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -246,16 +265,16 @@ jobs:
           test "$("$RUNNER_TOOL_CACHE/go/1.25.3/x64/bin/go" version)" = 'go version go1.25.3 linux/amd64'
           touch "$RUNNER_TOOL_CACHE/go/1.25.3/x64.complete"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        if: matrix.suite == 'release-tooling'
+        if: matrix.suite == 'workspace'
         with:
           go-version: '1.25.3'
       - name: Validate GitHub Actions workflow
-        if: matrix.suite == 'release-tooling'
+        if: matrix.suite == 'workspace'
         run: >-
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           .github/workflows/gpoint-native-release.yml .github/workflows/gpoint-layer7-staging.yml
       - name: Validate pinned Kamal configs and shared proxy routing
-        if: matrix.suite == 'release-tooling'
+        if: matrix.suite == 'workspace'
         env:
           KAMAL_IMAGE: ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625
         run: |
@@ -263,12 +282,12 @@ jobs:
           ./scripts/check-kamal-configs.sh
           ./scripts/test-kamal-proxy-integration.sh
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-        if: matrix.suite == 'eros' && (steps.filter.outputs.eros_engine == 'true' || steps.infrastructure_baseline.outputs.eros_engine == 'true' || steps.intent.outputs.mode == 'LAYER7_EROS' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
+        if: matrix.suite == 'workspace' && (steps.filter.outputs.eros_engine == 'true' || steps.infrastructure_baseline.outputs.eros_engine == 'true' || steps.dispatch_build_scope.outputs.eros_engine == 'true' || steps.intent.outputs.mode == 'LAYER7_EROS' || github.event.before == '0000000000000000000000000000000000000000')
         with:
           platforms: linux/amd64
       - name: Build stock Eros test image
         id: eros_test_image
-        if: matrix.suite == 'eros' && (steps.filter.outputs.eros_engine == 'true' || steps.infrastructure_baseline.outputs.eros_engine == 'true' || steps.intent.outputs.mode == 'LAYER7_EROS' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
+        if: matrix.suite == 'workspace' && (steps.filter.outputs.eros_engine == 'true' || steps.infrastructure_baseline.outputs.eros_engine == 'true' || steps.dispatch_build_scope.outputs.eros_engine == 'true' || steps.intent.outputs.mode == 'LAYER7_EROS' || github.event.before == '0000000000000000000000000000000000000000')
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
           context: https://github.com/etherfunlab/eros-engine.git#${{ env.EROS_UPSTREAM_SHA }}
@@ -290,7 +309,7 @@ jobs:
           cache-to: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && 'type=gha,scope=gpoint-eros-test,mode=max,timeout=45s,ignore-error=true' || '' }}
       - name: Run stock Eros SQLx and synthetic conversation E2E
         id: eros_e2e
-        if: matrix.suite == 'eros' && (steps.filter.outputs.eros_engine == 'true' || steps.infrastructure_baseline.outputs.eros_engine == 'true' || steps.intent.outputs.mode == 'LAYER7_EROS' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
+        if: matrix.suite == 'workspace' && (steps.filter.outputs.eros_engine == 'true' || steps.infrastructure_baseline.outputs.eros_engine == 'true' || steps.dispatch_build_scope.outputs.eros_engine == 'true' || steps.intent.outputs.mode == 'LAYER7_EROS' || github.event.before == '0000000000000000000000000000000000000000')
         run: |
           set -euo pipefail
           image="gpoint-eros:stock-$EROS_UPSTREAM_SHA"

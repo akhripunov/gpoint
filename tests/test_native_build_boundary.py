@@ -9,7 +9,6 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/gpoint-native-release.yml"
-CUTOVER_WORKFLOW = ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml"
 
 
 class NativeReleaseBoundaryTests(unittest.TestCase):
@@ -145,13 +144,19 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("--commit-message", intent["run"])
         self.assertIn("ARTIFACT_PREPARE", self.workflow["jobs"]["build"]["if"])
 
-    def test_parallel_tests_preserve_all_suites_and_shared_fail_closed_outputs(self):
+    def test_required_checks_cover_release_tooling_and_eros(self):
+        self.assertEqual(self.workflow["concurrency"], {
+            "group": "gpoint-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'native-production-transaction' }}",
+            "cancel-in-progress": False,
+        })
         tests = self.workflow["jobs"]["tests"]
         self.assertEqual(tests["strategy"], {
             "fail-fast": False,
-            "matrix": {"suite": ["workspace", "python", "release-tooling", "eros"]},
+            "matrix": {"suite": ["workspace", "python"]},
         })
         self.assertEqual(tests["runs-on"], "ubuntu-latest")
+        # These are the exact required contexts enforced by public-main-integrity.
+        self.assertEqual(tests["strategy"]["matrix"]["suite"], ["workspace", "python"])
         intent = next(step for step in tests["steps"] if step.get("id") == "intent")
         self.assertNotIn("if", intent)
         self.assertEqual(tests["outputs"], {
@@ -160,18 +165,20 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             "eros_e2e": "${{ steps.eros_e2e.outputs.verified }}",
         })
         required_steps = {
-            "Validate pinned Kamal configs and shared proxy routing": "release-tooling",
+            "Validate GitHub Actions workflow": "workspace",
+            "Validate pinned Kamal configs and shared proxy routing": "workspace",
+            "Run stock Eros SQLx and synthetic conversation E2E": "workspace",
             "Build and typecheck workspace": "workspace",
             "Run Mini App end-to-end tests": "workspace",
             "Run Eros Relay unit tests": "workspace",
             "Run workflow, Native First and Kamal boundary tests": "python",
             "Run isolated PostgreSQL 16 migration and integration suites": "python",
-            "Run stock Eros SQLx and synthetic conversation E2E": "eros",
         }
         steps = {step.get("name"): step for step in tests["steps"]}
         for name, suite in required_steps.items():
             self.assertIn(f"matrix.suite == '{suite}'", steps[name]["if"])
         eros = next(step for step in tests["steps"] if step.get("id") == "eros_test_image")
+        self.assertIn("matrix.suite == 'workspace'", eros["if"])
         self.assertIn("steps.filter.outputs.eros_engine == 'true'", eros["if"])
         self.assertNotIn("steps.filter.outputs.infrastructure == 'true'", eros["if"])
         self.assertNotIn("steps.filter.outputs.database == 'true'", eros["if"])
@@ -186,6 +193,10 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         for step in python:
             self.assertIn("unset DATABASE_URL SHADOW_DATABASE_URL", step["run"])
         self.assertIn("tests/test_layer7_mac_free_ssh.py", python[0]["run"])
+        for step in tests["steps"]:
+            condition = step.get("if", "")
+            self.assertNotIn("matrix.suite == 'release-tooling'", condition)
+            self.assertNotIn("matrix.suite == 'eros'", condition)
 
     def test_push_apply_gate_uses_verified_accumulated_production_baseline(self):
         tests = self.workflow["jobs"]["tests"]
@@ -196,12 +207,19 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("baseline_sha", baseline["run"])
         self.assertNotIn("continue-on-error", baseline)
         self.assertIn("steps.infrastructure_baseline.outputs.sha", intent["env"]["INFRASTRUCTURE_BASELINE_SHA"])
+        self.assertEqual(baseline["if"], "github.event_name == 'push' && github.ref == 'refs/heads/main'")
         self.assertIn("--infrastructure-baseline-sha", intent["run"])
 
     def test_cumulative_engine_scope_runs_e2e_and_build_requires_exact_pass(self):
         tests = self.workflow["jobs"]["tests"]
         steps = {step.get("id"): step for step in tests["steps"] if step.get("id")}
+        dispatch_scope = steps["dispatch_build_scope"]
+        self.assertEqual(dispatch_scope["if"], "github.event_name == 'workflow_dispatch' && matrix.suite == 'workspace' && steps.intent.outputs.mode == 'DEPLOY'")
+        self.assertIn("resolve_native_build_scope.py", dispatch_scope["run"])
+        self.assertEqual(dispatch_scope["env"]["CANDIDATE_SHA"], "${{ inputs.candidate_sha }}")
         self.assertIn("steps.infrastructure_baseline.outputs.eros_engine == 'true'", steps["eros_test_image"]["if"])
+        self.assertIn("steps.dispatch_build_scope.outputs.eros_engine == 'true'", steps["eros_test_image"]["if"])
+        self.assertNotIn("github.event_name == 'workflow_dispatch'", steps["eros_test_image"]["if"])
         self.assertEqual(steps["eros_test_image"]["if"], steps["eros_e2e"]["if"])
         self.assertEqual(tests["outputs"]["eros_e2e"], "${{ steps.eros_e2e.outputs.verified }}")
         self.assertTrue(steps["eros_e2e"]["run"].rstrip().endswith('echo "verified=pass" >> "$GITHUB_OUTPUT"'))
@@ -542,9 +560,3 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             self.assertIn(f"config/{config}", config_check)
         self.assertIn("config-validation-placeholder", config_check)
         self.assertIn("Kamal config validation failed", config_check)
-
-
-class FirstCutoverWorkflowTests(unittest.TestCase):
-    def load_cutover(self):
-        self.assertTrue(CUTOVER_WORKFLOW.exists(), "first-cutover workflow must remain available")
-        return yaml.safe_load(CUTOVER_WORKFLOW.read_text())

@@ -266,6 +266,7 @@ def test_hosted_stock_eros_e2e_uses_the_policy_approved_upstream_tag():
     build = next(step for step in test_steps if step.get("id") == "eros_test_image")
     pin = next(step for step in test_steps if step.get("name") == "Read pinned Eros upstream source")
     assert test_steps.index(pin) < test_steps.index(build)
+    assert "matrix.suite == 'workspace'" in build["if"]
     assert "services/eros-engine/upstream.sha" in pin["run"]
     assert build["with"]["tags"] == "gpoint-eros:stock-${{ env.EROS_UPSTREAM_SHA }}"
     assert "#${{ env.EROS_UPSTREAM_SHA }}" in build["with"]["context"]

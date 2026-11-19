@@ -96,22 +96,3 @@ def test_media_manifest_file_is_private(tmp_path: Path):
 
     assert result.returncode == 0, result.stderr
     assert os.stat(destination).st_mode & 0o777 == 0o600
-
-
-def test_first_cutover_backs_up_and_restores_media_before_production_mutation():
-    workflow = (ROOT / ".github/workflows/gpoint-first-kamal-cutover.yml").read_text()
-    helper = (ROOT / "scripts/verify-gpoint-backup-restore.sh").read_text()
-    manifest_writer = (ROOT / "scripts/write-kamal-production-manifest.py").read_text()
-    backup_step = "name: Verify fresh PostgreSQL and media backup with isolated restore"
-    assert backup_step in workflow
-    assert workflow.index(backup_step) < workflow.index("name: Create exact-SHA in-progress GitHub Deployment")
-    assert workflow.index(backup_step) < workflow.index("name: Run one server-owned Kamal cutover transaction")
-    assert "/opt/gpoint/media" in helper
-    assert "tar --create" in helper and "tar --extract" in helper
-    assert "--acls" in helper and "--xattrs" in helper
-    assert "age --recipient" in helper and "rclone check --download" in helper
-    assert "GPOINT_MEDIA_TREE_MATCH=PASS" in helper
-    assert "GPOINT_MEDIA_BACKUP=PASS" in helper
-    assert "media_backup_sha256" in workflow and "MEDIA_BACKUP_SHA" in workflow
-    assert "mediaBackup" in manifest_writer and "mediaRestore" in manifest_writer
-    assert "media-backup-offsite-readback-and-isolated-restore" in manifest_writer
