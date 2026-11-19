@@ -16,6 +16,8 @@ def test_retired_host_transition_and_shared_worker_fixture_are_known_non_runtime
 @pytest.mark.parametrize('path,allowed', [
     ('docs/release/RELEASE_PERFORMANCE.md', True),
     ('scripts/release-readiness.mjs', True),
+    ('scripts/resolve_native_environment_deployment.py', True),
+    ('tests/test_native_environment_deployment.py', True),
     ('tests/test_release_component_manifest_v4.py', True),
     ('tests/test_release_static_exchange_v4.py', True),
     ('tests/test_release_static_executor_v4.py', True),
@@ -951,7 +953,6 @@ def test_known_release_infrastructure_candidate_has_no_application_component_sco
         "scripts/gpoint-scheduled-backup.py": "updated backup runner\n",
         "scripts/native_release_intent.py": "updated scope classifier\n",
         "scripts/prisma_migration_release_plan.py": "updated migration planner\n",
-        "scripts/resolve_native_environment_deployment.py": "updated deployment resolver\n",
         "scripts/resolve_native_build_scope.py": "updated build resolver\n",
         "scripts/verify-gpoint-scheduled-backup-restore.sh": "updated restore verifier\n",
         "scripts/verify-kamal-migration-parity.py": "updated migration verifier\n",
