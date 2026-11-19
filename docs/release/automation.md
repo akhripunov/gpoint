@@ -2,19 +2,20 @@
 
 > **2026-11-12:** обычный релиз — только `gpoint-native-release.yml`.
 > Legacy Prepare/Deploy, first-Kamal-cutover, interrupted recovery и публикация
-> релизных фактов в Linear удалены. Всё, что ниже описывает эти механизмы, —
-> исторический контекст, а не действующая процедура.
+> релизных фактов в Linear удалены. Их описания ниже — исторический контекст.
 >
 > | Workflow | Jobs | Назначение |
 > |---|---|---|
 > | `gpoint-native-release.yml` | Tests → Build → Deploy | обычный push-релиз и защищённый rollback |
 > | `gpoint-operations.yml` | migration_rehearsal | dispatch-операция с `deployment: false`: свои approvals и общий lock `gpoint-production-release` |
-> | `gpoint-layer7-staging.yml` | layer7_staging | изолированный staging на self-hosted macOS, environment `layer7-staging` |
+> | `gpoint-layer7-staging.yml` | layer7_staging | owner-dispatched изолированный staging на self-hosted macOS, environment `layer7-staging` |
 >
-> All three release types use automatic `Tests → Build → Deploy → Runtime Verify`
-> after an authorized main push. Target-specific Deploy uses its existing GitHub
-> Environment and concurrency group; `gpoint-layer7-staging.yml` remains the
-> protected manual readiness, broader-staging and recovery path.
+> Только допустимый push в `main` запускает обычный production flow
+> `Tests → Build → Deploy → Runtime Verify`; отдельные условия Native workflow
+> могут пропустить Build или Deploy. Owner-dispatched migration rehearsal и
+> Layer7 staging используют собственные условия и approvals. Rehearsal не создаёт
+> Deployment и не переключает runtime; Layer7 staging работает на отдельной
+> staging-среде и не является вторым production controller.
 
 ### Layer7 stock Eros update
 
