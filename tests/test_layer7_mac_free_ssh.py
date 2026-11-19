@@ -44,18 +44,24 @@ def test_kamal_step_uses_the_materialized_key_and_pinned_known_hosts():
     assert "gpoint_layer7" not in run
 
 
-def test_both_workflows_materialize_the_documented_variables():
-    for path in (NATIVE, MANUAL):
-        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
-        steps = [step for job in workflow["jobs"].values() for step in job["steps"]]
-        materialize = next(step for step in steps
-                           if step.get("name") == "Materialize Layer7 SSH credentials")
-        run = materialize["run"]
-        assert f"LAYER7_SSH_KEY={MATERIALIZED_KEY}" in run
-        assert f"GPOINT_SSH_KEY={MATERIALIZED_KEY}" in run
-        assert f"GPOINT_KNOWN_HOSTS_FILE={PINNED_KNOWN_HOSTS}" in run
-        assert ">> \"$GITHUB_ENV\"" in run
-        assert "$HOME/.ssh" not in run
+def test_only_protected_staging_workflow_materializes_layer7_ssh_credentials():
+    workflow = yaml.safe_load(MANUAL.read_text(encoding="utf-8"))
+    steps = [step for job in workflow["jobs"].values() for step in job["steps"]]
+    materialize = next(step for step in steps
+                       if step.get("name") == "Materialize Layer7 SSH credentials")
+    run = materialize["run"]
+    assert f"LAYER7_SSH_KEY={MATERIALIZED_KEY}" in run
+    assert f"GPOINT_SSH_KEY={MATERIALIZED_KEY}" in run
+    assert f"GPOINT_KNOWN_HOSTS_FILE={PINNED_KNOWN_HOSTS}" in run
+    assert ">> \"$GITHUB_ENV\"" in run
+    assert "$HOME/.ssh" not in run
+
+    native = yaml.safe_load(NATIVE.read_text(encoding="utf-8"))
+    native_steps = [step for job in native["jobs"].values() for step in job["steps"]]
+    assert not any(step.get("name") == "Materialize Layer7 SSH credentials"
+                   for step in native_steps)
+    assert not any(step.get("uses") == "./.github/actions/layer7-deploy"
+                   for step in native_steps)
 
 
 def test_kamal_env_contract_accepts_materialized_values_and_rejects_home_paths(tmp_path):
