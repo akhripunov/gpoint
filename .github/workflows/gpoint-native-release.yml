@@ -439,7 +439,6 @@ jobs:
           tests/test_native_prisma_apply_boundary.py
           tests/test_prisma_migration_release_plan.py
           tests/test_eros_pilot_no_agata_transfer.py
-          tests/test_gpoint_scheduled_backup.py
           tests/test_agata_production_migration.py
           tests/test_agata_migration_receipt.py
           tests/test_kamal_native_automatic_release.py

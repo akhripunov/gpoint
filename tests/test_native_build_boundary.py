@@ -16,6 +16,12 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
     def setUpClass(cls):
         cls.workflow = yaml.safe_load(WORKFLOW.read_text())
 
+    def test_python_release_boundary_suite_does_not_run_a_test_file_twice(self):
+        step = next(step for step in self.workflow["jobs"]["tests"]["steps"]
+                    if step.get("name") == "Run workflow, Native First and Kamal boundary tests")
+        paths = [token for token in step["run"].split() if token.startswith("tests/")]
+        self.assertEqual(len(paths), len(set(paths)), "duplicate test paths repeat work in the mandatory CI suite")
+
     def test_pipeline_has_release_gate_and_one_isolated_rehearsal_job(self):
         jobs = self.workflow["jobs"]
         self.assertEqual(set(jobs), {"tests", "build", "deploy"})
