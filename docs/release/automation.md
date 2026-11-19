@@ -343,7 +343,7 @@ run is not current isolation evidence.
 | Function | Current code | Native mechanism | Decision |
 |---|---|---|---|
 | Component path filters | `dorny/paths-filter`; retired `native_change_surface.py` (131 LOC at baseline) | Git and the pinned `dorny/paths-filter` action | **REPLACE / DELETE** — declarative filters now supply the component paths. |
-| Event admission and exact-scope fail-closed rules | `scripts/native_release_intent.py` (925 LOC in this checkout) | GitHub event/dispatch context and workflow conditions | **KEEP, reduce** — policy checks still reject unauthorized events, unsafe paths and migration scope; current helper is larger than the minimal-adapter target. |
+| Event admission and exact-scope fail-closed rules | `scripts/native_release_intent.py` (932 LOC in this checkout) | GitHub event/dispatch context and workflow conditions | **KEEP, reduce** — policy checks still reject unauthorized events, unsafe paths and migration scope; current helper is larger than the minimal-adapter target. |
 | Installed component source baselines | `scripts/resolve_native_build_scope.py`, `scripts/resolve_native_environment_deployment.py` | GitHub Deployments API, stock Kamal app commands and Docker inspect | **KEEP, reduce** — native sources provide facts, these adapters bind component identity and exact-SHA evidence. |
 | Build and OCI provenance | Build steps plus `scripts/verify_native_image_readback.py`, `verify_native_image_attestation.py`, `verify_native_eros_image.py` | Docker Buildx, GHCR digest, SBOM and GitHub artifact provenance | **KEEP** — retain only digest/source/platform/provenance checks not supplied by the native outputs. |
 | Native cross-run prepared-image reuse | Dispatch inputs, prepared-run API/log verification and digest fallback outputs | Buildx in the same Native release run | **DELETE** — production Build always creates and reads back each required image in its own exact-SHA run; Layer7 staging retains separate image provenance checks. |
@@ -358,25 +358,29 @@ by it:
 
 | Measure | Main baseline | Current local candidate | Change |
 |---|---:|---:|---:|
-| Main controller + five control adapters (six paths) | 4,562 | 4,452 | −2.4% |
+| Main controller + five control adapters (six paths) | 4,562 | 4,459 | −2.3% |
 | Workflow LOC | 2,437 | 2,436 | −0.04% |
-| Referenced helper LOC | 5,439 | 5,122 | −5.8% |
-| Combined workflow + referenced scripts LOC | 7,876 | 7,558 | −4.0% |
-| Extended release/deploy/migration/backup inventory LOC | 12,486 | 12,305 | −1.5% |
+| Referenced helper LOC | 5,439 | 5,129 | −5.7% |
+| Combined workflow + referenced scripts LOC | 7,876 | 7,565 | −3.9% |
+| Extended release/deploy/migration/backup inventory LOC | 12,486 | 12,312 | −1.4% |
 | Referenced helper files | 21 | 19 | −2 |
 | Required test matrix runs | 4 | 2 | −50% |
 | Ordinary workflow named jobs | 3 | 3 | unchanged |
 | Ordinary release wall time | not measured | not measured | pending hosted exact-SHA run |
 
-The six-path controller measure is the exact executable set used by the earlier
-ME-62 count: the Native workflow, `native_change_surface.py`,
+Counts use source-line totals (`git show <revision>:<path> | wc -l`) from each
+revision's inventory; helper names and workflow references are resolved at
+that revision, not from the candidate only. The six-path controller measure is
+the exact executable set used by the earlier ME-62 count: the Native workflow,
+`native_change_surface.py`,
 `native_release_intent.py`, `resolve_native_build_scope.py`,
 `verify_native_rollback_evidence.py` and `write-kamal-production-manifest.py`.
 The extended inventory includes workflow and action files under
 `.github/workflows/` and `.github/actions/` whose names contain `release`,
 `deploy` or `layer7`, plus tracked `.py`, `.mjs`, `.js` and `.sh` files under
 `scripts/` whose names contain `release`, `deploy`, `rollback`, `migration`,
-`backup`, `kamal`, `native` or `layer7`. Test files and scripts are excluded.
+`backup`, `kamal`, `native` or `layer7`. Test files (`*.test.*`, `test-*`,
+`test_*`, `*_test.py` and `_test.sh`) are excluded.
 This filename-based inventory is an upper bound, not a precise production-Apply
 LOC count. The referenced-helper count includes
 workflow-invoked CI validation scripts, so that combined figure is an upper
@@ -384,7 +388,7 @@ bound for production Apply code. The Native cross-run digest reuse adapter was
 removed; production dispatch now builds the required images in the same run.
 The matrix consolidation cuts redundant runners and PostgreSQL services in
 half, and `native_change_surface.py` was replaced with declarative filters.
-The six-path inventory is down 2.4% and the combined upper bound is down 4.0%;
+The six-path inventory is down 2.3% and the combined upper bound is down 3.9%;
 neither approaches the required 50% reduction. Release
 duration, selective GHCR image counts and deploy-target counts still need exact
 hosted/staging evidence. This status must remain incomplete until the code
