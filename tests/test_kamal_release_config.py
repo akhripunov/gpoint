@@ -1003,6 +1003,7 @@ def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
         'CANDIDATE_SHA': 'a' * 40, 'IMAGE_VERSION': 'a' * 40 + '-123-1',
         'APP_DIGEST': 'sha256:' + 'b' * 64, 'AGATA_DIGEST': 'sha256:' + 'c' * 64,
         'MINIAPP_DIGEST': 'sha256:' + 'd' * 64, 'EROS_DIGEST': 'sha256:' + 'e' * 64,
+        'EROS_RELAY_DIGEST': 'sha256:' + 'f' * 64,
         'DB_CONTAINER_ID': 'e' * 64,
         'REDIS_CONTAINER_ID': 'f' * 64, 'DEPLOYMENT_ID': '7', 'GITHUB_RUN_ID': '123',
         'GITHUB_RUN_ATTEMPT': '1', 'writer_remote': '/run/gpoint-ordinary-manifest-123-1.py',

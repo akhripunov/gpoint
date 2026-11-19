@@ -28,10 +28,10 @@ COMPONENT_SOURCE_KEYS = {
     "AGATA": "gpoint-agata-source-sha",
     "MINIAPP": "gpoint-miniapp-source-sha",
     "EROS": "gpoint-eros-source-sha",
+    "EROS_RELAY": "gpoint-eros-relay-source-sha",
 }
 REQUIRED_COMPONENTS = ("CORE", "AGATA", "MINIAPP")
 SUPPORTED_TASKS = {"deploy", "rollback"}
-ALL_COMPONENTS = ["CORE", "AGATA", "MINIAPP", "EROS"]
 BOOTSTRAP_BUILD_COMPONENTS = ["CORE", "AGATA", "MINIAPP", "EROS"]
 
 
@@ -108,9 +108,11 @@ def _manifest_baseline(environment_url: object, *, deployment_task: str,
         raise ValueError("production Deployment component source evidence is incomplete")
     sources = {component: values[key] for component, key in COMPONENT_SOURCE_KEYS.items()
                if key in values}
-    # Existing V3 manifests predate Eros. Until the first Eros deployment, use
-    # the Core baseline to classify the introduction of the Eros component.
-    sources.setdefault("EROS", sources["CORE"])
+    if "EROS" in sources:
+        # Older verified releases always deployed Engine and Relay together.
+        sources.setdefault("EROS_RELAY", sources["EROS"])
+    elif "EROS_RELAY" in sources:
+        raise ValueError("production Deployment component source evidence is incomplete")
     if any(not EXACT_SHA.fullmatch(source) for source in sources.values()):
         raise ValueError("production Deployment component source SHA is invalid")
     runtime_target_sha = values.get("gpoint-runtime-target-sha")

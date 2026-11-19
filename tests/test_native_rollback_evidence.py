@@ -254,3 +254,33 @@ def test_rejects_duplicate_role_in_production_manifest():
         assert "duplicate GPoint Kamal role" in str(exc)
     else:
         raise AssertionError("duplicate role accepted")
+
+
+def test_native_rollback_evidence_keeps_distinct_engine_and_relay_provenance():
+    deployment, statuses, run, jobs, raw = eros_evidence()
+    manifest = json.loads(raw)
+    relay_source = "f" * 40
+    relay_digest = "sha256:" + "e" * 64
+    relay_image = "ghcr.io/akhripunov/gpoint-runtime@" + relay_digest
+    manifest["candidate"]["images"]["eros_relay"] = relay_image
+    next(row for row in manifest["runtimeServices"] if row["name"].startswith("gpoint-eros-relay-relay-")).update(
+        name="gpoint-eros-relay-relay-" + relay_source + "-120-1",
+        revision=relay_source, repositoryDigest=relay_image, component="EROS_RELAY",
+    )
+    raw = json.dumps(manifest).encode()
+    run["run_attempt"] = 1
+    statuses[0]["environment_url"] = (
+        "https://gpoint.one/#gpoint-manifest-sha256=" + hashlib.sha256(raw).hexdigest()
+        + "&gpoint-core-source-sha=" + SHA
+        + "&gpoint-agata-source-sha=" + SHA
+        + "&gpoint-miniapp-source-sha=" + SHA
+        + "&gpoint-eros-source-sha=" + SHA
+        + "&gpoint-eros-relay-source-sha=" + relay_source
+    )
+    statuses[0]["log_url"] = f"https://github.com/akhripunov/gpoint/actions/runs/{RUN_ID}/attempts/1"
+
+    result = verify((deployment, statuses, run, jobs, raw))
+
+    assert result["digests"]["eros_relay"] == relay_digest
+    assert result["component_sources"]["eros_relay"] == relay_source
+    assert result["component_sources"]["eros"] == SHA

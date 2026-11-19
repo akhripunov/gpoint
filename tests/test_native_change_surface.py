@@ -142,14 +142,13 @@ def test_relay_kamal_change_is_not_core_and_never_auto_applies():
 
     relay_config = "config/deploy.eros-relay.yml"
     relay_runtime = "services/eros-engine/eros-pilot-embedding-relay.mjs"
-    assert intent._component_paths(relay_config) == {"EROS"}
-    assert intent._component_paths(relay_runtime) == {"EROS"}
+    assert intent._component_paths(relay_config) == {"EROS_RELAY"}
+    assert intent._component_paths(relay_runtime) == {"EROS_RELAY"}
     assert intent.is_infrastructure_change({relay_config})
     assert not intent.push_deploy_authorized(mode="DEPLOY", changed_paths={relay_config})
     assert intent.push_deploy_authorized(mode="DEPLOY", changed_paths={"apps/api/src/messages.ts"})
     deploy = _filters()[0]["jobs"]["deploy"]
     assert "production" in deploy["environment"]["name"]
-    assert intent._component_paths(relay_config) == {"EROS"}
 
 
 def test_eros_relay_kamal_config_stays_separate_from_engine_and_protected_config():

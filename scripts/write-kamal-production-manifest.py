@@ -34,7 +34,7 @@ ROLE_COMPONENTS = {
     "gpoint-agata-api": "AGATA", "gpoint-agata-memory-worker": "AGATA",
     "gpoint-miniapp-web": "MINIAPP",
     "gpoint-eros-pilot-engine": "EROS",
-    "gpoint-eros-relay-relay": "EROS",
+    "gpoint-eros-relay-relay": "EROS_RELAY",
 }
 ROLE_IDENTITY_GROUP = {
     **{role: "CORE" for role in ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot")},
@@ -83,6 +83,7 @@ def parser() -> argparse.ArgumentParser:
                  "run-id", "attempt", "deployment-id"):
         result.add_argument(f"--{name}", required=True)
     result.add_argument("--eros-digest")
+    result.add_argument("--eros-relay-digest")
     result.add_argument("--mode", choices=("cutover", "ordinary"), default="cutover")
     for name in ("baseline-path", "baseline-sha",
                  "inventory-path", "inventory-sha", "backup-path", "backup-sha", "restore-path",
@@ -225,12 +226,13 @@ def main() -> int:
             "gpoint-agata-memory-worker": "ghcr.io/akhripunov/gpoint-agata-runtime@" + args.agata_digest,
             "gpoint-miniapp-web": "ghcr.io/akhripunov/gpoint-miniapp@" + args.miniapp_digest,
             "gpoint-eros-pilot-engine": "ghcr.io/akhripunov/gpoint-eros@" + (args.eros_digest or ""),
-            "gpoint-eros-relay-relay": "ghcr.io/akhripunov/gpoint-runtime@" + args.app_digest,
+            "gpoint-eros-relay-relay": "ghcr.io/akhripunov/gpoint-runtime@" + (args.eros_relay_digest or ""),
         }
         has_eros = "gpoint-eros-pilot-engine" in expected_roles
-        if has_eros and not OCI_DIGEST.fullmatch(args.eros_digest or ""):
-            raise SystemExit("ordinary manifest needs the exact stock Eros OCI digest")
-        if not has_eros and args.eros_digest:
+        eros_digests = (args.eros_digest, args.eros_relay_digest)
+        if has_eros and not all(OCI_DIGEST.fullmatch(digest or "") for digest in eros_digests):
+            raise SystemExit("ordinary manifest needs exact Eros Engine and Relay OCI digests")
+        if not has_eros and any(eros_digests):
             raise SystemExit("ordinary manifest received an Eros digest without Eros roles")
         component_identities = {}
         for role, repository in role_repositories.items():
@@ -299,7 +301,7 @@ def main() -> int:
     if args.mode == "ordinary" and expected_role_plan and "gpoint-eros-pilot-engine" in expected_role_plan["roles"]:
         expected_services.extend([
             ("gpoint-eros-pilot-engine", "ghcr.io/akhripunov/gpoint-eros", args.eros_digest),
-            ("gpoint-eros-relay-relay", "ghcr.io/akhripunov/gpoint-runtime", args.app_digest),
+            ("gpoint-eros-relay-relay", "ghcr.io/akhripunov/gpoint-runtime", args.eros_relay_digest),
         ])
     runtime_services = []
     for prefix, repository, digest in expected_services:
@@ -427,7 +429,7 @@ def main() -> int:
                 "agata": f"ghcr.io/akhripunov/gpoint-agata-runtime@{args.agata_digest}",
                 "miniapp": f"ghcr.io/akhripunov/gpoint-miniapp@{args.miniapp_digest}",
                 **({"eros": f"ghcr.io/akhripunov/gpoint-eros@{args.eros_digest}",
-                    "eros_relay": f"ghcr.io/akhripunov/gpoint-runtime@{args.app_digest}"}
+                    "eros_relay": f"ghcr.io/akhripunov/gpoint-runtime@{args.eros_relay_digest}"}
                    if args.mode == "ordinary" and expected_role_plan
                    and "gpoint-eros-pilot-engine" in expected_role_plan["roles"] else {}),
             },

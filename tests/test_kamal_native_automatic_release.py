@@ -694,3 +694,33 @@ def test_no_runtime_change_skips_the_whole_deploy_job():
         if step.get("id") == "build_scope")
     assert '"VERIFIED"' in build_scope["run"]
     assert '"BOOTSTRAP_FULL"' in build_scope["run"]
+
+
+def test_relay_only_kamal_apply_leaves_engine_and_other_roles_untouched(tmp_path):
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    step = next(s for s in workflow["jobs"]["deploy"]["steps"] if s.get("id") == "kamal_apply")
+    docker = tmp_path / "docker"
+    docker.write_text('#!/bin/sh\nprintf "%s|%s|%s\\n" "$GPOINT_KAMAL_SERVICE" "$GPOINT_KAMAL_EXPECTED_DIGEST" "$*"\n')
+    docker.chmod(0o755)
+    ssh = tmp_path / "ssh"
+    ssh.write_text('#!/bin/sh\nprintf "verify|%s\\n" "$*"\n')
+    ssh.chmod(0o755)
+    sha = "a" * 40
+    relay_digest = "sha256:" + "b" * 64
+    result = subprocess.run(
+        ["bash", "-c", step["run"]], text=True, capture_output=True,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}",
+             "DEPLOY_AGATA": "false", "DEPLOY_CORE": "false", "DEPLOY_MINIAPP": "false",
+             "DEPLOY_EROS": "false", "DEPLOY_EROS_RELAY": "true", "EROS_INSTALLED": "true",
+             "DEPLOY_SCOPE": "EROS_RELAY", "EROS_RELAY_DIGEST": relay_digest,
+             "IMAGE_VERSION": sha + "-9-1", "GPOINT_COMMIT_SHA": sha,
+             "GPOINT_PRODUCTION_HOST": "example.invalid", "GITHUB_WORKSPACE": str(ROOT),
+             "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")},
+    )
+
+    assert result.returncode == 0, result.stderr
+    stop, deploy, verify = result.stdout.splitlines()
+    assert stop.startswith("gpoint-eros-relay||") and "app stop --roles relay" in stop
+    assert deploy.startswith(f"gpoint-eros-relay|{relay_digest}|")
+    assert "deploy --skip-push --version " + sha + "-9-1 --roles relay" in deploy
+    assert verify.endswith(f"gpoint-eros-relay-relay {sha}-9-1 {sha}")

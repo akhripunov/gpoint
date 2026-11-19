@@ -157,6 +157,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(tests["outputs"], {
             "mode": "${{ steps.intent.outputs.mode }}",
             "deploy": "${{ steps.intent.outputs.deploy }}",
+            "eros_e2e": "${{ steps.eros_e2e.outputs.verified }}",
         })
         required_steps = {
             "Validate pinned Kamal configs and shared proxy routing": "release-tooling",
@@ -196,6 +197,19 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", baseline)
         self.assertIn("steps.infrastructure_baseline.outputs.sha", intent["env"]["INFRASTRUCTURE_BASELINE_SHA"])
         self.assertIn("--infrastructure-baseline-sha", intent["run"])
+
+    def test_cumulative_engine_scope_runs_e2e_and_build_requires_exact_pass(self):
+        tests = self.workflow["jobs"]["tests"]
+        steps = {step.get("id"): step for step in tests["steps"] if step.get("id")}
+        self.assertIn("steps.infrastructure_baseline.outputs.eros_engine == 'true'", steps["eros_test_image"]["if"])
+        self.assertEqual(steps["eros_test_image"]["if"], steps["eros_e2e"]["if"])
+        self.assertEqual(tests["outputs"]["eros_e2e"], "${{ steps.eros_e2e.outputs.verified }}")
+        self.assertTrue(steps["eros_e2e"]["run"].rstrip().endswith('echo "verified=pass" >> "$GITHUB_OUTPUT"'))
+        build = self.workflow["jobs"]["build"]
+        guard = next(step for step in build["steps"] if step.get("name") == "Require exact-candidate Eros test evidence")
+        self.assertEqual(guard["env"]["EROS_E2E"], "${{ needs.tests.outputs.eros_e2e }}")
+        self.assertIn("contains(fromJSON(steps.build_scope.outputs.build_components), 'EROS')", guard["if"])
+        self.assertEqual(guard["run"], 'test "$EROS_E2E" = pass')
 
     def test_main_push_runs_ci_build_and_kamal_production_jobs(self):
         triggers = self.workflow.get("on", self.workflow.get(True))

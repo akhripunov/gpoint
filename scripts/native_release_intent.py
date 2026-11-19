@@ -242,7 +242,10 @@ COMPONENT_ROLES = {
     "MINIAPP": ("gpoint-miniapp-web",),
 }
 EROS_ROLES = ("gpoint-eros-pilot-engine", "gpoint-eros-relay-relay")
-ALL_COMPONENT_ROLES = {**COMPONENT_ROLES, "EROS": EROS_ROLES}
+EROS_COMPONENT_ROLES = {"EROS": EROS_ROLES[:1], "EROS_RELAY": EROS_ROLES[1:]}
+ALL_COMPONENT_ROLES = {**COMPONENT_ROLES, **EROS_COMPONENT_ROLES}
+COMPONENT_IMAGES = {component: component for component in ALL_COMPONENT_ROLES}
+COMPONENT_IMAGES["EROS_RELAY"] = "CORE"
 ROLE_REPOSITORIES = {
     "gpoint-core-api": "ghcr.io/akhripunov/gpoint-runtime",
     "gpoint-core-worker": "ghcr.io/akhripunov/gpoint-runtime",
@@ -547,8 +550,8 @@ def classify_push(*, event_name: str, ref: str,
 
 def validate_prepared_image_digests(build_components: list[str],
                                     digests: dict[str, str]) -> dict[str, str]:
-    """Require one immutable OCI digest for each, and only each, built component."""
-    allowed = set(ALL_COMPONENT_ROLES)
+    """Require one immutable OCI digest for each, and only each, built image."""
+    allowed = set(COMPONENT_IMAGES.values())
     if (not isinstance(build_components, list) or not build_components
             or any(not isinstance(component, str) or component not in allowed
                    for component in build_components)
@@ -680,6 +683,8 @@ def _component_paths(path: str) -> set[str]:
         return {"AGATA"}
     if path in EROS_MODEL_CONFIG_PATHS:
         return set()
+    if path in {"services/eros-engine/eros-pilot-embedding-relay.mjs", "config/deploy.eros-relay.yml"}:
+        return {"EROS_RELAY"}
     if path.startswith(("services/eros-engine/", "config/deploy.eros")):
         return {"EROS"}
     if path in {"infra/production/Gpoint.Dockerfile", "infra/production/nginx-miniapp.conf"}:
@@ -721,13 +726,15 @@ def classify_component_build_plan(repo: Path, candidate: str,
     """Classify runtime updates and image-only Prisma migration build impact."""
     if not EXACT_SHA.fullmatch(candidate or ""):
         raise ValueError("candidate SHA is invalid")
-    required_sources = set(COMPONENT_ROLES)
     if (not isinstance(component_sources, dict)
-            or set(component_sources) not in (required_sources, required_sources | {"EROS"})):
+            or set(component_sources) not in (set(COMPONENT_ROLES), set(ALL_COMPONENT_ROLES))):
         raise ValueError("component production source inventory is incomplete")
     for component, source in component_sources.items():
         if not isinstance(source, str) or not EXACT_SHA.fullmatch(source):
             raise ValueError(f"{component} production source SHA is invalid")
+    eros_installed = "EROS" in component_sources
+    if not eros_installed:
+        component_sources = {**component_sources, **dict.fromkeys(EROS_COMPONENT_ROLES, component_sources["CORE"])}
     paths_by_baseline: dict[str, set[str]] = {}
     core_migration_paths: set[str] = set()
     core_source = component_sources["CORE"]
@@ -755,6 +762,8 @@ def classify_component_build_plan(repo: Path, candidate: str,
             if not tree.startswith(("100644 blob ", "100755 blob ")):
                 raise ValueError("candidate path is not a regular file and needs explicit scope approval")
             changed_components = _component_paths(path)
+            if eros_installed and path == "infra/production/Gpoint.Dockerfile":
+                changed_components.add("EROS_RELAY")
             if baseline == core_source and PRISMA_MIGRATION.fullmatch(path):
                 core_migration_paths.add(path)
             if not changed_components:
@@ -774,12 +783,10 @@ def classify_component_build_plan(repo: Path, candidate: str,
     # compared with the candidate. Only paths owned by that component count;
     # a newer component baseline has already absorbed its own changes. Unknown
     # paths still fail closed above.
+    if not eros_installed and components.intersection(EROS_COMPONENT_ROLES):
+        components.update(EROS_COMPONENT_ROLES)
     runtime_scope = "+".join(sorted(components)) if components else "NONE"
-    build_components = set(components)
-    if "EROS" in components:
-        # Eros API integration and relay share the CORE runtime artifact, but
-        # their Kamal services remain independently scoped from Core roles.
-        build_components.add("CORE")
+    build_components = {COMPONENT_IMAGES[component] for component in components}
     if core_migration_paths:
         build_components.add("CORE")
     return {
@@ -789,16 +796,15 @@ def classify_component_build_plan(repo: Path, candidate: str,
     }
 
 
+def installed_component_sources(inventory: dict) -> dict[str, str]:
+    roles = _validate_role_inventory(inventory)
+    return {component: roles[names[0]]["source_sha"]
+            for component, names in ALL_COMPONENT_ROLES.items() if names[0] in roles}
+
+
 def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dict[str, str | bool]:
     """Classify the exact candidate diff; never broaden an ambiguous scope."""
-    roles = _validate_role_inventory(inventory)
-    component_sources = {
-        component: roles[component_roles[0]]["source_sha"]
-        for component, component_roles in COMPONENT_ROLES.items()
-    }
-    eros_installed = "gpoint-eros-pilot-engine" in roles
-    component_sources["EROS"] = (roles["gpoint-eros-pilot-engine"]["source_sha"] if eros_installed
-                                  else roles["gpoint-core-api"]["source_sha"])
+    component_sources = installed_component_sources(inventory)
     plan = classify_component_build_plan(repo, candidate, component_sources)
     components = set(str(plan["deploy_scope"]).split("+")) - {"NONE"}
     result = {
@@ -808,19 +814,20 @@ def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dic
         "deploy_agata": "AGATA" in components,
         "deploy_miniapp": "MINIAPP" in components,
         "deploy_eros": "EROS" in components,
-        "eros_bootstrap": "EROS" in components and not eros_installed,
+        "deploy_eros_relay": "EROS_RELAY" in components,
+        "eros_bootstrap": "EROS" in components and "EROS" not in component_sources,
     }
     return result
 
 
 def expected_runtime_inventory(scope: str, inventory: dict, candidate: str, version: str,
                                app_digest: str, agata_digest: str, miniapp_digest: str,
-                               *, eros_digest: str = "") -> dict:
+                               *, eros_digest: str = "", eros_relay_digest: str = "") -> dict:
     """Bind every verified role to either the untouched baseline or exact candidate artifact."""
     roles = _validate_role_inventory(inventory)
     scope_components = (set() if scope == "NONE" else
                         set(scope.split("+")) if isinstance(scope, str) else set())
-    valid_components = set(COMPONENT_ROLES) | {"EROS"}
+    valid_components = set(ALL_COMPONENT_ROLES)
     if (scope != "NONE" and (not scope_components or not scope_components.issubset(valid_components)
                               or "+".join(sorted(scope_components)) != scope)
             or not EXACT_SHA.fullmatch(candidate or "")
@@ -828,37 +835,21 @@ def expected_runtime_inventory(scope: str, inventory: dict, candidate: str, vers
         raise ValueError("candidate component runtime plan is malformed")
     updated = scope_components
     digests = {"CORE": app_digest, "AGATA": agata_digest, "MINIAPP": miniapp_digest,
-               "EROS": eros_digest}
+               "EROS": eros_digest, "EROS_RELAY": eros_relay_digest}
     for component, value in digests.items():
         if component in updated and not EXACT_DIGEST.fullmatch(value or ""):
             raise ValueError("updated candidate runtime image digest is invalid")
         if component not in updated and value and not EXACT_DIGEST.fullmatch(value):
             raise ValueError("baseline runtime image digest is invalid")
-    if "EROS" in updated and not EXACT_DIGEST.fullmatch(app_digest or ""):
-        raise ValueError("updated Eros relay runtime image digest is invalid")
+    if (EROS_ROLES[0] not in roles and updated.intersection(EROS_COMPONENT_ROLES)
+            and not EROS_COMPONENT_ROLES.keys() <= updated):
+        raise ValueError("first Eros deploy requires both engine and relay")
     inventory_out = {}
-    group_repo_digests = {
-        "CORE": (f"{ROLE_REPOSITORIES['gpoint-core-api']}@{app_digest}" if app_digest else None),
-        "AGATA": (f"{ROLE_REPOSITORIES['gpoint-agata-api']}@{agata_digest}" if agata_digest else None),
-        "MINIAPP": (f"{ROLE_REPOSITORIES['gpoint-miniapp-web']}@{miniapp_digest}" if miniapp_digest else None),
-        "EROS": (f"{ROLE_REPOSITORIES['gpoint-eros-pilot-engine']}@{eros_digest}" if eros_digest else None),
-    }
     for component, component_roles in ALL_COMPONENT_ROLES.items():
         for role in component_roles:
-            if role not in roles and not (component == "EROS" and component in updated):
-                continue
             baseline = roles.get(role)
-            role_component = component
-            if component == "EROS" and role == "gpoint-eros-relay-relay":
-                # Eros deploys a freshly built CORE runtime image to the relay
-                # role only; the regular Core roles remain untouched on EROS-only scope.
-                role_component = "CORE"
             if component in updated:
-                repository_digest = group_repo_digests[role_component]
-                if not repository_digest:
-                    # For Eros API/relay, this is the no-Core-build case handled
-                    # above; all other updated components require their digest.
-                    raise ValueError(f"updated {component} runtime digest is required")
+                repository_digest = f"{ROLE_REPOSITORIES[role]}@{digests[component]}"
                 inventory_out[role] = {"version": version, "sourceSha": candidate,
                                        "repositoryDigest": repository_digest,
                                        "baselineImageId": None}

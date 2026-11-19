@@ -66,8 +66,7 @@ def test_accumulated_candidate_always_requires_candidate_images():
         pytest.skip("production baseline is not in this checkout")
     head = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
-    baseline_sources = {component: PRODUCTION_BASELINE
-                        for component in ("CORE", "AGATA", "MINIAPP", "EROS")}
+    baseline_sources = dict.fromkeys(intent.COMPONENT_ROLES, PRODUCTION_BASELINE)
 
     plan = intent.classify_component_build_plan(ROOT, head, baseline_sources)
 
@@ -132,23 +131,23 @@ def test_build_plan_and_live_scope_agree_on_the_same_production_baseline(tmp_pat
     components, and every component Deploy will update must already be built.
     """
     repo, baseline, candidate, inventory = _scope_repo(tmp_path)
-    sources = {"CORE": baseline, "AGATA": baseline, "MINIAPP": baseline, "EROS": baseline}
+    sources = dict.fromkeys(intent.COMPONENT_ROLES, baseline)
 
     plan = intent.classify_component_build_plan(repo, candidate, sources)
     scope = intent.classify_component_scope(repo, candidate, inventory)
 
     assert scope["scope"] == plan["deploy_scope"]
     live_components = set(scope["scope"].split("+")) - {"NONE"}
-    assert live_components <= set(plan["build_components"]), (
+    assert {intent.COMPONENT_IMAGES[component] for component in live_components} <= set(plan["build_components"]), (
         "Deploy would require an image Build never produced")
 
 
 def test_bootstrap_plan_covers_any_live_scope(tmp_path):
     repo, baseline, candidate, inventory = _scope_repo(tmp_path)
-    sources = {"CORE": baseline, "AGATA": baseline, "MINIAPP": baseline, "EROS": baseline}
+    sources = dict.fromkeys(intent.COMPONENT_ROLES, baseline)
     scope = intent.classify_component_scope(repo, candidate, inventory)
     live_components = set(scope["scope"].split("+")) - {"NONE"}
 
     bootstrap = set(intent.classify_component_build_plan(repo, candidate, sources)["build_components"])
     # A bootstrap build is the whole image set, so any live scope is covered.
-    assert live_components <= bootstrap
+    assert {intent.COMPONENT_IMAGES[component] for component in live_components} <= bootstrap
