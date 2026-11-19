@@ -354,21 +354,29 @@ by it:
 
 | Measure | Main baseline | Current local candidate | Change |
 |---|---:|---:|---:|
+| Main controller + five control adapters (six paths) | 4,562 | 4,596 | +0.7% |
 | Workflow LOC | 2,437 | 2,558 | +5.0% |
 | Referenced helper LOC | 5,439 | 5,352 | −1.6% |
 | Combined workflow + referenced scripts LOC | 7,876 | 7,910 | +0.4% |
+| Extended GPoint release subsystem LOC | 10,206 | 10,169 | −0.4% |
 | Referenced helper files | 21 | 20 | −1 |
 | Required test matrix runs | 4 | 2 | −50% |
 | Ordinary workflow named jobs | 3 | 3 | unchanged |
 | Ordinary release wall time | not measured | not measured | pending hosted exact-SHA run |
 
-The helper count includes workflow-invoked CI validation scripts, so the combined
-figure is an upper-bound inventory rather than only the code executed during
-production Apply. The matrix consolidation cuts redundant runners and
-PostgreSQL services in half, and `native_change_surface.py` was replaced with
-declarative filters. This does **not** yet meet the required 50% reduction in
-custom production release code; the aggregate inventory is currently slightly
-higher than the baseline. Release
+The six-path controller measure is the exact executable set used by the earlier
+ME-62 count: the Native workflow, `native_change_surface.py`,
+`native_release_intent.py`, `resolve_native_build_scope.py`,
+`verify_native_rollback_evidence.py` and `write-kamal-production-manifest.py`.
+The extended subsystem measure adds the GPoint Layer7 staging/operations
+workflows, their action, and executable release/migration/deploy helpers; tests
+and documentation are excluded. The referenced-helper count includes
+workflow-invoked CI validation scripts, so that combined figure is an upper
+bound for production Apply code. The matrix consolidation cuts redundant
+runners and PostgreSQL services in half, and `native_change_surface.py` was
+replaced with declarative filters. None of the code inventories meets the
+required 50% reduction; the main-controller inventory is slightly higher than
+baseline. Release
 duration, selective GHCR image counts and deploy-target counts still need exact
 hosted/staging evidence. This status must remain incomplete until the code
 reduction and required acceptance evidence are achieved.
