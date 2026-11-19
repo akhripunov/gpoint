@@ -651,6 +651,12 @@ def _component_paths(path: str) -> set[str]:
         return set()
     if path == "packages/db/prisma/schema.prisma":
         return {"CORE"}
+    if path in {
+        "config/deploy.yml",
+        "config/deploy.eros-api.yml",
+        "services/eros-engine/eros-pilot-embedding-relay.mjs",
+    }:
+        return {"CORE"}
     if path == "apps/miniapp/index.html" or path.startswith(("apps/miniapp/src/", "apps/miniapp/public/")):
         return {"MINIAPP"}
     if path.startswith("services/agata/"):

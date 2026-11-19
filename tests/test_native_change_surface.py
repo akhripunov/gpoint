@@ -60,6 +60,22 @@ def test_backend_change_selects_backend_checks():
     assert surface["database"] is False
 
 
+def test_core_kamal_configs_and_eros_relay_share_component_scope():
+    import native_release_intent as intent
+
+    cases = {
+        "config/deploy.yml": {"CORE"},
+        "config/deploy.eros-api.yml": {"CORE"},
+        "services/eros-engine/eros-pilot-embedding-relay.mjs": {"CORE"},
+    }
+    for path, expected in cases.items():
+        assert intent._component_paths(path) == expected
+        surface = classify([path])
+        assert surface["core"] is True
+        assert surface["eros"] is False
+        assert surface["eros_config"] is False
+
+
 def test_migration_change_fails_closed_to_the_full_suite():
     surface = classify(["packages/db/prisma/migrations/20261016120000_x/migration.sql"])
     assert surface["database"] is True
