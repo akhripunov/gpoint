@@ -250,6 +250,50 @@ def test_layer7_release_tooling_builds_core_but_does_not_auto_apply():
     )
 
 
+def test_api_commit_cannot_bypass_approval_for_accumulated_infrastructure(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+
+    def commit(path, contents):
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(contents)
+        subprocess.run(["git", "-C", str(repo), "add", path], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "fixture"], check=True)
+        return subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+
+    production_baseline = commit("README.md", "baseline\n")
+    infra_commit = commit("config/deploy.yml", "infra change\n")
+    api_commit = commit("apps/api/src/messages.ts", "api change\n")
+    original_changed_paths = MODULE.changed_paths
+    monkeypatch.setattr(
+        MODULE, "changed_paths",
+        lambda before, sha: original_changed_paths(before, sha, repo=repo),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "native_release_intent.py", "--event", "push", "--ref", "refs/heads/main",
+        "--sha", api_commit, "--before", infra_commit,
+        "--infrastructure-baseline-sha", production_baseline,
+        "--actor", "akhripunov", "--triggering-actor", "akhripunov",
+        "--repository-owner", "akhripunov",
+    ])
+
+    assert MODULE.main() == 0
+    output = capsys.readouterr().out
+    assert "mode=DEPLOY" in output
+    assert "deploy=false" in output
+
+
+def test_main_push_without_verified_production_baseline_is_not_auto_applied():
+    assert not MODULE.push_deploy_authorized(
+        mode="DEPLOY", changed_paths={"apps/api/src/messages.ts"},
+        cumulative_infrastructure_change=True,
+    )
+
+
 def test_marked_layer7_scope_fix_builds_only_core_without_authorizing_apply():
     paths = {
         "scripts/native_release_intent.py",
@@ -293,6 +337,7 @@ def test_artifact_prepare_marker_routes_main_push_to_build_only(monkeypatch, cap
     monkeypatch.setattr(sys, "argv", [
         "native_release_intent.py", "--event", "push", "--ref", "refs/heads/main",
         "--sha", "a" * 40, "--before", "b" * 40,
+        "--infrastructure-baseline-sha", "c" * 40,
         "--actor", "akhripunov", "--triggering-actor", "akhripunov",
         "--repository-owner", "akhripunov", "--commit-message", "ME-36\nGPOINT-ARTIFACT-PREPARE",
     ])
@@ -425,6 +470,7 @@ def test_owner_main_push_remains_automatic_after_the_existing_tests_and_build(mo
     monkeypatch.setattr(sys, "argv", [
         "native_release_intent.py", "--event", "push", "--ref", "refs/heads/main",
         "--sha", "a" * 40, "--before", "b" * 40,
+        "--infrastructure-baseline-sha", "c" * 40,
         "--actor", "akhripunov", "--triggering-actor", "akhripunov",
         "--repository-owner", "akhripunov",
     ])

@@ -120,6 +120,7 @@ jobs:
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          predicate-quantifier: 'some-with-excludes'
           filters: |
             core:
               - 'apps/api/**'
@@ -177,6 +178,21 @@ jobs:
           upstream="$(cat services/eros-engine/upstream.sha)"
           [[ "$upstream" =~ ^[0-9a-f]{40}$ ]]
           echo "EROS_UPSTREAM_SHA=$upstream" >> "$GITHUB_ENV"
+      - name: Resolve verified production baseline for accumulated infrastructure scope
+        id: infrastructure_baseline
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          plan="$RUNNER_TEMP/gpoint-infrastructure-baseline.json"
+          python3 scripts/resolve_native_build_scope.py \
+            --candidate-sha "$CANDIDATE_SHA" --repository "$REPOSITORY" > "$plan"
+          baseline="$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("baseline_sha", "") if p.get("status") == "VERIFIED" else "")' "$plan")"
+          echo "sha=$baseline" >> "$GITHUB_OUTPUT"
       - name: Fail closed unless the event and complete path set allow a release
         id: intent
         env:
@@ -190,6 +206,7 @@ jobs:
           EVENT_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           MODE: ${{ inputs.mode || 'deploy' }}
+          INFRASTRUCTURE_BASELINE_SHA: ${{ steps.infrastructure_baseline.outputs.sha }}
           APPROVE_PRODUCTION: ${{ inputs.approve_production || false }}
           USE_PREPARED_IMAGES: ${{ inputs.use_prepared_images || false }}
         run: |
@@ -203,6 +220,7 @@ jobs:
           [[ "$MODE" == rollback ]] && args+=(--rollback)
           [[ "$APPROVE_PRODUCTION" == true ]] && args+=(--approve-production)
           [[ "$USE_PREPARED_IMAGES" == true ]] && args+=(--use-prepared-images)
+          [[ -n "$INFRASTRUCTURE_BASELINE_SHA" ]] && args+=(--infrastructure-baseline-sha "$INFRASTRUCTURE_BASELINE_SHA")
           python3 scripts/native_release_intent.py "${args[@]}" >> "$GITHUB_OUTPUT"
       - name: Seed pinned Go 1.25.3 in Actions tool cache
         if: matrix.suite == 'release-tooling'
@@ -240,12 +258,12 @@ jobs:
           ./scripts/check-kamal-configs.sh
           ./scripts/test-kamal-proxy-integration.sh
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-        if: matrix.suite == 'eros' && (steps.filter.outputs.eros_engine == 'true' || steps.filter.outputs.infrastructure == 'true' || steps.filter.outputs.database == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
+        if: matrix.suite == 'eros' && (steps.filter.outputs.eros_engine == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
         with:
           platforms: linux/amd64
       - name: Build stock Eros test image
         id: eros_test_image
-        if: matrix.suite == 'eros' && (steps.filter.outputs.eros_engine == 'true' || steps.filter.outputs.infrastructure == 'true' || steps.filter.outputs.database == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
+        if: matrix.suite == 'eros' && (steps.filter.outputs.eros_engine == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
           context: https://github.com/etherfunlab/eros-engine.git#${{ env.EROS_UPSTREAM_SHA }}
@@ -266,7 +284,7 @@ jobs:
           # PRs may read main's cache. Only runs on main export layers for releases.
           cache-to: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && 'type=gha,scope=gpoint-eros-test,mode=max,timeout=45s,ignore-error=true' || '' }}
       - name: Run stock Eros SQLx and synthetic conversation E2E
-        if: matrix.suite == 'eros' && (steps.filter.outputs.eros_engine == 'true' || steps.filter.outputs.infrastructure == 'true' || steps.filter.outputs.database == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
+        if: matrix.suite == 'eros' && (steps.filter.outputs.eros_engine == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
         run: |
           set -euo pipefail
           image="gpoint-eros:stock-$EROS_UPSTREAM_SHA"

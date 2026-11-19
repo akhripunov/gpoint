@@ -2,6 +2,7 @@
 
 import re
 import subprocess
+import json
 from pathlib import Path
 
 import yaml
@@ -24,6 +25,7 @@ def test_pinned_dorny_filters_cover_five_logical_components():
         "${{ github.event_name == 'pull_request' && "
         "github.event.pull_request.base.sha || github.event.before }}"
     )
+    assert step["with"]["predicate-quantifier"] == "some-with-excludes"
     assert "pull-requests" in workflow["jobs"]["tests"]["permissions"]
     assert {"core", "miniapp", "agata", "eros_engine", "eros_relay"} <= set(filters)
     expected_paths = {
@@ -37,6 +39,75 @@ def test_pinned_dorny_filters_cover_five_logical_components():
         assert path in filters[component]
     assert "services/eros-engine/eros-pilot-embedding-relay.mjs" not in filters["core"]
     assert "!services/eros-engine/eros-pilot-embedding-relay.mjs" in filters["eros_engine"]
+
+
+def _match_with_picomatch(filters, paths):
+    picomatch = next((ROOT / "node_modules/.pnpm").glob(
+        "picomatch@*/node_modules/picomatch"), None)
+    assert picomatch is not None, "repository-pinned picomatch dependency is required"
+    script = r'''const pm = require(process.argv[1]);
+const payload = JSON.parse(process.argv[2]);
+const [filters, paths] = payload;
+const matches = Object.fromEntries(Object.entries(filters).map(([name, patterns]) => {
+const positives = patterns.filter(pattern => !pattern.startsWith("!"));
+const excludes = patterns.filter(pattern => pattern.startsWith("!")).map(pattern => pattern.slice(1));
+return [name, paths.map(path => positives.some(pattern => pm(pattern)(path))
+  && !excludes.some(pattern => pm(pattern)(path)))];
+}));
+process.stdout.write(JSON.stringify(matches));'''
+    result = subprocess.run(
+        ["node", "-e", script, str(picomatch), json.dumps([filters, paths])],
+        check=True, capture_output=True, text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def test_all_five_component_filters_match_real_paths():
+    _workflow, _step, filters = _filters()
+    paths = [
+        "apps/api/src/messages.ts",
+        "apps/miniapp/src/main.tsx",
+        "services/agata/src/main.py",
+        "services/eros-engine/src/main.rs",
+        "services/eros-engine/eros-pilot-embedding-relay.mjs",
+    ]
+    matches = _match_with_picomatch(
+        {name: filters[name] for name in ("core", "miniapp", "agata", "eros_engine", "eros_relay")},
+        paths,
+    )
+    assert matches == {
+        "core": [True, False, False, False, False],
+        "miniapp": [False, True, False, False, False],
+        "agata": [False, False, True, False, False],
+        "eros_engine": [False, False, False, True, False],
+        "eros_relay": [False, False, False, False, True],
+    }
+
+
+def test_eros_engine_negative_globs_exclude_relay_and_configuration():
+    _workflow, _step, filters = _filters()
+    paths = [
+        "services/eros-engine/src/main.rs",
+        "services/eros-engine/eros-pilot-embedding-relay.mjs",
+        "services/eros-engine/eros-layer7-staging-model-config.toml",
+        "services/eros-engine/production.toml",
+    ]
+    matches = _match_with_picomatch({"eros_engine": filters["eros_engine"]}, paths)
+    assert matches["eros_engine"] == [True, False, False, False]
+
+
+def test_shared_dependencies_and_relay_kamal_config_match_intended_filters():
+    _workflow, _step, filters = _filters()
+    paths = ["packages/contracts/src/message.ts", "config/deploy.eros-relay.yml"]
+    matches = _match_with_picomatch(
+        {name: filters[name] for name in ("core", "miniapp", "eros_engine", "eros_relay", "infrastructure")},
+        paths,
+    )
+    assert matches == {
+        "core": [True, False], "miniapp": [True, False],
+        "eros_engine": [False, False], "eros_relay": [False, True],
+        "infrastructure": [False, True],
+    }
 
 
 def test_shared_build_dependencies_select_core_and_miniapp_filters():
@@ -78,6 +149,7 @@ def test_relay_kamal_change_is_not_core_and_never_auto_applies():
     assert intent.push_deploy_authorized(mode="DEPLOY", changed_paths={"apps/api/src/messages.ts"})
     deploy = _filters()[0]["jobs"]["deploy"]
     assert "production" in deploy["environment"]["name"]
+    assert intent._component_paths(relay_config) == {"EROS"}
 
 
 def test_eros_relay_kamal_config_stays_separate_from_engine_and_protected_config():
@@ -86,6 +158,7 @@ def test_eros_relay_kamal_config_stays_separate_from_engine_and_protected_config
     assert "config/deploy.eros.yml" not in filters["eros_relay"]
     assert "config/deploy.eros-relay.yml" in filters["infrastructure"]
     assert "config/deploy.layer7-staging.eros.yml" not in filters["infrastructure"]
+    assert filters["eros_engine"] != filters["eros_relay"]
 
 
 def test_eros_api_remains_loopback_only():

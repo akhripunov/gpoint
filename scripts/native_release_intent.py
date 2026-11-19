@@ -403,11 +403,12 @@ def is_infrastructure_change(changed_paths: set[str] | frozenset[str]) -> bool:
                for path in changed_paths)
 
 
-def push_deploy_authorized(*, mode: str, changed_paths: set[str] | frozenset[str]) -> bool:
+def push_deploy_authorized(*, mode: str, changed_paths: set[str] | frozenset[str],
+                           cumulative_infrastructure_change: bool = False) -> bool:
     """Require explicit dispatch approval before production infrastructure Apply."""
     # Production topology and release-control changes require an explicit
     # workflow_dispatch through the existing protected production Environment.
-    if is_infrastructure_change(changed_paths):
+    if cumulative_infrastructure_change or is_infrastructure_change(changed_paths):
         return False
     if mode == "DEPLOY":
         return True
@@ -892,6 +893,7 @@ def main() -> int:
     parser.add_argument("--rollback-eros", action="store_true")
     parser.add_argument("--use-prepared-images", action="store_true")
     parser.add_argument("--approve-production", action="store_true")
+    parser.add_argument("--infrastructure-baseline-sha", default="")
     args = parser.parse_args()
 
     try:
@@ -904,7 +906,19 @@ def main() -> int:
             paths = changed_paths(args.before, args.sha)
             mode = classify_push(event_name=args.event, ref=args.ref, changed_paths=paths,
                                  commit_message=args.commit_message)
-            deploy = push_deploy_authorized(mode=mode, changed_paths=paths)
+            cumulative_infrastructure_change = False
+            if args.ref == "refs/heads/main":
+                if not EXACT_SHA.fullmatch(args.infrastructure_baseline_sha or ""):
+                    # Without a verified production baseline the accumulated
+                    # infrastructure diff is unknown, so automatic Apply stops.
+                    cumulative_infrastructure_change = True
+                else:
+                    cumulative_paths = changed_paths(args.infrastructure_baseline_sha, args.sha)
+                    cumulative_infrastructure_change = is_infrastructure_change(cumulative_paths)
+            deploy = push_deploy_authorized(
+                mode=mode, changed_paths=paths,
+                cumulative_infrastructure_change=cumulative_infrastructure_change,
+            )
         elif args.event == "workflow_dispatch":
             owner = args.repository_owner.lower()
             if not owner or args.triggering_actor.lower() != owner:

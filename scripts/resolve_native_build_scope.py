@@ -197,7 +197,8 @@ def resolve_production_component_sources(deployments: list[dict], statuses_by_id
     if baseline is None:
         return {"status": "BOOTSTRAP_FULL", "deployment_id": identifier,
                 "reason": "successful_legacy_deployment_has_no_component_source_manifest"}
-    return {"status": "VERIFIED", "deployment_id": identifier, **baseline}
+    return {"status": "VERIFIED", "deployment_id": identifier,
+            "deployment_sha": target_sha, **baseline}
 
 
 def resolve_build_plan(repo: Path, candidate_sha: str, deployments: list[dict],
@@ -229,6 +230,7 @@ def resolve_build_plan(repo: Path, candidate_sha: str, deployments: list[dict],
     return {
         "status": "VERIFIED",
         "deployment_id": baseline["deployment_id"],
+        "baseline_sha": baseline["deployment_sha"],
         "manifest_sha256": baseline["manifest_sha256"],
         "baseline_sources": baseline["component_sources"],
         **plan,

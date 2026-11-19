@@ -171,9 +171,12 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         for name, suite in required_steps.items():
             self.assertIn(f"matrix.suite == '{suite}'", steps[name]["if"])
         eros = next(step for step in tests["steps"] if step.get("id") == "eros_test_image")
-        self.assertIn("steps.filter.outputs.infrastructure == 'true'", eros["if"])
-        self.assertIn("steps.filter.outputs.database == 'true'", eros["if"])
         self.assertIn("steps.filter.outputs.eros_engine == 'true'", eros["if"])
+        self.assertNotIn("steps.filter.outputs.infrastructure == 'true'", eros["if"])
+        self.assertNotIn("steps.filter.outputs.database == 'true'", eros["if"])
+        e2e = steps["Run stock Eros SQLx and synthetic conversation E2E"]
+        self.assertNotIn("steps.filter.outputs.infrastructure == 'true'", e2e["if"])
+        self.assertNotIn("steps.filter.outputs.database == 'true'", e2e["if"])
         relay = steps["Run Eros Relay unit tests"]
         self.assertIn("steps.filter.outputs.eros_relay == 'true'", relay["if"])
         self.assertIn("steps.filter.outputs.infrastructure == 'true'", relay["if"])
@@ -182,6 +185,17 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         for step in python:
             self.assertIn("unset DATABASE_URL SHADOW_DATABASE_URL", step["run"])
         self.assertIn("tests/test_layer7_mac_free_ssh.py", python[0]["run"])
+
+    def test_push_apply_gate_uses_verified_accumulated_production_baseline(self):
+        tests = self.workflow["jobs"]["tests"]
+        baseline = next(step for step in tests["steps"]
+                        if step.get("id") == "infrastructure_baseline")
+        intent = next(step for step in tests["steps"] if step.get("id") == "intent")
+        self.assertIn("resolve_native_build_scope.py", baseline["run"])
+        self.assertIn("baseline_sha", baseline["run"])
+        self.assertTrue(baseline["continue-on-error"])
+        self.assertIn("steps.infrastructure_baseline.outputs.sha", intent["env"]["INFRASTRUCTURE_BASELINE_SHA"])
+        self.assertIn("--infrastructure-baseline-sha", intent["run"])
 
     def test_main_push_runs_ci_build_and_kamal_production_jobs(self):
         triggers = self.workflow.get("on", self.workflow.get(True))

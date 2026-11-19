@@ -81,6 +81,7 @@ def test_latest_native_deployment_exposes_exact_component_baselines():
     assert baseline == {
         "status": "VERIFIED",
         "deployment_id": 200,
+        "deployment_sha": BASELINE,
         "manifest_sha256": MANIFEST_SHA,
         "component_sources": {"CORE": BASELINE, "AGATA": BASELINE, "MINIAPP": BASELINE,
                               "EROS": BASELINE},
