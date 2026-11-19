@@ -193,7 +193,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         intent = next(step for step in tests["steps"] if step.get("id") == "intent")
         self.assertIn("resolve_native_build_scope.py", baseline["run"])
         self.assertIn("baseline_sha", baseline["run"])
-        self.assertTrue(baseline["continue-on-error"])
+        self.assertNotIn("continue-on-error", baseline)
         self.assertIn("steps.infrastructure_baseline.outputs.sha", intent["env"]["INFRASTRUCTURE_BASELINE_SHA"])
         self.assertIn("--infrastructure-baseline-sha", intent["run"])
 
