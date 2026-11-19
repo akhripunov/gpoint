@@ -334,6 +334,7 @@ run is not current isolation evidence.
 | Live role topology and component manifest | `scripts/verify-kamal-production-baseline.py`, `scripts/write-kamal-production-manifest.py` | Kamal 2 app inventory and Docker inspect | **KEEP, reduce** — the adapters verify identities and per-component provenance absent from Kamal's required machine-readable output. |
 | Eros database backup, rehearsal and recovery | `scripts/eros-native-database.py` | PostgreSQL `pg_dump`/`pg_restore`, stock Eros SQLx migrations | **KEEP, reduce** — preserve isolated restore, ledger and recovery checks; remove duplicate orchestration only after equivalent integration proof. |
 | Standalone release readiness report | Retired `scripts/release-readiness.mjs` (71 LOC at baseline) | Native GitHub Deployment plus Runtime Verify | **DELETED** — no active workflow/package caller; historical audit remains in the archive. |
+| Dormant unified release v1 contract | `scripts/unified_release_v1/` (286 Python LOC plus metadata) | Native V5 workflow and current component adapters | **DELETED** — repository-wide search found no active import, workflow, package or test caller; its README and project metadata point only to retired `gpoint-prepare.yml` / `gpoint-deploy.yml`. |
 
 Measured against `3d680fa153fd6aebf786455d6f36d3b1a67cc78f` (current main at task
 start), using the Native workflow plus the unique `scripts/` files referenced
@@ -341,11 +342,11 @@ by it:
 
 | Measure | Main baseline | Current local candidate | Change |
 |---|---:|---:|---:|
-| Main controller + five control adapters (six paths) | 4,562 | 4,413 | −3.3% |
+| Main controller + five control adapters (six paths) | 4,562 | 4,412 | −3.3% |
 | Workflow LOC | 2,437 | 2,399 | −1.6% |
-| Referenced helper LOC | 5,439 | 5,120 | −5.9% |
-| Combined workflow + referenced scripts LOC | 7,876 | 7,519 | −4.5% |
-| Extended release/deploy/migration/backup inventory LOC | 12,200 | 11,944 | −2.1% |
+| Referenced helper LOC | 5,439 | 5,119 | −5.9% |
+| Combined workflow + referenced scripts LOC | 7,876 | 7,518 | −4.5% |
+| Extended release/deploy/migration/backup inventory LOC | 12,486 | 11,944 | −4.3% |
 | Referenced helper files | 21 | 19 | −2 |
 | Required test matrix runs | 4 | 2 | −50% |
 | Ordinary workflow named jobs | 3 | 3 | unchanged |
@@ -361,8 +362,8 @@ the exact executable set used by the earlier ME-62 count: the Native workflow,
 The extended inventory includes workflow and action files under
 `.github/workflows/` and `.github/actions/` whose names contain `release`,
 `deploy` or `layer7`, plus tracked `.py`, `.mjs`, `.js` and `.sh` files under
-`scripts/` whose names contain `release`, `deploy`, `rollback`, `migration`,
-`backup`, `kamal`, `native` or `layer7`. Test files (`*.test.*`, `test-*`,
+`scripts/` whose path contains `release`, or whose filename contains `deploy`,
+`rollback`, `migration`, `backup`, `kamal`, `native` or `layer7`. Test files (`*.test.*`, `test-*`,
 `test_*`, `*_test.py` and `_test.sh`) are excluded.
 This filename-based inventory is an upper bound, not a precise production-Apply
 LOC count. The referenced-helper count includes
@@ -580,7 +581,9 @@ recovery/transition paths. Отсутствие автоматического �
 | Rollback в `.github/workflows/gpoint-native-release.yml` | ACTIVE | Использует штатный production Environment Deployment текущего workflow SHA; после Runtime Verify записывает manifest SHA, выбранный runtime target SHA и source SHA всех компонентов в Environment URL. Компонентные версии и digests восстанавливаются раздельно из проверенного manifest. | `tests/test_kamal_native_automatic_release.py`, `tests/test_native_environment_deployment.py`, `tests/test_native_rollback_evidence.py`. | Сохранять exact-main/OWNER gates, native Environment lifecycle, manifest-bound runtime metadata, component identity и SUCCESS только после полного Verify. |
 | Docker lifecycle в `scripts/release-gpoint-vps-adapter.mjs` и cutover/recovery helpers | LEGACY / REQUIRED FOR TRANSITION OR RECOVERY | Для обычных Native app контейнеров заменено stock `kamal deploy --skip-push`, `kamal app stop` и `kamal rollback`. Остальные команды могут быть одноразовыми technical DB/backup или переходными операциями. | `tests/test_kamal_native_automatic_release.py`, `tests/test_kamal_cutover_owner.py`, `tests/test_gpoint_scheduled_backup.py`. | Удалять только после caller-by-caller доказательства, что операция управляет application lifecycle и stock Kamal эквивалентен; DB/backup technical actions не считать дублирующим app lifecycle. |
 
-На момент проверки не найден путь, который можно безопасно удалить безусловно.
+Удалён `scripts/unified_release_v1/`: активные callers отсутствуют, а оставшиеся
+ссылки указывали на workflows, удалённые 12.11.2026. Это локальное решение по
+подтверждённой инвентаризации, не меняющее текущие release gates.
 Финальная классификация runtime/production callers остаётся `PROD_NOT_VERIFIED`;
 таблица не утверждает, что старые файлы не используются вручную. Исторические
 procedures ниже текущей модели помечены отдельно и не являются рабочими

@@ -200,9 +200,16 @@ KNOWN_RETIRED_NON_RUNTIME_FILES = frozenset({
     "tests/test_release_linear.py",
     "tests/test_release_static_publication_v4.py",
     "tests/test_start_kamal_cutover_owner.py",
-    "tests/test_unified_release_v1.py",
     "scripts/network_retry.py",
     "scripts/verify-release-worker-compatibility.py",
+    "tests/test_unified_release_v1.py",
+    # Dormant v1 contract only referenced retired prepare/deploy workflows.
+    "scripts/unified_release_v1/README.md",
+    "scripts/unified_release_v1/__init__.py",
+    "scripts/unified_release_v1/check_sync.py",
+    "scripts/unified_release_v1/contract.json",
+    "scripts/unified_release_v1/core.py",
+    "scripts/unified_release_v1/project.json",
 })
 KNOWN_NON_RUNTIME_FILES = frozenset({
     ".github/actionlint.yaml",
