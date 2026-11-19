@@ -374,44 +374,6 @@ def test_exact_release_tooling_candidate_routes_to_artifact_prepare_without_mark
     ) == "ARTIFACT_PREPARE"
 
 
-def test_prepared_image_digest_gate_requires_exact_scope_and_immutable_digests():
-    assert MODULE.validate_prepared_image_digests(
-        ["CORE", "EROS"],
-        {"CORE": "sha256:" + "a" * 64, "EROS": "sha256:" + "b" * 64},
-    ) == {"CORE": "sha256:" + "a" * 64, "EROS": "sha256:" + "b" * 64}
-    for supplied in (
-        {"CORE": "sha256:" + "a" * 64},
-        {"CORE": "sha256:" + "a" * 64, "EROS": "latest"},
-        {"CORE": "sha256:" + "a" * 64, "EROS": "sha256:" + "b" * 64,
-         "MINIAPP": "sha256:" + "c" * 64},
-    ):
-        with pytest.raises(ValueError):
-            MODULE.validate_prepared_image_digests(["CORE", "EROS"], supplied)
-    with pytest.raises(ValueError, match="prepared build component scope is invalid"):
-        MODULE.validate_prepared_image_digests(["EROS_RELAY"], {"EROS_RELAY": "sha256:" + "a" * 64})
-
-
-def test_prepared_images_can_only_be_reused_by_exact_owner_approved_deploy():
-    assert MODULE.classify_dispatch(
-        ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
-        actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
-        approve_production=True, use_prepared_images=True,
-    ) == ("DEPLOY", True)
-    for changes, expected in (
-        ({"approve_production": False}, "INVALID_DEPLOY"),
-        ({"actor": "other"}, "INVALID_DEPLOY"),
-        ({"migration_rehearsal": True}, "INVALID_REHEARSAL"),
-        ({"rollback": True}, "INVALID_ROLLBACK"),
-    ):
-        args = dict(
-            ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
-            actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
-            approve_production=True, use_prepared_images=True,
-        )
-        args.update(changes)
-        assert MODULE.classify_dispatch(**args) == (expected, False)
-
-
 def test_agata_migration_and_unknown_schema_paths_remain_blocked_from_prisma_apply():
     for path in (
         "services/agata/migrations/versions/0013_new.py",

@@ -18,31 +18,6 @@ on:
         required: true
         default: false
         type: boolean
-      use_prepared_images:
-        description: Reuse exact GHCR digests from a successful GPOINT-ARTIFACT-PREPARE run for this SHA
-        required: true
-        default: false
-        type: boolean
-      prepared_run_id:
-        description: Run ID of the successful GPOINT-ARTIFACT-PREPARE run for this exact SHA
-        required: false
-        type: string
-      prepared_app_digest:
-        description: Prepared GHCR digest for CORE, when included in the candidate scope
-        required: false
-        type: string
-      prepared_agata_digest:
-        description: Prepared GHCR digest for AGATA, when included in the candidate scope
-        required: false
-        type: string
-      prepared_miniapp_digest:
-        description: Prepared GHCR digest for MINIAPP, when included in the candidate scope
-        required: false
-        type: string
-      prepared_eros_digest:
-        description: Prepared GHCR digest for EROS, when included in the candidate scope
-        required: false
-        type: string
       mode:
         description: 'deploy applies the candidate; rollback returns to a verified prior release'
         required: true
@@ -212,7 +187,6 @@ jobs:
           MODE: ${{ inputs.mode || 'deploy' }}
           INFRASTRUCTURE_BASELINE_SHA: ${{ steps.infrastructure_baseline.outputs.sha }}
           APPROVE_PRODUCTION: ${{ inputs.approve_production || false }}
-          USE_PREPARED_IMAGES: ${{ inputs.use_prepared_images || false }}
         run: |
           set -euo pipefail
           args=(--event "$EVENT_NAME" --ref "$EVENT_REF" --sha "$EVENT_SHA"
@@ -223,7 +197,6 @@ jobs:
           [[ -n "$EVENT_COMMIT_MESSAGE" ]] && args+=(--commit-message "$EVENT_COMMIT_MESSAGE")
           [[ "$MODE" == rollback ]] && args+=(--rollback)
           [[ "$APPROVE_PRODUCTION" == true ]] && args+=(--approve-production)
-          [[ "$USE_PREPARED_IMAGES" == true ]] && args+=(--use-prepared-images)
           [[ -n "$INFRASTRUCTURE_BASELINE_SHA" ]] && args+=(--infrastructure-baseline-sha "$INFRASTRUCTURE_BASELINE_SHA")
           python3 scripts/native_release_intent.py "${args[@]}" >> "$GITHUB_OUTPUT"
       - name: Resolve exact production component scope for manual Deploy
@@ -501,10 +474,10 @@ jobs:
       deployments: read
       actions: read
     outputs:
-      app_digest: ${{ steps.app.outputs.digest || steps.prepared.outputs.app_digest }}
-      agata_digest: ${{ steps.agata.outputs.digest || steps.prepared.outputs.agata_digest }}
-      miniapp_digest: ${{ steps.miniapp.outputs.digest || steps.prepared.outputs.miniapp_digest }}
-      eros_digest: ${{ steps.eros.outputs.digest || steps.prepared.outputs.eros_digest }}
+      app_digest: ${{ steps.app.outputs.digest }}
+      agata_digest: ${{ steps.agata.outputs.digest }}
+      miniapp_digest: ${{ steps.miniapp.outputs.digest }}
+      eros_digest: ${{ steps.eros.outputs.digest }}
       image_version: ${{ steps.image_version.outputs.image_version }}
       build_components: ${{ steps.build_scope.outputs.build_components }}
       baseline_mode: ${{ steps.build_scope.outputs.status }}
@@ -560,110 +533,18 @@ jobs:
         env:
           EROS_E2E: ${{ needs.tests.outputs.eros_e2e }}
         run: test "$EROS_E2E" = pass
-      - name: Validate exact prepared image digests
-        id: prepared
-        if: needs.tests.outputs.mode == 'DEPLOY' && inputs.use_prepared_images == true
-        env:
-          BUILD_COMPONENTS: ${{ steps.build_scope.outputs.build_components }}
-          PREPARED_APP_DIGEST: ${{ inputs.prepared_app_digest }}
-          PREPARED_AGATA_DIGEST: ${{ inputs.prepared_agata_digest }}
-          PREPARED_MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
-          PREPARED_EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
-        run: |
-          set -euo pipefail
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json, os, sys
-          from pathlib import Path
-          sys.path.insert(0, str(Path.cwd() / "scripts"))
-          from native_release_intent import validate_prepared_image_digests
-          components = json.loads(os.environ["BUILD_COMPONENTS"])
-          supplied = {component: os.environ[name] for component, name in {
-              "CORE": "PREPARED_APP_DIGEST", "AGATA": "PREPARED_AGATA_DIGEST",
-              "MINIAPP": "PREPARED_MINIAPP_DIGEST", "EROS": "PREPARED_EROS_DIGEST",
-          }.items() if os.environ[name]}
-          values = validate_prepared_image_digests(components, supplied)
-          outputs = {"CORE": "app_digest", "AGATA": "agata_digest",
-                     "MINIAPP": "miniapp_digest", "EROS": "eros_digest"}
-          for component, digest in values.items():
-              print(f"{outputs[component]}={digest}")
-          PY
-      - name: Reject unused prepared image digest inputs
-        if: needs.tests.outputs.mode == 'DEPLOY' && inputs.use_prepared_images != true
-        env:
-          PREPARED_INPUTS: ${{ inputs.prepared_run_id }},${{ inputs.prepared_app_digest }},${{ inputs.prepared_agata_digest }},${{ inputs.prepared_miniapp_digest }},${{ inputs.prepared_eros_digest }}
-        run: |
-          test -z "${PREPARED_INPUTS//,/}" || {
-            echo 'prepared image inputs require use_prepared_images=true' >&2; exit 1;
-          }
-      - name: Verify successful prepared run and its exact component digests
-        id: prepared_run
-        if: needs.tests.outputs.mode == 'DEPLOY' && inputs.use_prepared_images == true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PREPARED_RUN_ID: ${{ inputs.prepared_run_id }}
-          CANDIDATE_SHA: ${{ github.sha }}
-          BUILD_COMPONENTS: ${{ steps.build_scope.outputs.build_components }}
-          PREPARED_APP_DIGEST: ${{ inputs.prepared_app_digest }}
-          PREPARED_AGATA_DIGEST: ${{ inputs.prepared_agata_digest }}
-          PREPARED_MINIAPP_DIGEST: ${{ inputs.prepared_miniapp_digest }}
-          PREPARED_EROS_DIGEST: ${{ inputs.prepared_eros_digest }}
-        run: |
-          set -euo pipefail
-          [[ "$PREPARED_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'prepared_run_id must be a positive run ID' >&2; exit 1; }
-          run_json="$RUNNER_TEMP/prepared-run.json"
-          jobs_json="$RUNNER_TEMP/prepared-jobs.json"
-          commit_json="$RUNNER_TEMP/prepared-commit.json"
-          logs="$RUNNER_TEMP/prepared-build-logs.txt"
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREPARED_RUN_ID" > "$run_json"
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREPARED_RUN_ID/jobs?per_page=100" > "$jobs_json"
-          gh api "repos/$GITHUB_REPOSITORY/commits/$CANDIDATE_SHA" > "$commit_json"
-          build_job_id="$(python3 - "$jobs_json" <<'PY'
-          import json, sys
-          jobs = json.load(open(sys.argv[1], encoding='utf-8')).get('jobs', [])
-          matches = [job for job in jobs if job.get('name') == 'Build and publish immutable images']
-          if len(matches) != 1 or not isinstance(matches[0].get('id'), int):
-              raise SystemExit('prepared run must contain exactly one Native Build job')
-          print(matches[0]['id'])
-          PY
-          )"
-          curl --fail --silent --show-error --location \
-            --header "Authorization: Bearer $GH_TOKEN" \
-            --header 'Accept: application/vnd.github+json' \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/jobs/$build_job_id/logs" \
-            --output "$logs"
-          python3 scripts/verify_native_prepared_run.py \
-            --run "$run_json" --jobs "$jobs_json" --commit "$commit_json" --logs "$logs" \
-            --candidate-sha "$CANDIDATE_SHA" --run-id "$PREPARED_RUN_ID" \
-            --output "$GITHUB_OUTPUT" \
-            --digests "$(python3 - <<'PY'
-          import json, os
-          supplied = {'CORE': 'PREPARED_APP_DIGEST', 'AGATA': 'PREPARED_AGATA_DIGEST',
-                      'MINIAPP': 'PREPARED_MINIAPP_DIGEST', 'EROS': 'PREPARED_EROS_DIGEST'}
-          components = json.loads(os.environ['BUILD_COMPONENTS'])
-          print(json.dumps({component: os.environ[name] for component, name in supplied.items()
-                            if component in components and os.environ[name]}, sort_keys=True))
-          PY
-          )"
       - name: Select exact immutable image version
         id: image_version
         env:
-          USE_PREPARED_IMAGES: ${{ inputs.use_prepared_images }}
-          PREPARED_RUN_ID: ${{ inputs.prepared_run_id }}
-          PREPARED_IMAGE_VERSION: ${{ steps.prepared_run.outputs.image_version }}
           CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
           CURRENT_RUN_ID: ${{ github.run_id }}
           CURRENT_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          if [[ "$USE_PREPARED_IMAGES" == true ]]; then
-            [[ "$PREPARED_RUN_ID" =~ ^[1-9][0-9]*$ ]]
-            [[ "$PREPARED_IMAGE_VERSION" =~ ^${CANDIDATE_SHA}-${PREPARED_RUN_ID}-[1-9][0-9]*$ ]] || {
-              echo 'prepared image version does not match candidate SHA and prepared run ID' >&2; exit 1;
-            }
-            image_version="$PREPARED_IMAGE_VERSION"
-          else
-            image_version="${CANDIDATE_SHA}-${CURRENT_RUN_ID}-${CURRENT_RUN_ATTEMPT}"
-          fi
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CURRENT_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$CURRENT_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          image_version="${CANDIDATE_SHA}-${CURRENT_RUN_ID}-${CURRENT_RUN_ATTEMPT}"
           printf 'image_version=%s\n' "$image_version" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
         if: steps.build_scope.outputs.build_components != '[]'
@@ -679,7 +560,7 @@ jobs:
         if: contains(fromJSON(steps.build_scope.outputs.build_components), 'CORE') || contains(fromJSON(steps.build_scope.outputs.build_components), 'MINIAPP')
         run: python3 scripts/docker_dependency_manifests.py "$RUNNER_TEMP/dependency-manifests"
       - name: Build and publish immutable runtime image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'CORE') && inputs.use_prepared_images != true
+        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'CORE')
         id: app
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -702,7 +583,7 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Build and publish immutable Mini App image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'MINIAPP') && inputs.use_prepared_images != true
+        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'MINIAPP')
         id: miniapp
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -725,7 +606,7 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Build and publish immutable AGATA image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'AGATA') && inputs.use_prepared_images != true
+        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'AGATA')
         id: agata
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -745,7 +626,7 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Build and publish stock Eros image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'EROS') && inputs.use_prepared_images != true
+        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'EROS')
         id: eros
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -773,10 +654,10 @@ jobs:
         if: steps.build_scope.outputs.build_components != '[]'
         env:
           CANDIDATE_SHA: ${{ github.sha }}
-          APP_DIGEST: ${{ steps.app.outputs.digest || steps.prepared.outputs.app_digest }}
-          AGATA_DIGEST: ${{ steps.agata.outputs.digest || steps.prepared.outputs.agata_digest }}
-          MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest || steps.prepared.outputs.miniapp_digest }}
-          EROS_DIGEST: ${{ steps.eros.outputs.digest || steps.prepared.outputs.eros_digest }}
+          APP_DIGEST: ${{ steps.app.outputs.digest }}
+          AGATA_DIGEST: ${{ steps.agata.outputs.digest }}
+          MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}
+          EROS_DIGEST: ${{ steps.eros.outputs.digest }}
           BUILD_COMPONENTS: ${{ steps.build_scope.outputs.build_components }}
         run: |
           python3 - <<'PY'
@@ -801,11 +682,10 @@ jobs:
         env:
           CANDIDATE_SHA: ${{ github.sha }}
           IMAGE_VERSION: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          APP_DIGEST: ${{ steps.app.outputs.digest || steps.prepared.outputs.app_digest }}
-          AGATA_DIGEST: ${{ steps.agata.outputs.digest || steps.prepared.outputs.agata_digest }}
-          MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest || steps.prepared.outputs.miniapp_digest }}
-          EROS_DIGEST: ${{ steps.eros.outputs.digest || steps.prepared.outputs.eros_digest }}
-          REUSE_PREPARED_IMAGES: ${{ inputs.use_prepared_images || false }}
+          APP_DIGEST: ${{ steps.app.outputs.digest }}
+          AGATA_DIGEST: ${{ steps.agata.outputs.digest }}
+          MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}
+          EROS_DIGEST: ${{ steps.eros.outputs.digest }}
           BUILD_COMPONENTS: ${{ steps.build_scope.outputs.build_components }}
         run: |
           set -euo pipefail
@@ -818,10 +698,8 @@ jobs:
             esac
             docker pull --platform linux/amd64 "$image@$digest"
             test "$(docker image inspect --format '{{index .Config.Labels "service"}}' "$image@$digest")" = "$expected_service"
-            if [[ "$REUSE_PREPARED_IMAGES" != true ]]; then
-              docker pull --platform linux/amd64 "$image:$IMAGE_VERSION"
-              docker image inspect "$image:$IMAGE_VERSION" --format '{{json .RepoDigests}}' | grep -F "$image@$digest" >/dev/null
-            fi
+            docker pull --platform linux/amd64 "$image:$IMAGE_VERSION"
+            docker image inspect "$image:$IMAGE_VERSION" --format '{{json .RepoDigests}}' | grep -F "$image@$digest" >/dev/null
             docker image inspect --format '{{json .}}' "$image@$digest" > "$RUNNER_TEMP/$role-image.json"
             docker buildx imagetools inspect --format '{{json .SBOM.SPDX}}' \
               "$image@$digest" > "$RUNNER_TEMP/$role-sbom.json"

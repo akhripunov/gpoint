@@ -299,7 +299,10 @@ baselines and deploy targets. Build publishes that image at most once per run;
 a Relay-only change does not redeploy Core. The other images are built only when
 their component scope requires them. Buildx publishes the exact candidate SHA
 with immutable digests, SBOM and provenance; Deploy verifies read-back and uses
-those digests without rebuilding.
+those digests without rebuilding. A Native production dispatch cannot reuse an
+image from another run; its images are built and verified inside that same run.
+The separately authorized Layer7 staging workflow retains its own
+provenance-verified prepared-image handoff.
 
 `dorny/paths-filter` supplies declarative path classification for five
 components. The build-scope adapter compares each path set with its recorded
@@ -340,13 +343,14 @@ run is not current isolation evidence.
 | Function | Current code | Native mechanism | Decision |
 |---|---|---|---|
 | Component path filters | `dorny/paths-filter`; retired `native_change_surface.py` (131 LOC at baseline) | Git and the pinned `dorny/paths-filter` action | **REPLACE / DELETE** — declarative filters now supply the component paths. |
-| Event admission and exact-scope fail-closed rules | `scripts/native_release_intent.py` (947 LOC in this checkout) | GitHub event/dispatch context and workflow conditions | **KEEP, reduce** — policy checks still reject unauthorized events, unsafe paths and migration scope; current helper is larger than the minimal-adapter target. |
+| Event admission and exact-scope fail-closed rules | `scripts/native_release_intent.py` (925 LOC in this checkout) | GitHub event/dispatch context and workflow conditions | **KEEP, reduce** — policy checks still reject unauthorized events, unsafe paths and migration scope; current helper is larger than the minimal-adapter target. |
 | Installed component source baselines | `scripts/resolve_native_build_scope.py`, `scripts/resolve_native_environment_deployment.py` | GitHub Deployments API, stock Kamal app commands and Docker inspect | **KEEP, reduce** — native sources provide facts, these adapters bind component identity and exact-SHA evidence. |
 | Build and OCI provenance | Build steps plus `scripts/verify_native_image_readback.py`, `verify_native_image_attestation.py`, `verify_native_eros_image.py` | Docker Buildx, GHCR digest, SBOM and GitHub artifact provenance | **KEEP** — retain only digest/source/platform/provenance checks not supplied by the native outputs. |
+| Native cross-run prepared-image reuse | Dispatch inputs, prepared-run API/log verification and digest fallback outputs | Buildx in the same Native release run | **DELETE** — production Build always creates and reads back each required image in its own exact-SHA run; Layer7 staging retains separate image provenance checks. |
 | Migration admission and parity | `scripts/prisma_migration_release_plan.py`, `scripts/verify-kamal-migration-parity.py` | Prisma, SQLx, isolated PostgreSQL and Alembic tools | **KEEP, reduce** — stock tools execute migrations; exact approval, checksum and compatibility boundaries remain custom. |
 | Live role topology and component manifest | `scripts/verify-kamal-production-baseline.py`, `scripts/write-kamal-production-manifest.py` | Kamal 2 app inventory and Docker inspect | **KEEP, reduce** — the adapters verify identities and per-component provenance absent from Kamal's required machine-readable output. |
 | Eros database backup, rehearsal and recovery | `scripts/eros-native-database.py` | PostgreSQL `pg_dump`/`pg_restore`, stock Eros SQLx migrations | **KEEP, reduce** — preserve isolated restore, ledger and recovery checks; remove duplicate orchestration only after equivalent integration proof. |
-| Standalone release readiness report | `scripts/release-readiness.mjs` (71 LOC) | Native GitHub Deployment plus Runtime Verify | **DELETE** — no active workflow/package caller; historical audit remains in the archive. |
+| Standalone release readiness report | Retired `scripts/release-readiness.mjs` (71 LOC at baseline) | Native GitHub Deployment plus Runtime Verify | **DELETED** — no active workflow/package caller; historical audit remains in the archive. |
 
 Measured against `3d680fa153fd6aebf786455d6f36d3b1a67cc78f` (current main at task
 start), using the Native workflow plus the unique `scripts/` files referenced
@@ -354,12 +358,12 @@ by it:
 
 | Measure | Main baseline | Current local candidate | Change |
 |---|---:|---:|---:|
-| Main controller + five control adapters (six paths) | 4,562 | 4,596 | +0.7% |
-| Workflow LOC | 2,437 | 2,558 | +5.0% |
-| Referenced helper LOC | 5,439 | 5,352 | −1.6% |
-| Combined workflow + referenced scripts LOC | 7,876 | 7,910 | +0.4% |
-| Extended release/deploy/migration/backup inventory LOC | 12,486 | 12,449 | −0.3% |
-| Referenced helper files | 21 | 20 | −1 |
+| Main controller + five control adapters (six paths) | 4,562 | 4,452 | −2.4% |
+| Workflow LOC | 2,437 | 2,436 | −0.04% |
+| Referenced helper LOC | 5,439 | 5,122 | −5.8% |
+| Combined workflow + referenced scripts LOC | 7,876 | 7,558 | −4.0% |
+| Extended release/deploy/migration/backup inventory LOC | 12,486 | 12,305 | −1.5% |
+| Referenced helper files | 21 | 19 | −2 |
 | Required test matrix runs | 4 | 2 | −50% |
 | Ordinary workflow named jobs | 3 | 3 | unchanged |
 | Ordinary release wall time | not measured | not measured | pending hosted exact-SHA run |
@@ -376,11 +380,12 @@ The extended inventory includes workflow and action files under
 This filename-based inventory is an upper bound, not a precise production-Apply
 LOC count. The referenced-helper count includes
 workflow-invoked CI validation scripts, so that combined figure is an upper
-bound for production Apply code. The matrix consolidation cuts redundant
-runners and PostgreSQL services in half, and `native_change_surface.py` was
-replaced with declarative filters. None of the code inventories meets the
-required 50% reduction; the main-controller inventory is slightly higher than
-baseline. Release
+bound for production Apply code. The Native cross-run digest reuse adapter was
+removed; production dispatch now builds the required images in the same run.
+The matrix consolidation cuts redundant runners and PostgreSQL services in
+half, and `native_change_surface.py` was replaced with declarative filters.
+The six-path inventory is down 2.4% and the combined upper bound is down 4.0%;
+neither approaches the required 50% reduction. Release
 duration, selective GHCR image counts and deploy-target counts still need exact
 hosted/staging evidence. This status must remain incomplete until the code
 reduction and required acceptance evidence are achieved.

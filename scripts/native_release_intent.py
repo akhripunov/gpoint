@@ -554,37 +554,17 @@ def classify_push(*, event_name: str, ref: str,
     return "DEPLOY"
 
 
-def validate_prepared_image_digests(build_components: list[str],
-                                    digests: dict[str, str]) -> dict[str, str]:
-    """Require one immutable OCI digest for each, and only each, built image."""
-    allowed = set(COMPONENT_IMAGES.values())
-    if (not isinstance(build_components, list) or not build_components
-            or any(not isinstance(component, str) or component not in allowed
-                   for component in build_components)
-            or len(build_components) != len(set(build_components))):
-        raise ValueError("prepared build component scope is invalid")
-    if not isinstance(digests, dict) or set(digests) != set(build_components):
-        raise ValueError("prepared image digest set does not match build component scope")
-    if any(not isinstance(digest, str) or not EXACT_DIGEST.fullmatch(digest)
-           for digest in digests.values()):
-        raise ValueError("prepared image digest is not immutable")
-    return {component: digests[component] for component in sorted(digests)}
-
-
 def classify_dispatch(*, ref: str, candidate_sha: str, github_sha: str, actor: str,
                       repository_owner: str, migration_rehearsal: bool,
                       approve_production: bool,
                       rollback: bool = False,
-                      rollback_eros: bool = False,
-                      use_prepared_images: bool = False) -> tuple[str, bool]:
+                      rollback_eros: bool = False) -> tuple[str, bool]:
     if rollback_eros and not rollback:
         return "INVALID_ROLLBACK", False
     exact = bool(re.fullmatch(r"[0-9a-f]{40}", candidate_sha)) and candidate_sha == github_sha
     owner = bool(repository_owner) and actor.lower() == repository_owner.lower()
-    if rollback and (migration_rehearsal or use_prepared_images):
+    if rollback and migration_rehearsal:
         return "INVALID_ROLLBACK", False
-    if migration_rehearsal and use_prepared_images:
-        return "INVALID_REHEARSAL", False
     if rollback:
         if ref == "refs/heads/main" and exact and owner and approve_production:
             # A rollback runs inside the protected Deploy job as a mode, so the
@@ -888,7 +868,6 @@ def main() -> int:
     parser.add_argument("--migration-rehearsal", action="store_true")
     parser.add_argument("--rollback", action="store_true")
     parser.add_argument("--rollback-eros", action="store_true")
-    parser.add_argument("--use-prepared-images", action="store_true")
     parser.add_argument("--approve-production", action="store_true")
     parser.add_argument("--infrastructure-baseline-sha", default="")
     args = parser.parse_args()
@@ -927,7 +906,6 @@ def main() -> int:
                 approve_production=args.approve_production,
                 rollback=args.rollback,
                 rollback_eros=args.rollback_eros,
-                use_prepared_images=args.use_prepared_images,
             )
         else:
             mode, deploy = "NO_DEPLOY", False

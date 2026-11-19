@@ -40,50 +40,39 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("inputs.approve_layer7_staging == true", staging["if"])
         self.assertNotIn("GPOINT_KAMAL_HOST", staging.get("env", {}))
 
-    def test_prepared_artifact_build_has_no_deploy_authority_and_deploy_reuses_exact_digests(self):
+    def test_native_dispatch_has_no_cross_run_prebuilt_image_inputs(self):
         events = self.workflow.get("on", self.workflow.get(True))
         inputs = events["workflow_dispatch"]["inputs"]
-        self.assertEqual(inputs["use_prepared_images"]["type"], "boolean")
-        self.assertTrue(all(inputs[name]["type"] == "string" for name in (
-            "prepared_app_digest", "prepared_agata_digest",
-            "prepared_miniapp_digest", "prepared_eros_digest",
-        )))
-        self.assertEqual(inputs["prepared_run_id"]["type"], "string")
+        self.assertFalse(set(inputs) & {
+            "use_prepared_images", "prepared_run_id", "prepared_app_digest",
+            "prepared_agata_digest", "prepared_miniapp_digest", "prepared_eros_digest",
+        })
         build = self.workflow["jobs"]["build"]
         self.assertNotIn("environment", build)
         self.assertNotEqual(build["permissions"].get("deployments"), "write")
         steps = build["steps"]
-        prepared = next(step for step in steps if step.get("id") == "prepared")
-        self.assertIn("inputs.use_prepared_images == true", prepared["if"])
-        self.assertIn("validate_prepared_image_digests", prepared["run"])
-        verify_prepared_run = next(step for step in steps if "Verify successful prepared run" in step.get("name", ""))
-        self.assertIn("actions/runs/$PREPARED_RUN_ID", verify_prepared_run["run"])
-        self.assertIn("actions/jobs/$build_job_id/logs", verify_prepared_run["run"])
-        self.assertIn("/commits/$CANDIDATE_SHA", verify_prepared_run["run"])
-        self.assertIn("verify_native_prepared_run.py", verify_prepared_run["run"])
+        self.assertFalse(any(step.get("id") in {"prepared", "prepared_run"} for step in steps))
+        for image_step in (step for step in steps if step.get("uses", "").startswith("docker/build-push-action@")):
+            self.assertNotIn("use_prepared_images", image_step.get("if", ""))
         readback = next(step for step in steps if step.get("id") == "image_readback")
-        self.assertIn("REUSE_PREPARED_IMAGES", readback["env"])
-        self.assertIn('if [[ "$REUSE_PREPARED_IMAGES" != true ]]', readback["run"])
+        self.assertNotIn("REUSE_PREPARED_IMAGES", readback["env"])
+        self.assertIn('docker pull --platform linux/amd64 "$image:$IMAGE_VERSION"', readback["run"])
         deploy = self.workflow["jobs"]["deploy"]
         self.assertIn("always()", deploy["if"])
 
-    def test_prepared_run_image_version_flows_from_build_run_through_kamal_deploy(self):
+    def test_native_image_version_is_bound_to_its_current_build_run(self):
         build = self.workflow["jobs"]["build"]
         deploy = self.workflow["jobs"]["deploy"]
         version_step = next((step for step in build["steps"]
                              if step.get("id") == "image_version"), None)
-        verify_step = next((step for step in build["steps"]
-                            if step.get("id") == "prepared_run"), None)
         self.assertIsNotNone(version_step)
-        self.assertIsNotNone(verify_step)
-        self.assertIn("steps.prepared_run.outputs.image_version", version_step["env"]["PREPARED_IMAGE_VERSION"])
-        self.assertIn("inputs.prepared_run_id", version_step["env"]["PREPARED_RUN_ID"])
-        self.assertIn("inputs.candidate_sha", version_step["env"]["CANDIDATE_SHA"])
-        self.assertIn("PREPARED_IMAGE_VERSION", version_step["run"])
-        self.assertIn("PREPARED_RUN_ID", version_step["run"])
+        self.assertEqual(
+            version_step["env"]["CANDIDATE_SHA"],
+            "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}",
+        )
+        self.assertNotIn("PREPARED", version_step["env"])
+        self.assertNotIn("PREPARED", version_step["run"])
         self.assertEqual(build["outputs"]["image_version"], "${{ steps.image_version.outputs.image_version }}")
-        self.assertIn("--output", verify_step["run"])
-        self.assertIn("prepared-build-logs.txt", verify_step["run"])
         self.assertIn("${CURRENT_RUN_ID}", version_step["run"])
         self.assertIn("${CURRENT_RUN_ATTEMPT}", version_step["run"])
         self.assertEqual(deploy["env"]["IMAGE_VERSION"], "${{ needs.build.outputs.image_version }}")
@@ -101,19 +90,16 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(action["with"]["scoped_image_version"],
                          "${{ needs.build.outputs.image_version }}")
 
-    def test_image_version_selection_step_accepts_only_matching_prepared_sha_and_run(self):
+    def test_image_version_selection_step_uses_current_candidate_run_identity(self):
         version_step = next(step for step in self.workflow["jobs"]["build"]["steps"]
                             if step.get("id") == "image_version")
         candidate = "a" * 40
 
-        def run_step(*, use_prepared, prepared_run_id, prepared_image_version):
+        def run_step():
             with tempfile.TemporaryDirectory() as directory:
                 output = Path(directory) / "github-output"
                 env = os.environ.copy()
                 env.update({
-                    "USE_PREPARED_IMAGES": str(use_prepared).lower(),
-                    "PREPARED_RUN_ID": str(prepared_run_id),
-                    "PREPARED_IMAGE_VERSION": prepared_image_version,
                     "CANDIDATE_SHA": candidate,
                     "CURRENT_RUN_ID": "9000",
                     "CURRENT_RUN_ATTEMPT": "3",
@@ -123,17 +109,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
                                         env=env, text=True, capture_output=True, check=False)
                 return result, output.read_text() if output.exists() else ""
 
-        result, output = run_step(use_prepared=True, prepared_run_id="1234",
-                                  prepared_image_version=f"{candidate}-1234-2")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(output, f"image_version={candidate}-1234-2\n")
-        for run_id, image_version in (("5678", f"{candidate}-1234-2"),
-                                      ("1234", f"{'b' * 40}-1234-2")):
-            result, _ = run_step(use_prepared=True, prepared_run_id=run_id,
-                                 prepared_image_version=image_version)
-            self.assertNotEqual(result.returncode, 0)
-        result, output = run_step(use_prepared=False, prepared_run_id="",
-                                  prepared_image_version="")
+        result, output = run_step()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(output, f"image_version={candidate}-9000-3\n")
 
