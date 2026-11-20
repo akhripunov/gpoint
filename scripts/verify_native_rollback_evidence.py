@@ -13,25 +13,14 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
 
+from native_release_intent import ALL_COMPONENT_ROLES, ROLE_REPOSITORIES
+
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
-ROLE_IMAGES = {
-    "gpoint-core-api": "core",
-    "gpoint-core-worker": "core",
-    "gpoint-core-bot": "core",
-    "gpoint-agata-api": "agata",
-    "gpoint-agata-memory-worker": "agata",
-    "gpoint-miniapp-web": "miniapp",
-    "gpoint-eros-pilot-engine": "eros",
-    "gpoint-eros-relay-relay": "eros_relay",
-}
-REPOSITORIES = {
-    "core": "ghcr.io/akhripunov/gpoint-runtime",
-    "agata": "ghcr.io/akhripunov/gpoint-agata-runtime",
-    "miniapp": "ghcr.io/akhripunov/gpoint-miniapp",
-    "eros": "ghcr.io/akhripunov/gpoint-eros",
-    "eros_relay": "ghcr.io/akhripunov/gpoint-runtime",
-}
+ROLE_IMAGES = {role: component.lower()
+               for component, roles in ALL_COMPONENT_ROLES.items() for role in roles}
+REPOSITORIES = {component.lower(): ROLE_REPOSITORIES[roles[0]]
+                for component, roles in ALL_COMPONENT_ROLES.items()}
 
 
 def _fail(message: str) -> None:

@@ -2,8 +2,10 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 SPEC = importlib.util.spec_from_file_location(
     "rollback_evidence", ROOT / "scripts/verify_native_rollback_evidence.py"
 )
@@ -79,6 +81,20 @@ def evidence():
     }
     jobs = [{"name": "Build and publish immutable images", "conclusion": "success"}]
     return deployment, [status], run, jobs, raw
+
+
+def test_rollback_role_matrix_uses_native_release_component_inventory():
+    from native_release_intent import ALL_COMPONENT_ROLES, ROLE_REPOSITORIES
+
+    assert MODULE.ROLE_IMAGES == {
+        role: component.lower()
+        for component, roles in ALL_COMPONENT_ROLES.items()
+        for role in roles
+    }
+    assert MODULE.REPOSITORIES == {
+        component.lower(): ROLE_REPOSITORIES[roles[0]]
+        for component, roles in ALL_COMPONENT_ROLES.items()
+    }
 
 
 def mixed_component_evidence():
