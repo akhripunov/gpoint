@@ -38,11 +38,6 @@ def test_approved_prisma_apply_is_inside_the_protected_deploy_before_kamal():
     assert '"$BASELINE_AGATA_HEAD" "$EXPECTED_ROLE_IDENTITIES_B64" "$EROS_DIGEST" "$expected_eros_upstream" "$EROS_RELAY_DIGEST" <<\'REMOTE\'' in verify["run"]
     assert set(jobs) == {"tests", "build", "deploy"}
     assert "ARTIFACT_PREPARE" not in jobs["deploy"]["if"]
-    staging = yaml.safe_load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text())["jobs"]["layer7_staging"]
-    assert "needs" not in staging
-    assert staging["environment"]["name"] == "layer7-staging"
-    assert "production" not in staging["environment"].values()
-    assert "GPOINT_KAMAL_HOST" not in staging.get("env", {})
 
 
 def test_prisma_apply_never_changes_agata_migrations_or_rolls_back_database():
@@ -73,7 +68,7 @@ def test_prisma_migration_plan_and_apply_remain_exact_sha_and_environment_scoped
     assert eros["if"].startswith("needs.tests.outputs.mode == 'DEPLOY'")
 
 
-def test_layer7_job_has_no_old_production_host_or_ssh_environment():
+def test_production_job_reads_host_and_ssh_from_secrets():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     deploy = workflow["jobs"]["deploy"]
     assert "GPOINT_PRODUCTION_HOST" not in deploy["env"]

@@ -1,4 +1,5 @@
 import unittest
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -22,7 +23,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         paths = [token for token in step["run"].split() if token.startswith("tests/")]
         self.assertEqual(len(paths), len(set(paths)), "duplicate test paths repeat work in the mandatory CI suite")
 
-    def test_pipeline_has_release_gate_and_one_isolated_rehearsal_job(self):
+    def test_pipeline_has_release_gate_and_protected_migration_rehearsal(self):
         jobs = self.workflow["jobs"]
         self.assertEqual(set(jobs), {"tests", "build", "deploy"})
         rollback = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())["jobs"]["deploy"]
@@ -40,13 +41,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(jobs["build"]["needs"], ["tests"])
         self.assertEqual(jobs["deploy"]["needs"], ["tests", "build"])
         self.assertIn("outputs.mode == 'DEPLOY'", jobs["build"]["if"])
-        self.assertIn("outputs.mode == 'ARTIFACT_PREPARE'", jobs["build"]["if"])
-        staging = yaml.safe_load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text())["jobs"]["layer7_staging"]
-        self.assertNotIn("needs", staging)
-        self.assertEqual(staging["environment"]["name"], "layer7-staging")
-        self.assertIn("inputs.deploy_layer7_staging == true", staging["if"])
-        self.assertIn("inputs.approve_layer7_staging == true", staging["if"])
-        self.assertNotIn("GPOINT_KAMAL_HOST", staging.get("env", {}))
+        self.assertIn("github.event_name == 'pull_request'", jobs["build"]["if"])
+        self.assertNotIn("ARTIFACT_PREPARE", jobs["build"]["if"])
 
     def test_native_dispatch_has_no_cross_run_prebuilt_image_inputs(self):
         events = self.workflow.get("on", self.workflow.get(True))
@@ -119,12 +115,12 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(output, f"image_version={candidate}-9000-3\n")
 
-    def test_artifact_prepare_marker_is_passed_to_the_fail_closed_intent_classifier(self):
+    def test_legacy_release_marker_is_passed_to_the_fail_closed_intent_classifier(self):
         steps = self.workflow["jobs"]["tests"]["steps"]
         intent = next(step for step in steps if step.get("id") == "intent")
         self.assertEqual(intent["env"]["EVENT_COMMIT_MESSAGE"], "${{ github.event.head_commit.message || '' }}")
         self.assertIn("--commit-message", intent["run"])
-        self.assertIn("ARTIFACT_PREPARE", self.workflow["jobs"]["build"]["if"])
+        self.assertNotIn("ARTIFACT_PREPARE", self.workflow["jobs"]["build"]["if"])
 
     def test_required_checks_cover_release_tooling_and_eros(self):
         self.assertEqual(self.workflow["concurrency"], {
@@ -144,7 +140,6 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(tests["outputs"], {
             "mode": "${{ steps.intent.outputs.mode }}",
             "deploy": "${{ steps.intent.outputs.deploy }}",
-            "eros_e2e": "${{ steps.eros_e2e.outputs.verified }}",
         })
         required_steps = {
             "Validate GitHub Actions workflow": "workspace",
@@ -162,10 +157,12 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         eros = next(step for step in tests["steps"] if step.get("id") == "eros_test_image")
         self.assertIn("matrix.suite == 'workspace'", eros["if"])
         self.assertIn("steps.filter.outputs.eros_engine == 'true'", eros["if"])
-        self.assertNotIn("steps.filter.outputs.infrastructure == 'true'", eros["if"])
+        self.assertIn("github.event_name == 'pull_request'", eros["if"])
+        self.assertIn("contains(github.event.pull_request.labels.*.name, 'me-62-full-build')", eros["if"])
         self.assertNotIn("steps.filter.outputs.database == 'true'", eros["if"])
         e2e = steps["Run stock Eros SQLx and synthetic conversation E2E"]
-        self.assertNotIn("steps.filter.outputs.infrastructure == 'true'", e2e["if"])
+        self.assertIn("github.event_name == 'pull_request'", e2e["if"])
+        self.assertIn("contains(github.event.pull_request.labels.*.name, 'me-62-full-build')", e2e["if"])
         self.assertNotIn("steps.filter.outputs.database == 'true'", e2e["if"])
         relay = steps["Run Eros Relay unit tests"]
         self.assertIn("steps.filter.outputs.eros_relay == 'true'", relay["if"])
@@ -174,7 +171,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         python = [steps[name] for name, suite in required_steps.items() if suite == "python"]
         for step in python:
             self.assertIn("unset DATABASE_URL SHADOW_DATABASE_URL", step["run"])
-        self.assertIn("tests/test_layer7_mac_free_ssh.py", python[0]["run"])
+        self.assertIn("tests/test_simple_release_architecture.py", python[0]["run"])
         for step in tests["steps"]:
             condition = step.get("if", "")
             self.assertNotIn("matrix.suite == 'release-tooling'", condition)
@@ -203,13 +200,50 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("steps.dispatch_build_scope.outputs.eros_engine == 'true'", steps["eros_test_image"]["if"])
         self.assertNotIn("github.event_name == 'workflow_dispatch'", steps["eros_test_image"]["if"])
         self.assertEqual(steps["eros_test_image"]["if"], steps["eros_e2e"]["if"])
-        self.assertEqual(tests["outputs"]["eros_e2e"], "${{ steps.eros_e2e.outputs.verified }}")
-        self.assertTrue(steps["eros_e2e"]["run"].rstrip().endswith('echo "verified=pass" >> "$GITHUB_OUTPUT"'))
+        self.assertNotIn("eros_e2e", tests["outputs"])
         build = self.workflow["jobs"]["build"]
         guard = next(step for step in build["steps"] if step.get("name") == "Require exact-candidate Eros test evidence")
-        self.assertEqual(guard["env"]["EROS_E2E"], "${{ needs.tests.outputs.eros_e2e }}")
+        self.assertEqual(guard["env"]["GH_TOKEN"], "${{ github.token }}")
         self.assertIn("contains(fromJSON(steps.build_scope.outputs.build_components), 'EROS')", guard["if"])
-        self.assertEqual(guard["run"], 'test "$EROS_E2E" = pass')
+        self.assertIn("/attempts/$GITHUB_RUN_ATTEMPT/jobs", guard["run"])
+        self.assertIn(".head_sha", guard["run"])
+        self.assertIn(".run_attempt", guard["run"])
+        self.assertIn("Run stock Eros SQLx and synthetic conversation E2E", guard["run"])
+
+    def test_eros_gate_reads_success_from_the_exact_run_attempt(self):
+        guard = next(step for step in self.workflow["jobs"]["build"]["steps"]
+                     if step.get("name") == "Require exact-candidate Eros test evidence")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gh = root / "gh"
+            gh.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$GH_ARGS_FILE"\ncat "$GH_FIXTURE"\n')
+            gh.chmod(0o755)
+            fixture = root / "jobs.json"
+            fixture.write_text(json.dumps({"jobs": [{
+                "name": "Tests (workspace)", "head_sha": "a" * 40, "run_attempt": 2,
+                "steps": [{"name": "Run stock Eros SQLx and synthetic conversation E2E",
+                           "conclusion": "success"}],
+            }]}))
+            env = {
+                **os.environ, "PATH": f"{root}:{os.environ['PATH']}", "GH_TOKEN": "test-token",
+                "GH_FIXTURE": str(fixture), "GH_ARGS_FILE": str(root / "gh-args"),
+                "GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "123",
+                "GITHUB_RUN_ATTEMPT": "2", "GITHUB_SHA": "a" * 40,
+            }
+            result = subprocess.run(["bash", "-euo", "pipefail", "-c", guard["run"]],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((root / "gh-args").read_text().strip(),
+                             "api repos/owner/repo/actions/runs/123/attempts/2/jobs?per_page=100")
+
+            fixture.write_text(json.dumps({"jobs": [{
+                "name": "Tests (workspace)", "head_sha": "b" * 40, "run_attempt": 2,
+                "steps": [{"name": "Run stock Eros SQLx and synthetic conversation E2E",
+                           "conclusion": "success"}],
+            }]}))
+            failed = subprocess.run(["bash", "-euo", "pipefail", "-c", guard["run"]],
+                                    env=env, capture_output=True, text=True)
+            self.assertNotEqual(failed.returncode, 0)
 
     def test_main_push_runs_ci_build_and_kamal_production_jobs(self):
         triggers = self.workflow.get("on", self.workflow.get(True))
@@ -504,10 +538,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
     def test_no_mac_runner_or_release_controller_is_used(self):
         text = WORKFLOW.read_text()
         self.assertNotIn("[self-hosted, macOS, gpoint-production]", text)
-        staging_text = (ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text()
-        self.assertIn("runs-on: ubuntu-24.04", staging_text)
-        self.assertNotIn("[self-hosted, macOS]", staging_text)
-        self.assertNotIn("gpoint-owner-mac", text + staging_text)
+        self.assertNotIn("gpoint-owner-mac", text)
         self.assertNotIn("release:gpoint", text)
 
     def test_native_kamal_uses_attempt_scoped_image_version_and_hook_context(self):

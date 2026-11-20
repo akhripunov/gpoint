@@ -101,8 +101,8 @@ def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
     assert not ({"workspace", "python"} & set(jobs))
     assert jobs["build"]["needs"] == ["tests"]
     assert "needs.tests.result == 'success'" in jobs["build"]["if"]
-    assert "outputs.mode == 'LAYER7_API'" in jobs["build"]["if"]
-    assert "needs.tests.outputs.mode == 'ARTIFACT_PREPARE'" in jobs["build"]["if"]
+    assert "github.event_name == 'pull_request'" in jobs["build"]["if"]
+    assert "ARTIFACT_PREPARE" not in jobs["build"]["if"]
     build_steps = yaml.safe_dump(jobs["build"]["steps"])
     assert "cache-to: type=gha,scope=gpoint-runtime,mode=max" in build_steps
     assert "sbom: true" in build_steps
@@ -958,21 +958,6 @@ def test_post_migration_head_requires_checksum_proof_when_old_runtime_lacks_revi
     renamed_checksum=hashlib.sha256((agata/"renamed.py").read_bytes()).hexdigest()
     renamed=subprocess.run(command+["--agata-current-checksums","agata0012="+renamed_checksum],capture_output=True,text=True)
     assert renamed.returncode != 0 and "APPLIED_ALEMBIC_MIGRATION_CHANGED:agata0012" in renamed.stderr
-
-
-def test_native_kamal_keeps_absolute_runner_ssh_config_paths_available():
-    staging = (ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text()
-    action = (ROOT / '.github/actions/layer7-deploy/action.yml').read_text()
-    # The key is materialized into the runner temp directory from the environment
-    # secret; no HOME-based SSH directory is mounted or assumed.
-    assert 'LAYER7_SSH_KEY=$RUNNER_TEMP/layer7/key' in staging
-    assert 'GPOINT_SSH_KEY=$RUNNER_TEMP/layer7/key' in staging
-    assert 'GPOINT_KNOWN_HOSTS_FILE=$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts' in staging
-    assert '/root/.ssh' not in staging
-    assert '/root/.ssh' not in action
-    transport = (ROOT / 'scripts/layer7-transport.sh').read_text()
-    assert 'StrictHostKeyChecking=yes' in transport
-    assert 'infra/staging/layer7_known_hosts' in transport
 
 
 @pytest.mark.parametrize('name', ['pre-app-boot', 'post-app-boot'])

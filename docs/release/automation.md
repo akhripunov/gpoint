@@ -1,71 +1,25 @@
 # Как выпускать GPoint
 
-> **2026-11-12:** обычный релиз — только `gpoint-native-release.yml`.
-> Legacy Prepare/Deploy, first-Kamal-cutover, interrupted recovery и публикация
-> релизных фактов в Linear удалены. Их описания ниже — исторический контекст.
+> **Native First V3 — 2026-11-20.** Единственный production-controller —
+> `.github/workflows/gpoint-native-release.yml`. Layer7 — единственный
+> production VPS; отдельного staging VPS, БД, Environment или workflow нет.
 >
-> | Workflow | Jobs | Назначение |
-> |---|---|---|
-> | `gpoint-native-release.yml` | Tests → Build → Deploy | обычный push-релиз и защищённый rollback |
-> | `gpoint-operations.yml` | migration_rehearsal | dispatch-операция с `deployment: false`: свои approvals и общий lock `gpoint-production-release` |
-> | `gpoint-layer7-staging.yml` | layer7_staging | owner-dispatched изолированный staging на self-hosted macOS, environment `layer7-staging` |
+> | Workflow | Назначение |
+> |---|---|
+> | `gpoint-native-release.yml` | Required Tests → выбор компонентов → Buildx/GHCR → защищённый production Deploy → Runtime Verify |
+> | `gpoint-operations.yml` | Отдельные операции migration rehearsal; это не release-controller и не Deployment |
 >
-> Только допустимый push в `main` запускает обычный production flow
-> `Tests → Build → Deploy → Runtime Verify`; отдельные условия Native workflow
-> могут пропустить Build или Deploy. Owner-dispatched migration rehearsal и
-> Layer7 staging используют собственные условия и approvals. Rehearsal не создаёт
-> Deployment и не переключает runtime; Layer7 staging работает на отдельной
-> staging-среде и не является вторым production controller.
-
-### Layer7 stock Eros update
-
-Pin the upstream commit in `services/eros-engine/upstream.sha` and review the
-upstream migration requirements and Layer7 model TOML. Use the
-`GPOINT-LAYER7-EROS` line in the authorized main commit message. Native Tests
-and Build publish only the Eros image. Production Deploy is skipped.
-
-Dispatch `gpoint-layer7-staging.yml` on exact current main with
-`mode=eros-prepare`, the successful Native Build run ID and the Eros digest.
-Set `approve_layer7_staging=true` and `deploy_layer7_staging=false`. The protected
-job restores an encrypted backup to a temporary PostgreSQL database, rehearses
-stock migrations and compares before/after runtime and ledger snapshots.
-
-After review of that rehearsal and approval for the exact candidate, dispatch
-`mode=eros-deploy` with the same SHA, Build run and digest, set
-`deploy_layer7_staging=true`, and supply the successful rehearsal ID and attempt
-as `eros_rehearsal`. Use the same candidate SHA for `staging_image_sha`.
-If there are pending SQLx migrations, the job checks the queue, stops only the
-Eros engine with Kamal, snapshots the quiesced database, then applies the stock
-migration chain. After a successful Apply, recover any deployment failure
-forward with the approved artifact. A pre-migration image may be restarted only
-after independently proving the source ledger and runtime configuration are
-still compatible. Record the verified Layer7 runtime and conversation checks.
-
-### Layer7 Core API and model config release
-
-Use the owner-authorized `GPOINT-LAYER7-API` commit marker for a Layer7 Core
-candidate. The Native route runs Tests, then Build selects only CORE, without
-consulting public-production history or `BOOTSTRAP_FULL`. This route is
-build-only: Native Deploy is reserved for production `DEPLOY` mode and never
-applies Layer7 staging changes.
-
-Apply Layer7 Core or model config only through the separately protected
-`gpoint-layer7-staging.yml` workflow. It is owner-dispatched on exact current
-`main`, requires the `layer7-staging` Environment reviewer, verifies staging
-host and database isolation, and uses the exact successful Native Build run
-and immutable image digest. Its `core-config-prepare` mode is read-only;
-broader staging modes have their own explicit approvals and runtime checks.
-Unknown inventory, source ancestry, repository digest, TOML hash, database
-ledger or rollback state fails closed. Do not relax Environment branch policy
-or dispatch a PR branch to bypass the main-only gate.
-
-The Layer7 deploy action reads current Core and Eros versions with pinned
-Kamal 2, derives the complete Git path set from installed Core source SHA
-through exact candidate SHA, and blocks extra Worker, Bot, Mini App, AGATA,
-Eros Engine or migration changes. Runtime Verify compares untouched roles and
-DB ledgers, checks health and the API-to-Eros route, and restores the verified
-TOML and prior engine/API versions if a switch fails. No Layer7 Build or Deploy
-passes AGATA, Mini App, Worker, Bot or Eros Engine image digests.
+> Каждый обычный push в `main` запускает required tests на exact SHA. Декларативные
+> `dorny/paths-filter` и проверенный installed production baseline выбирают
+> компоненты. Собираются только необходимые образы, Deploy применяет immutable
+> digest текущего run через stock Kamal 2, а GitHub Deployment становится
+> успешным только после Runtime Verify и smoke.
+>
+> Same-repository PR может собрать только выбранные компоненты и проверить
+> GHCR readback без production secrets и без доступа к Deploy. Полная
+> четырёхобразная проверка PR запускается только для явно отмеченного
+> `me-62-full-build` acceptance PR. Fork PR остаётся test-only. Documentation-only
+> изменения пропускают image Build. Неизвестный baseline или scope блокирует Apply.
 
 ### Резервное копирование (не является релизным job)
 
@@ -284,8 +238,10 @@ their component scope requires them. Buildx publishes the exact candidate SHA
 with immutable digests, SBOM and provenance; Deploy verifies read-back and uses
 those digests without rebuilding. A Native production dispatch cannot reuse an
 image from another run; its images are built and verified inside that same run.
-The separately authorized Layer7 staging workflow retains its own
-provenance-verified prepared-image handoff.
+The comprehensive acceptance PR can opt in to all four exact-SHA image builds
+with the `me-62-full-build` label. This opt-in is scoped to that acceptance run;
+ordinary infrastructure-only PRs do not trigger an Eros Engine E2E or publish
+unneeded images.
 
 `dorny/paths-filter` supplies declarative path classification for five
 components. The build-scope adapter compares each path set with its recorded
@@ -315,28 +271,15 @@ gates. Rollback selects a previously verified compatible component version and
 never downgrades the database. Telegram Bot remains a single Kamal role, so
 selective updates preserve its one-poller invariant.
 
-Layer7 staging remains a separate owner-dispatched, protected workflow and is
-not a second production controller. Its real deployment tests require current
-read-only evidence that the host, credentials, containers, volumes and database
-are isolated from production; static configuration or a successful historical
-run is not current isolation evidence.
-Before any remote inventory or Apply, the composite action also requires the
-target's FQDN to differ from `vps.gpoint.one` and an operator-provisioned
-`/etc/gpoint/staging-identity` file owned by root with mode `0600` and exact
-contents `gpoint-layer7-staging-v1`. This marker is a fail-closed host identity
-check, not a substitute for proving that the database, credentials, containers
-and volumes are isolated. The currently configured target is the production
-host and must fail this check; do not install the staging marker there.
-
 ### ME-62 release-code audit and reduction status
 
 | Function | Current code | Native mechanism | Decision |
 |---|---|---|---|
 | Component path filters | `dorny/paths-filter`; retired `native_change_surface.py` (131 LOC at baseline) | Git and the pinned `dorny/paths-filter` action | **REPLACE / DELETE** — declarative filters now supply the component paths. |
-| Event admission and exact-scope fail-closed rules | `scripts/native_release_intent.py` (931 LOC in this checkout) | GitHub event/dispatch context and workflow conditions | **KEEP, reduce** — policy checks still reject unauthorized events, unsafe paths and migration scope; current helper is larger than the minimal-adapter target. |
+| Event admission and exact-scope fail-closed rules | `scripts/native_release_intent.py` (756 LOC in this candidate) | GitHub event/dispatch context and workflow conditions | **KEEP, reduce** — policy checks still reject unauthorized events, unsafe paths and migration scope; current helper is larger than the minimal-adapter target. |
 | Installed component source baselines | `scripts/resolve_native_build_scope.py` | GitHub Deployments API, stock Kamal app commands and Docker inspect | **KEEP, reduce** — this adapter resolves installed component identities and exact-SHA evidence used by Build and Deploy. |
 | Build and OCI provenance | Build steps plus `scripts/verify_native_image_readback.py`, `verify_native_image_attestation.py`, `verify_native_eros_image.py` | Docker Buildx, GHCR digest, SBOM and GitHub artifact provenance | **KEEP** — retain only digest/source/platform/provenance checks not supplied by the native outputs. |
-| Native cross-run prepared-image reuse | Dispatch inputs, prepared-run API/log verification and digest fallback outputs | Buildx in the same Native release run | **DELETE** — production Build always creates and reads back each required image in its own exact-SHA run; Layer7 staging retains separate image provenance checks. |
+| Native cross-run prepared-image reuse | Dispatch inputs, prepared-run API/log verification and digest fallback outputs | Buildx in the same Native release run | **DELETE** — production Build creates and reads back each required image in its own exact-SHA run. |
 | Migration admission and parity | `scripts/prisma_migration_release_plan.py`, `scripts/verify-kamal-migration-parity.py` | Prisma, SQLx, isolated PostgreSQL and Alembic tools | **KEEP, reduce** — stock tools execute migrations; exact approval, checksum and compatibility boundaries remain custom. |
 | Live role topology and component manifest | `scripts/verify-kamal-production-baseline.py`, `scripts/write-kamal-production-manifest.py` | Kamal 2 app inventory and Docker inspect | **KEEP, reduce** — the adapters verify identities and per-component provenance absent from Kamal's required machine-readable output. |
 | Eros database backup, rehearsal and recovery | `scripts/eros-native-database.py` | PostgreSQL `pg_dump`/`pg_restore`, stock Eros SQLx migrations | **KEEP, reduce** — preserve isolated restore, ledger and recovery checks; remove duplicate orchestration only after equivalent integration proof. |
@@ -349,11 +292,11 @@ by it:
 
 | Measure | Main baseline | Current local candidate | Change |
 |---|---:|---:|---:|
-| Main controller + five control adapters (six paths) | 4,562 | 4,420 | −3.1% |
-| Workflow LOC | 2,437 | 2,398 | −1.6% |
-| Referenced helper LOC | 5,439 | 4,988 | −8.3% |
-| Combined workflow + referenced scripts LOC | 7,876 | 7,386 | −6.2% |
-| Extended release/deploy/migration/backup inventory LOC | 12,486 | 11,837 | −5.2% |
+| Main controller + five control adapters (six paths) | 4,562 | 4,240 | −7.1% |
+| Workflow LOC | 2,437 | 2,393 | −1.8% |
+| Referenced helper LOC | 5,439 | 4,807 | −11.6% |
+| Combined workflow + referenced scripts LOC | 7,876 | 7,200 | −8.6% |
+| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,473 | −24.1% |
 | Referenced helper files | 21 | 18 | −3 |
 | Required test matrix runs | 4 | 2 | −50% |
 | Ordinary workflow named jobs | 3 | 3 | unchanged |
@@ -379,12 +322,15 @@ bound for production Apply code. The Native cross-run digest reuse adapter was
 removed; production dispatch now builds the required images in the same run.
 The matrix consolidation cuts redundant runners and PostgreSQL services in
 half, and `native_change_surface.py` was replaced with declarative filters.
-The six-path inventory is down 3.1%, the combined upper bound is down 6.2%,
-and the extended inventory is down 5.2%;
-neither approaches the required 50% reduction. Release
-duration, selective GHCR image counts and deploy-target counts still need exact
-hosted/staging evidence. This status must remain incomplete until the code
-reduction and required acceptance evidence are achieved.
+The current candidate inventory counts source lines in files that remain on
+disk and preserves the baseline selectors and denominator. The deleted
+staging workflow/action and obsolete prepared-run adapters account for most of
+the extended-inventory reduction. The six-path measure is down 7.1%, the
+workflow-plus-helper measure is down 8.6%, and the extended inventory is down
+24.1%; neither mandatory measure approaches the 50% target. This is an
+intermediate audit, not acceptance. No staging evidence is applicable. Exact
+SHA hosted validation, matrix evidence, and substantive active-controller
+reduction remain required.
 ## Local test selection under FULL
 
 FULL is a risk level, not a mandate to run every local test. `classify-release-prepush.py` remains the canonical FAST/FULL procedure. Hosted CI uses the pinned `dorny/paths-filter` action in `gpoint-native-release.yml` for declarative five-component and shared-dependency selection. Run the directly affected local checks; GitHub CI remains authoritative for the exact PR SHA. The production planner tracks Core, AGATA, Mini App, Eros Engine and Eros Relay independently. Engine-only changes build the Eros image. Relay-only changes build the shared Core runtime image and deploy only Relay. The first Eros installation still requires both services. Runtime Verify records separate source SHAs and digests for Engine and Relay. Older successful deployments with a single Eros source SHA use that SHA for both because those deployments updated the pair together. An ambiguous or partial runtime still requires the existing authorized recovery path. The planner compares installed component sources with the exact candidate and fails closed on unknown paths. Do not recreate a second component path map for CI.

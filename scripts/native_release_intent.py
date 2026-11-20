@@ -174,6 +174,28 @@ KNOWN_RETIRED_NON_RUNTIME_FILES = frozenset({
     "scripts/worker-runtime-guard.test.mjs",
     "services/agata/worker/install_launch_agent.py",
     "services/gsales/tests/test_shared_worker_http.py",
+    # Retired staging-only release path; Layer7 is the production VPS.
+    ".github/workflows/gpoint-layer7-staging.yml",
+    ".github/actions/layer7-deploy/action.yml",
+    "config/deploy.layer7-staging.eros-api.yml",
+    "config/deploy.layer7-staging.eros-relay.yml",
+    "config/deploy.layer7-staging.eros.yml",
+    "config/deploy.layer7-staging.miniapp.yml",
+    "config/deploy.layer7-staging.yml",
+    "infra/staging/layer7_known_hosts",
+    "scripts/layer7-transport.sh",
+    "scripts/layer7_release_scope.py",
+    "scripts/layer7_staging_database.py",
+    "scripts/layer7_staging_env.py",
+    "scripts/verify_native_prepared_run.py",
+    "scripts/write_layer7_staging_env.py",
+    "scripts/write_layer7_staging_eros_api_env.py",
+    "services/eros-engine/eros-layer7-staging-model-config.toml",
+    "tests/test_layer7_mac_free_ssh.py",
+    "tests/test_layer7_release_scope.py",
+    "tests/test_layer7_staging_env.py",
+    "tests/test_layer7_staging_workflow.py",
+    "tests/test_native_prepared_run.py",
     "tests/test_collect_kamal_eros_state.py",
     "tests/test_deploy_evidence_workflow.py",
     "tests/test_eros_pilot_artifact.py",
@@ -218,12 +240,6 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     ".kamal/hooks/post-app-boot",
     ".kamal/hooks/pre-app-boot",
     "AGENTS.md",
-    "config/deploy.layer7-staging.eros-api.yml",
-    "config/deploy.layer7-staging.eros-relay.yml",
-    "config/deploy.layer7-staging.eros.yml",
-    "config/deploy.layer7-staging.miniapp.yml",
-    "config/deploy.layer7-staging.yml",
-    "infra/staging/layer7_known_hosts",
     "packages/db/prisma/production-approved-migrations.json",
     "scripts/check-kamal-configs.sh",
     "scripts/classify-release-prepush.py",
@@ -231,10 +247,6 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "scripts/eros-production-secrets.py",
     "scripts/gpoint-backup-policy.py",
     "scripts/gpoint-scheduled-backup.py",
-    "scripts/layer7-transport.sh",
-    "scripts/layer7_release_scope.py",
-    "scripts/layer7_staging_database.py",
-    "scripts/layer7_staging_env.py",
     "scripts/native_release_intent.py",
     "scripts/prepush.py",
     "scripts/prisma_migration_release_plan.py",
@@ -247,11 +259,8 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "scripts/verify-kamal-role.sh",
     "scripts/verify-layer7-ollama.py",
     "scripts/verify_native_eros_image.py",
-    "scripts/verify_native_prepared_run.py",
     "scripts/verify_native_rollback_evidence.py",
     "scripts/write-kamal-production-manifest.py",
-    "scripts/write_layer7_staging_env.py",
-    "scripts/write_layer7_staging_eros_api_env.py",
     "services/gsales/tests/test_shared_worker_http.py",
     "systemd/gpoint-backup.service",
     "scripts/gpoint-backup-install.sh",
@@ -289,124 +298,17 @@ BASELINE_ROLES = set(ROLE_REPOSITORIES) - set(EROS_ROLES)
 EXACT_SHA = re.compile(r"^[0-9a-f]{40}$")
 EXACT_VERSION = re.compile(r"^[0-9a-f]{40}-[0-9]+-[0-9]+$")
 EXACT_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
-ARTIFACT_PREPARE_MARKER = "GPOINT-ARTIFACT-PREPARE"
-ARTIFACT_PREPARE_PATHS = frozenset({
-    "apps/api/src/eros-response-prompt.js",
-    "apps/api/src/eros-worker-contract.ts",
-    "apps/api/test/eros-worker-contract.test.ts",
-    ".github/actions/layer7-deploy/action.yml",
-    ".github/workflows/gpoint-layer7-staging.yml",
-    ".github/workflows/gpoint-native-release.yml",
-    "services/eros-engine/eros-language-contract.test.mjs",
-    "services/eros-engine/eros-layer7-staging-model-config.toml",
-    "services/eros-engine/eros-pilot-model-config.toml",
-    "services/eros-engine/eros-production-model-config.toml",
-    "services/eros-engine/local-e2e.test.mjs",
-    "services/eros-engine/test-model-config.toml",
-    "scripts/layer7_release_scope.py",
-    "scripts/native_release_intent.py",
-    "scripts/prisma_migration_release_plan.py",
-    "scripts/verify_native_prepared_run.py",
-    "tests/test_layer7_release_scope.py",
-    "tests/test_layer7_staging_workflow.py",
-    "tests/test_native_prisma_apply_boundary.py",
-    "tests/test_native_release_intent.py",
-    "tests/test_native_prepared_run.py",
-    "tests/test_prisma_migration_release_plan.py",
-})
 EROS_MODEL_CONFIG_PATHS = frozenset({
-    "services/eros-engine/eros-layer7-staging-model-config.toml",
     "services/eros-engine/eros-pilot-model-config.toml",
     "services/eros-engine/eros-production-model-config.toml",
     "services/eros-engine/test-model-config.toml",
 })
-LAYER7_EROS_MARKER = "GPOINT-LAYER7-EROS"
+LEGACY_RELEASE_MARKERS = frozenset({
+    "GPOINT-ARTIFACT-PREPARE",
+    "GPOINT-LAYER7-API",
+    "GPOINT-LAYER7-EROS",
+})
 EROS_UPSTREAM_PIN = "services/eros-engine/upstream.sha"
-EROS_MIGRATION_HELPER = "scripts/eros-native-database.py"
-LAYER7_EROS_RELEASE_PATHS = frozenset({
-    ".github/actions/layer7-deploy/action.yml",
-    ".github/workflows/gpoint-layer7-staging.yml",
-    ".github/workflows/gpoint-native-release.yml",
-    "docs/release/automation.md",
-    EROS_MIGRATION_HELPER,
-    "scripts/layer7_release_scope.py",
-    "scripts/native_release_intent.py",
-    "scripts/verify_native_eros_image.py",
-    "scripts/verify_native_prepared_run.py",
-    "tests/test_eros_native_database.py",
-    "tests/test_eros_native_database_workflow.py",
-    "tests/test_kamal_release_config.py",
-    "tests/test_layer7_release_scope.py",
-    "tests/test_layer7_staging_workflow.py",
-    "tests/test_native_build_boundary.py",
-    "tests/test_native_release_intent.py",
-    "tests/test_native_prisma_apply_boundary.py",
-    "tests/test_native_prepared_run.py",
-})
-LAYER7_API_MARKER = "GPOINT-LAYER7-API"
-LAYER7_API_PROMPT_PATHS = frozenset({
-    "apps/api/src/eros-response-prompt.js",
-    "apps/api/src/eros-worker-contract.ts",
-    "apps/api/test/build-output.test.mjs",
-    "apps/api/test/eros-adapter.test.ts",
-    "apps/api/test/eros-worker-contract.test.ts",
-    "services/eros-engine/eros-language-contract.test.mjs",
-    "services/eros-engine/local-e2e.test.mjs",
-})
-LAYER7_CORE_CONFIG_REQUIRED_PATHS = frozenset({
-    "apps/api/src/eros-response-prompt.js",
-    "services/eros-engine/eros-layer7-staging-model-config.toml",
-})
-LAYER7_API_ADAPTER_PATHS = frozenset({
-    "apps/api/src/eros-adapter.ts",
-    "apps/api/test/eros-adapter.test.ts",
-})
-LAYER7_API_ADAPTER_ROUTE_SUPPORT_PATHS = frozenset({
-    "scripts/native_release_intent.py",
-    "scripts/layer7_release_scope.py",
-    "tests/test_native_release_intent.py",
-    "tests/test_layer7_release_scope.py",
-})
-LAYER7_API_CONFIG_PATH = "config/deploy.layer7-staging.eros-api.yml"
-LAYER7_API_CONFIG_PATHS = frozenset({
-    LAYER7_API_CONFIG_PATH,
-    ".github/actions/layer7-deploy/action.yml",
-    "scripts/layer7_release_scope.py",
-    "scripts/native_release_intent.py",
-    "tests/test_native_release_intent.py",
-    "tests/test_layer7_release_scope.py",
-    "tests/test_layer7_staging_workflow.py",
-})
-LAYER7_CORE_CONFIG_TOOLING_PATHS = frozenset({
-    ".github/actions/layer7-deploy/action.yml",
-    ".kamal/hooks/pre-app-boot",
-    ".kamal/hooks/post-app-boot",
-    ".github/workflows/gpoint-layer7-staging.yml",
-    ".github/workflows/gpoint-native-release.yml",
-    "docs/release/automation.md",
-    "scripts/layer7_release_scope.py",
-    "scripts/native_release_intent.py",
-    "scripts/verify_native_prepared_run.py",
-    "tests/test_kamal_native_automatic_release.py",
-    "tests/test_kamal_post_app_boot_hook.py",
-    "tests/test_kamal_release_config.py",
-    "tests/test_layer7_release_scope.py",
-    "tests/test_layer7_staging_workflow.py",
-    "tests/test_native_build_boundary.py",
-    "tests/test_native_change_surface.py",
-    "tests/test_native_prepared_run.py",
-    "tests/test_native_prisma_apply_boundary.py",
-    "tests/test_native_release_intent.py",
-})
-LAYER7_RELEASE_TOOLING_PREPARE_PATHS = frozenset({
-    ".github/actions/layer7-deploy/action.yml",
-    ".github/workflows/gpoint-layer7-staging.yml",
-    "scripts/verify_native_prepared_run.py",
-    "tests/test_layer7_staging_workflow.py",
-    "tests/test_native_prepared_run.py",
-})
-LAYER7_API_PATHS = (LAYER7_API_PROMPT_PATHS | LAYER7_API_ADAPTER_PATHS
-                    | LAYER7_API_CONFIG_PATHS | EROS_MODEL_CONFIG_PATHS)
 INFRASTRUCTURE_PREFIXES = (".github/", ".kamal/", "infra/production/", "scripts/", "systemd/")
 PRODUCTION_KAMAL_CONFIGS = frozenset({
     "config/deploy.yml", "config/deploy.agata.yml", "config/deploy.eros-api.yml",
@@ -468,89 +370,12 @@ def classify_push(*, event_name: str, ref: str,
     kinds = {_path_kind(path) for path in changed_paths}
     if "schema" in kinds or "unknown" in kinds:
         return "BLOCK"
-    kamal_component_contract_paths = {
-        ".kamal/hooks/pre-app-boot", ".kamal/hooks/post-app-boot",
-        ".github/actions/layer7-deploy/action.yml",
-        "scripts/native_release_intent.py",
-        "tests/test_kamal_release_config.py", "tests/test_kamal_post_app_boot_hook.py",
-        "tests/test_layer7_staging_workflow.py", "tests/test_native_release_intent.py",
-    }
-    if (".github/actions/layer7-deploy/action.yml" in changed_paths
-            and changed_paths <= kamal_component_contract_paths):
-        # This safety-contract fix must pass hosted TEST before any separately
-        # authorized Layer7 release; merging it alone must not deploy public prod.
-        return "NO_DEPLOY"
     markers = set(commit_message.splitlines())
-    if (".github/workflows/gpoint-layer7-staging.yml" in changed_paths
-            and LAYER7_EROS_MARKER not in markers
-            and not ({"apps/api/src/eros-response-prompt.js",
-                      "services/eros-engine/eros-layer7-staging-model-config.toml"}
-                     <= changed_paths)
-            and not (changed_paths <= LAYER7_CORE_CONFIG_TOOLING_PATHS
-                     and {".github/workflows/gpoint-native-release.yml",
-                          "scripts/verify_native_prepared_run.py"} <= changed_paths)
-            and changed_paths != LAYER7_RELEASE_TOOLING_PREPARE_PATHS):
+    if markers & LEGACY_RELEASE_MARKERS:
+        # Retired staging and artifact markers cannot authorize production Apply.
         return "BLOCK"
-    if ARTIFACT_PREPARE_MARKER in markers:
-        if markers & {LAYER7_API_MARKER, LAYER7_EROS_MARKER}:
-            return "BLOCK"
-        return "ARTIFACT_PREPARE" if changed_paths <= ARTIFACT_PREPARE_PATHS else "BLOCK"
-    if LAYER7_EROS_MARKER in markers:
-        if markers & {ARTIFACT_PREPARE_MARKER, LAYER7_API_MARKER}:
-            return "BLOCK"
-        has_eros_scope = EROS_MIGRATION_HELPER in changed_paths or any(
-            path.startswith("services/eros-engine/") for path in changed_paths
-        )
-        staging_workflow_changed = ".github/workflows/gpoint-layer7-staging.yml" in changed_paths
-        if not has_eros_scope and not staging_workflow_changed:
-            return "BLOCK"
-        if any(not path.startswith("services/eros-engine/")
-               for path in changed_paths - LAYER7_EROS_RELEASE_PATHS):
-            return "BLOCK"
-        return "LAYER7_EROS"
-    if (changed_paths <= LAYER7_CORE_CONFIG_TOOLING_PATHS
-            and {".github/workflows/gpoint-native-release.yml",
-                 "scripts/verify_native_prepared_run.py"} <= changed_paths):
-        return "LAYER7_API"
-    if changed_paths & {EROS_UPSTREAM_PIN, EROS_MIGRATION_HELPER}:
+    if EROS_UPSTREAM_PIN in changed_paths:
         return "BLOCK"
-    if (".github/workflows/gpoint-layer7-staging.yml" in changed_paths
-            and not changed_paths <= ARTIFACT_PREPARE_PATHS):
-        return "BLOCK"
-    if ("apps/api/src/eros-adapter.ts" in changed_paths
-            and LAYER7_API_MARKER not in markers):
-        return "BLOCK"
-    if LAYER7_API_MARKER in markers:
-        if ARTIFACT_PREPARE_MARKER in markers:
-            return "BLOCK"
-        if ({"scripts/native_release_intent.py", "tests/test_native_prepared_run.py"} <= changed_paths
-                and changed_paths <= LAYER7_CORE_CONFIG_TOOLING_PATHS):
-            # Scope fixes with a prepared-run regression can build only Core.
-            return "LAYER7_API"
-        if LAYER7_API_ADAPTER_PATHS & changed_paths:
-            allowed_adapter_change = (
-                LAYER7_API_ADAPTER_PATHS | LAYER7_API_ADAPTER_ROUTE_SUPPORT_PATHS
-            )
-            if (LAYER7_API_ADAPTER_PATHS <= changed_paths
-                    and changed_paths <= allowed_adapter_change):
-                return "LAYER7_API"
-            return "BLOCK"
-        if (LAYER7_CORE_CONFIG_REQUIRED_PATHS <= changed_paths
-                and changed_paths <= (LAYER7_API_PROMPT_PATHS
-                                      | {"services/eros-engine/eros-layer7-staging-model-config.toml"})):
-            return "LAYER7_API"
-        if changed_paths <= LAYER7_API_PROMPT_PATHS:
-            return "LAYER7_API"
-        if (LAYER7_API_CONFIG_PATH in changed_paths and
-                changed_paths <= LAYER7_API_CONFIG_PATHS):
-            return "LAYER7_API"
-        return "BLOCK"
-    if LAYER7_API_CONFIG_PATH in changed_paths:
-        return "BLOCK"
-    if ARTIFACT_PREPARE_MARKER in markers or changed_paths <= ARTIFACT_PREPARE_PATHS:
-        if not changed_paths <= ARTIFACT_PREPARE_PATHS:
-            return "BLOCK"
-        return "ARTIFACT_PREPARE"
     # Prisma schema changes must reach hosted Tests, which compare the full
     # migration history with schema.prisma before Build. Production Apply still
     # requires an exact migration set in the approved migration manifest.

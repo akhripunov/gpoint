@@ -25,6 +25,8 @@ def test_retired_host_transition_and_shared_worker_fixture_are_known_non_runtime
     ('tests/test_release_ui_switch_v4.py', True),
     ('services/agata/worker/install_launch_agent.py', True),
     ('services/gsales/tests/test_shared_worker_http.py', True),
+    ('.github/workflows/gpoint-layer7-staging.yml', True),
+    ('scripts/layer7_release_scope.py', True),
     ('services/agata/worker/unreviewed_installer.py', False),
 ])
 def test_only_exact_owner_approved_legacy_deletions_enter_build_plan(tmp_path, path, allowed):
@@ -59,13 +61,11 @@ def test_app_only_main_push_deploys_including_its_regression_tests():
     ) == "DEPLOY"
 
 
-def test_me36_active_eros_model_config_does_not_build_or_update_eros_image(tmp_path):
+def test_production_eros_model_config_does_not_change_deployed_image(tmp_path):
     repo, baseline, _, _ = _component_repo(tmp_path, {
-        "services/eros-engine/eros-layer7-staging-model-config.toml": "old config\n",
         "services/eros-engine/eros-production-model-config.toml": "old config\n",
         "apps/api/src/eros-response-prompt.js": "old prompt\n",
     })
-    (repo / "services/eros-engine/eros-layer7-staging-model-config.toml").write_text("new config\n")
     (repo / "services/eros-engine/eros-production-model-config.toml").write_text("new config\n")
     (repo / "apps/api/src/eros-response-prompt.js").write_text("new prompt\n")
     _git(repo, "add", "--all")
@@ -114,22 +114,20 @@ def test_known_operational_or_test_only_main_push_uses_the_same_release():
 def test_component_identity_infrastructure_pr_is_test_only_until_main_push():
     paths = {
         ".kamal/hooks/pre-app-boot", ".kamal/hooks/post-app-boot",
-        ".github/actions/layer7-deploy/action.yml",
         "scripts/native_release_intent.py",
         "tests/test_kamal_release_config.py", "tests/test_kamal_post_app_boot_hook.py",
-        "tests/test_layer7_staging_workflow.py",
     }
     assert MODULE.classify_push(
         event_name="pull_request", ref="refs/pull/999/merge", changed_paths=paths,
     ) == "NO_DEPLOY"
     assert MODULE.classify_push(
         event_name="push", ref="refs/heads/main", changed_paths=paths,
-    ) == "NO_DEPLOY"
+    ) == "DEPLOY"
+    assert not MODULE.push_deploy_authorized(mode="DEPLOY", changed_paths=paths)
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
-    deploy = workflow.split("  deploy:\n", 1)[1].split("  backup_maintenance:\n", 1)[0]
-    assert "github.event_name == 'push'" in deploy
-    assert "github.ref == 'refs/heads/main'" in deploy
-    assert "github.event_name == 'pull_request'" not in deploy
+    assert "github.event_name == 'push'" in workflow
+    assert "github.ref == 'refs/heads/main'" in workflow
+    assert "github.event_name == 'pull_request'" not in workflow.split("  deploy:\n", 1)[1]
 
 
 def test_app_and_release_files_can_ship_together_in_one_authorized_main_push():
@@ -179,88 +177,6 @@ def test_approved_prisma_migration_source_paths_enter_the_existing_protected_dep
     ) == "DEPLOY"
 
 
-def test_exact_main_push_with_artifact_prepare_marker_builds_without_authorizing_deploy():
-    assert MODULE.classify_push(
-        event_name="push", ref="refs/heads/main",
-        changed_paths={"scripts/native_release_intent.py", "tests/test_native_release_intent.py"},
-        commit_message="ME-36 candidate\n\nGPOINT-ARTIFACT-PREPARE",
-    ) == "ARTIFACT_PREPARE"
-    assert MODULE.classify_push(
-        event_name="push", ref="refs/heads/main",
-        changed_paths={"apps/api/src/main.ts"},
-    ) == "DEPLOY"
-    assert MODULE.classify_push(
-        event_name="push", ref="refs/heads/main", changed_paths={"new-root/unclassified.py"},
-        commit_message="GPOINT-ARTIFACT-PREPARE",
-    ) == "BLOCK"
-    for paths in ({"apps/api/src/main.ts"},
-                  {"packages/db/prisma/schema.prisma"},
-                  {"packages/db/prisma/migrations/20261105100000_global_policy/migration.sql"}):
-        assert MODULE.classify_push(
-            event_name="push", ref="refs/heads/main", changed_paths=paths,
-            commit_message="GPOINT-ARTIFACT-PREPARE",
-        ) == "BLOCK"
-
-
-def test_layer7_api_route_change_cannot_fall_through_to_production_deploy():
-    paths = {
-        ".github/actions/layer7-deploy/action.yml",
-        "config/deploy.layer7-staging.eros-api.yml",
-        "scripts/layer7_release_scope.py",
-        "scripts/native_release_intent.py",
-        "tests/test_native_release_intent.py",
-        "tests/test_layer7_release_scope.py",
-        "tests/test_layer7_staging_workflow.py",
-    }
-    assert MODULE.classify_push(
-        event_name="push", ref="refs/heads/main", changed_paths=paths,
-    ) == "BLOCK"
-    assert MODULE.classify_push(
-        event_name="push", ref="refs/heads/main", changed_paths=paths,
-        commit_message="ME-36 Layer7 Core API embeddings fix\n\nGPOINT-LAYER7-API",
-    ) == "LAYER7_API"
-    assert not MODULE.push_deploy_authorized(
-        mode="LAYER7_API", changed_paths={"apps/api/src/eros-response-prompt.js"},
-    )
-    selector_only_paths = paths - {"config/deploy.layer7-staging.eros-api.yml"}
-    assert MODULE.classify_push(
-        event_name="push", ref="refs/heads/main", changed_paths=selector_only_paths,
-    ) == "ARTIFACT_PREPARE"
-
-
-def test_layer7_release_tooling_builds_core_but_does_not_auto_apply():
-    paths = {
-        ".github/actions/layer7-deploy/action.yml",
-        ".github/workflows/gpoint-native-release.yml",
-        "docs/release/automation.md",
-        "scripts/layer7_release_scope.py",
-        "scripts/native_release_intent.py",
-        "scripts/verify_native_prepared_run.py",
-        "tests/test_kamal_native_automatic_release.py",
-        "tests/test_kamal_release_config.py",
-        "tests/test_layer7_release_scope.py",
-        "tests/test_layer7_staging_workflow.py",
-        "tests/test_native_build_boundary.py",
-        "tests/test_native_change_surface.py",
-        "tests/test_native_prepared_run.py",
-        "tests/test_native_prisma_apply_boundary.py",
-        "tests/test_native_release_intent.py",
-    }
-    mode = MODULE.classify_push(
-        event_name="push", ref="refs/heads/main", changed_paths=paths,
-    )
-    assert mode == "LAYER7_API"
-    assert not MODULE.push_deploy_authorized(mode=mode, changed_paths=paths)
-    assert not MODULE.push_deploy_authorized(
-        mode="LAYER7_API",
-        changed_paths={"apps/api/src/eros-response-prompt.js",
-                       "services/eros-engine/eros-layer7-staging-model-config.toml"},
-    )
-    assert MODULE.push_deploy_authorized(
-        mode="DEPLOY", changed_paths={"apps/api/src/main.ts"},
-    )
-
-
 def test_api_commit_cannot_bypass_approval_for_accumulated_infrastructure(tmp_path, monkeypatch, capsys):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -303,86 +219,6 @@ def test_main_push_without_verified_production_baseline_is_not_auto_applied():
         mode="DEPLOY", changed_paths={"apps/api/src/messages.ts"},
         cumulative_infrastructure_change=True,
     )
-
-
-def test_marked_layer7_scope_fix_builds_only_core_without_authorizing_apply():
-    paths = {
-        "scripts/native_release_intent.py",
-        "tests/test_native_release_intent.py",
-        "tests/test_native_prepared_run.py",
-    }
-    kwargs = {"event_name": "push", "ref": "refs/heads/main",
-              "commit_message": "ME-36 Layer7 tooling\n\nGPOINT-LAYER7-API"}
-    mode = MODULE.classify_push(**kwargs, changed_paths=paths)
-    assert mode == "LAYER7_API"
-    assert not MODULE.push_deploy_authorized(mode=mode, changed_paths=paths)
-    assert MODULE.classify_push(
-        **kwargs, changed_paths=paths | {"apps/worker/src/main.ts"},
-    ) == "BLOCK"
-
-
-def test_layer7_eros_adapter_source_uses_only_the_explicit_api_route():
-    paths = {
-        "apps/api/src/eros-adapter.ts",
-        "apps/api/test/eros-adapter.test.ts",
-        "scripts/native_release_intent.py",
-        "scripts/layer7_release_scope.py",
-        "tests/test_native_release_intent.py",
-        "tests/test_layer7_release_scope.py",
-    }
-    assert MODULE.classify_push(
-        event_name="push", ref="refs/heads/main", changed_paths=paths,
-        commit_message="ME-36 Layer7 adapter follow-up\n\nGPOINT-LAYER7-API",
-    ) == "LAYER7_API"
-    assert not MODULE.push_deploy_authorized(mode="LAYER7_API", changed_paths=paths)
-    assert MODULE.classify_push(
-        event_name="push", ref="refs/heads/main", changed_paths=paths,
-    ) == "BLOCK"
-    assert MODULE.classify_push(
-        event_name="push", ref="refs/heads/main",
-        changed_paths=paths | {"apps/api/src/messages.ts"},
-        commit_message="ME-36 Layer7 adapter follow-up\n\nGPOINT-LAYER7-API",
-    ) == "BLOCK"
-
-
-def test_artifact_prepare_marker_routes_main_push_to_build_only(monkeypatch, capsys):
-    monkeypatch.setattr(sys, "argv", [
-        "native_release_intent.py", "--event", "push", "--ref", "refs/heads/main",
-        "--sha", "a" * 40, "--before", "b" * 40,
-        "--infrastructure-baseline-sha", "c" * 40,
-        "--actor", "akhripunov", "--triggering-actor", "akhripunov",
-        "--repository-owner", "akhripunov", "--commit-message", "ME-36\nGPOINT-ARTIFACT-PREPARE",
-    ])
-    monkeypatch.setattr(MODULE, "changed_paths", lambda *_args, **_kwargs: {"scripts/native_release_intent.py"})
-    assert MODULE.main() == 0
-    output = capsys.readouterr().out
-    assert "mode=ARTIFACT_PREPARE" in output
-    assert "deploy=false" in output
-
-
-def test_artifact_prepare_marker_in_subject_is_not_a_mode_marker():
-    assert MODULE.classify_push(
-        event_name="push", ref="refs/heads/main", changed_paths={"scripts/release_helper.py"},
-        commit_message="GPOINT-ARTIFACT-PREPARE: release helper",
-    ) == "DEPLOY"
-
-
-def test_exact_release_tooling_candidate_routes_to_artifact_prepare_without_marker():
-    me36_layer7_release_tooling = {
-        ".github/actions/layer7-deploy/action.yml",
-        ".github/workflows/gpoint-layer7-staging.yml",
-        "scripts/verify_native_prepared_run.py",
-        "tests/test_layer7_staging_workflow.py",
-        "tests/test_native_prepared_run.py",
-    }
-    assert MODULE.classify_push(
-        event_name="push", ref="refs/heads/main",
-        changed_paths=me36_layer7_release_tooling,
-    ) == "ARTIFACT_PREPARE"
-    assert MODULE.classify_push(
-        event_name="push", ref="refs/heads/main",
-        changed_paths=set(MODULE.ARTIFACT_PREPARE_PATHS),
-    ) == "ARTIFACT_PREPARE"
 
 
 def test_agata_migration_and_unknown_schema_paths_remain_blocked_from_prisma_apply():
@@ -924,7 +760,6 @@ def test_me36_release_helpers_are_exact_non_runtime_paths(tmp_path):
         "scripts/verify-kamal-role.sh",
         "scripts/verify-layer7-ollama.py",
         "scripts/verify_native_eros_image.py",
-        "scripts/verify_native_prepared_run.py",
     )
     changes = {path: "verified ME-36 release helper\n" for path in helper_paths}
     repo, _baseline, candidate, inventory = _component_repo(tmp_path, changes)
@@ -971,6 +806,20 @@ def test_known_release_infrastructure_candidate_has_no_application_component_sco
         "deploy_core": False, "deploy_agata": False, "deploy_miniapp": False,
         "deploy_eros": False, "deploy_eros_relay": False, "eros_bootstrap": False,
     }
+
+
+@pytest.mark.parametrize("marker", [
+    "GPOINT-ARTIFACT-PREPARE", "GPOINT-LAYER7-API", "GPOINT-LAYER7-EROS",
+])
+def test_retired_release_markers_fail_closed(marker):
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        changed_paths={"apps/api/src/main.ts"}, commit_message=marker,
+    ) == "BLOCK"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main",
+        changed_paths={"apps/api/src/main.ts"}, commit_message=marker,
+    ) != "DEPLOY"
 
 
 def test_known_release_infrastructure_does_not_expand_an_application_scope(tmp_path):
@@ -1157,37 +1006,6 @@ def test_rollback_dispatch_requires_main_exact_owner_explicit_approval_and_no_ot
         invalid.update(changes)
         assert MODULE.classify_dispatch(**invalid)[1] is False
         assert MODULE.classify_dispatch(**invalid)[0] != "ROLLBACK"
-
-
-def test_layer7_eros_push_requires_explicit_isolated_artifact_route():
-    paths = {"services/eros-engine/upstream.sha", "scripts/eros-native-database.py"}
-    context = {"event_name": "push", "ref": "refs/heads/main"}
-    marker = "Stock Eros update\n\nGPOINT-LAYER7-EROS"
-    assert MODULE.classify_push(**context, changed_paths=paths, commit_message=marker) == "LAYER7_EROS"
-    assert MODULE.classify_push(**context, changed_paths=paths) == "BLOCK"
-    assert MODULE.classify_push(
-        **context, changed_paths=paths | {"apps/api/src/main.ts"}, commit_message=marker
-    ) == "BLOCK"
-    assert MODULE.classify_push(
-        **context, changed_paths=paths, commit_message=marker + "\nGPOINT-ARTIFACT-PREPARE"
-    ) == "BLOCK"
-
-
-def test_layer7_eros_migration_gate_correction_cannot_route_to_old_production():
-    paths = {"scripts/eros-native-database.py", "tests/test_eros_native_database.py"}
-    context = {"event_name": "push", "ref": "refs/heads/main"}
-    assert MODULE.classify_push(**context, changed_paths=paths,
-                                commit_message="GPOINT-LAYER7-EROS") == "LAYER7_EROS"
-    assert MODULE.classify_push(**context, changed_paths=paths) == "BLOCK"
-
-
-def test_layer7_runner_compatibility_fix_keeps_explicit_eros_route():
-    paths = {".github/workflows/gpoint-layer7-staging.yml",
-             "tests/test_layer7_staging_workflow.py"}
-    context = {"event_name": "push", "ref": "refs/heads/main"}
-    assert MODULE.classify_push(**context, changed_paths=paths,
-                                commit_message="GPOINT-LAYER7-EROS") == "LAYER7_EROS"
-    assert MODULE.classify_push(**context, changed_paths=paths) == "BLOCK"
 
 
 def test_relay_recovery_uses_its_own_baseline_after_engine_has_advanced(tmp_path):

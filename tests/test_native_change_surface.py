@@ -89,7 +89,7 @@ def test_eros_engine_negative_globs_exclude_relay_and_configuration():
     paths = [
         "services/eros-engine/src/main.rs",
         "services/eros-engine/eros-pilot-embedding-relay.mjs",
-        "services/eros-engine/eros-layer7-staging-model-config.toml",
+        "services/eros-engine/eros-production-model-config.toml",
         "services/eros-engine/production.toml",
     ]
     matches = _match_with_picomatch({"eros_engine": filters["eros_engine"]}, paths)
@@ -156,7 +156,7 @@ def test_eros_relay_kamal_config_stays_separate_from_engine_and_protected_config
     assert "config/deploy.eros-relay.yml" in filters["eros_relay"]
     assert "config/deploy.eros.yml" not in filters["eros_relay"]
     assert "config/deploy.eros-relay.yml" in filters["infrastructure"]
-    assert "config/deploy.layer7-staging.eros.yml" not in filters["infrastructure"]
+    assert "config/deploy.eros.yml" in filters["infrastructure"]
     assert filters["eros_engine"] != filters["eros_relay"]
 
 

@@ -3,6 +3,12 @@
 Status: planning only. No production deployment, migration, DNS change, TLS issuance, or Telegram configuration change has been performed.
 Date: 2026-09-15
 
+> Historical planning snapshot. The staging option and pending decision below
+> were superseded by the OWNER directive of 2026-11-20: Layer7 is the single
+> GPoint production VPS, and no separate staging VPS, database, GitHub
+> Environment, or release workflow is to be created. Current release
+> validation follows `docs/release/automation.md`.
+
 ## Proposed topology
 
 One VPS runs a reverse proxy and the long-lived GPoint services. PostgreSQL and Redis bind only to the private/container network. Media is stored in an external S3-compatible service.
