@@ -400,7 +400,7 @@ local/hosted test evidence passed; it does not imply production execution.
 | 32 | Same-repository PR | Test Build allowed; Deploy forbidden → Build/GHCR read-back passed, Deploy skipped | PASS — run 44711957261 |
 | 33 | Protected infrastructure dispatch | OWNER/ref/exact SHA and Environment protection required → classifier and workflow gates assert these conditions | PASS — Native intent and boundary tests; live GitHub protection settings NOT VERIFIED |
 | 34 | Current Layer7 | Production target only, never staging → workflow has only `production` Environment | PASS — `test_layer7_is_production_and_retired_staging_paths_cannot_deploy`; live VPS identity NOT re-read in this task |
-| 35 | Retired staging paths | No active calls → workflow/configs absent; remaining path strings are fail-closed compatibility tests/classifiers only | PASS — `test_layer7_is_not_configured_as_a_staging_release_target` and repository source audit |
+| 35 | Retired staging paths | No active release calls → workflow/configs absent; old exact paths remain only as fail-closed classifiers/tests. Other `staging` mentions are dated history, test fixtures, or local atomic/temp-directory operations; none names a GPoint environment or server. | PASS — `test_layer7_is_not_configured_as_a_staging_release_target` and repository-wide source audit |
 
 Production-only checks explicitly remain unverified. No staging infrastructure
 or replacement workflow exists or is required. Do not interpret passing local
