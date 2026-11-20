@@ -296,9 +296,9 @@ by it:
 |---|---:|---:|---:|
 | Main controller + five control adapters (six paths) | 4,562 | 4,096 | −10.2% |
 | Workflow LOC | 2,437 | 2,397 | −1.6% |
-| Referenced helper LOC | 5,439 | 4,781 | −12.1% |
-| Combined workflow + referenced scripts LOC | 7,876 | 7,178 | −8.9% |
-| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,451 | −24.3% |
+| Referenced helper LOC | 5,439 | 4,763 | −12.4% |
+| Combined workflow + referenced scripts LOC | 7,876 | 7,160 | −9.1% |
+| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,435 | −24.4% |
 | Referenced helper files | 21 | 19 | −2 |
 | Required test matrix runs | 4 | 2 | −50% |
 | Ordinary workflow named jobs | 3 | 3 | unchanged |
@@ -333,8 +333,8 @@ candidate images to GHCR; fork PRs do not run that job. This permission does
 not grant production Deploy access. The deleted
 staging workflow/action and obsolete prepared-run adapters account for most of
 the extended-inventory reduction. The six-path measure is down 10.2%, the
-workflow-plus-helper measure is down 8.9%, and the extended inventory is down
-24.3%; the mandatory 50% target remains unmet. The ordinary-only Kamal manifest also
+workflow-plus-helper measure is down 9.1%, and the extended inventory is down
+24.4%; the mandatory 50% target remains unmet. The ordinary-only Kamal manifest also
 removed an obsolete cutover branch and its tests. Active migration, backup,
 recovery, digest and runtime identity checks remain. No staging evidence is
 applicable. Exact-SHA hosted Tests, Eros/Mini App E2E, all-four-image Buildx and
