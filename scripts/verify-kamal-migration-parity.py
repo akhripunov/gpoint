@@ -309,6 +309,36 @@ def is_explicit_noop_migration(path):
     return re.fullmatch(r"\s*SELECT\s+1\s*;\s*", without_line_comments, re.IGNORECASE) is not None
 
 
+def require_no_pending_dependency(pending, changed, approved_migrations, *, prisma_directory,
+                                  repo_root, agata_migrations=()):
+    for migration, path in pending:
+        identifiers = migration_identifiers(
+            path, prisma_directory=prisma_directory, repo_root=repo_root)
+        approved = migration in approved_migrations
+        if approved and migration_file_digest(path) != approved_migrations[migration]:
+            raise ValueError(f"APPROVED_MIGRATION_CHECKSUM_MISMATCH:{migration}")
+        if not identifiers:
+            if is_explicit_noop_migration(path):
+                continue
+            raise ValueError(f"cannot identify dependencies in pending migration {migration}")
+        for source_path, line in changed:
+            if migration in agata_migrations and not source_path.startswith("services/agata/"):
+                continue
+            anchors = identifiers - COMMON_SCHEMA_FIELDS
+            for identifier in identifiers:
+                if (identifier in COMMON_SCHEMA_FIELDS
+                        and not any(re.search(rf"(?<![A-Za-z0-9_]){re.escape(anchor)}(?![A-Za-z0-9_])", line, re.IGNORECASE)
+                                    for anchor in anchors)):
+                    continue
+                if re.search(rf"(?<![A-Za-z0-9_]){re.escape(identifier)}(?![A-Za-z0-9_])", line, re.IGNORECASE):
+                    if approved:
+                        print(f"APPROVED_PENDING_DEPENDENCY:{migration}:{identifier}:{source_path}",
+                              file=sys.stderr)
+                        continue
+                    raise ValueError(
+                        f"UNSAFE_SCHEMA_DEPENDENCY:{migration}:{identifier}:{source_path}")
+
+
 def changed_application_lines(repo_root, baseline_sha, candidate_sha):
     result = subprocess.run(
         ["git", "-C", str(repo_root), "diff", "--unified=0", baseline_sha, candidate_sha,
@@ -439,33 +469,9 @@ def verify_compatible(args, live_prisma, recorded):
     approved_migrations = load_approved_migrations(
         getattr(args, "approved_migrations", "") or
         (Path(args.prisma_directory) / ".." / "production-approved-migrations.json").resolve())
-    for migration, path in pending:
-        identifiers = migration_identifiers(path, prisma_directory=args.prisma_directory, repo_root=repo_root)
-        approved_dependency = False
-        if migration in approved_migrations:
-            if migration_file_digest(path) != approved_migrations[migration]:
-                raise ValueError(f"APPROVED_MIGRATION_CHECKSUM_MISMATCH:{migration}")
-            approved_dependency = True
-        if not identifiers:
-            if is_explicit_noop_migration(path):
-                continue
-            raise ValueError(f"cannot identify dependencies in pending migration {migration}")
-        for source_path, line in changed:
-            if migration in pending_agata and not source_path.startswith("services/agata/"):
-                continue
-            for identifier in identifiers:
-                if identifier in COMMON_SCHEMA_FIELDS:
-                    anchors = identifiers - COMMON_SCHEMA_FIELDS
-                    if not any(re.search(rf"(?<![A-Za-z0-9_]){re.escape(anchor)}(?![A-Za-z0-9_])", line, re.IGNORECASE)
-                               for anchor in anchors):
-                        continue
-                if re.search(rf"(?<![A-Za-z0-9_]){re.escape(identifier)}(?![A-Za-z0-9_])", line, re.IGNORECASE):
-                    if approved_dependency:
-                        print(f"APPROVED_PENDING_DEPENDENCY:{migration}:{identifier}:{source_path}",
-                              file=sys.stderr)
-                        continue
-                    raise ValueError(
-                        f"UNSAFE_SCHEMA_DEPENDENCY:{migration}:{identifier}:{source_path}")
+    require_no_pending_dependency(
+        pending, changed, approved_migrations, prisma_directory=args.prisma_directory,
+        repo_root=repo_root, agata_migrations=pending_agata)
     if set(recorded) != set(live_prisma):
         raise ValueError("live Prisma checksum inventory does not cover exactly applied migrations")
     return live_prisma[-1], args.agata_current_head, bool(pending)
@@ -496,38 +502,14 @@ def verify_static_pending(args):
         elif raw.startswith("services/agata/migrations/versions/") and path.suffix == ".py":
             pending.append((path.stem, path))
     changed = list(changed_application_lines(repo_root, baseline, candidate))
+    allowlist = getattr(args, "approved_migrations", "")
     approved_migrations = load_approved_migrations(
-        getattr(args, "approved_migrations", "") or
-        (Path(args.prisma_directory) / ".." / "production-approved-migrations.json").resolve())
-    for migration, path in pending:
-        identifiers = migration_identifiers(
-            path, prisma_directory=args.prisma_directory, repo_root=repo_root)
-        approved_dependency = False
-        if migration in approved_migrations:
-            if migration_file_digest(path) != approved_migrations[migration]:
-                raise ValueError(f"APPROVED_MIGRATION_CHECKSUM_MISMATCH:{migration}")
-            approved_dependency = True
-        if not identifiers:
-            if is_explicit_noop_migration(path):
-                continue
-            raise ValueError(f"cannot identify dependencies in pending migration {migration}")
-        for source_path, line in changed:
-            if migration in {name for name, _ in pending if str(path).endswith(".py")} \
-                    and not source_path.startswith("services/agata/"):
-                continue
-            for identifier in identifiers:
-                if identifier in COMMON_SCHEMA_FIELDS:
-                    anchors = identifiers - COMMON_SCHEMA_FIELDS
-                    if not any(re.search(rf"(?<![A-Za-z0-9_]){re.escape(anchor)}(?![A-Za-z0-9_])", line, re.IGNORECASE)
-                               for anchor in anchors):
-                        continue
-                if re.search(rf"(?<![A-Za-z0-9_]){re.escape(identifier)}(?![A-Za-z0-9_])", line, re.IGNORECASE):
-                    if approved_dependency:
-                        print(f"APPROVED_PENDING_DEPENDENCY:{migration}:{identifier}:{source_path}",
-                              file=sys.stderr)
-                        continue
-                    raise ValueError(
-                        f"UNSAFE_SCHEMA_DEPENDENCY:{migration}:{identifier}:{source_path}")
+        (repo_root / allowlist).resolve() if allowlist else
+        prisma_directory.parent / "production-approved-migrations.json")
+    agata_migrations = {name for name, path in pending if path.suffix == ".py"}
+    require_no_pending_dependency(
+        pending, changed, approved_migrations, prisma_directory=prisma_directory,
+        repo_root=repo_root, agata_migrations=agata_migrations)
     return pending
 
 
