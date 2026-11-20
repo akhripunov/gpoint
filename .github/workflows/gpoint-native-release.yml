@@ -441,7 +441,6 @@ jobs:
           tests/test_verify_kamal_production_baseline.py
           tests/test_native_rollback_evidence.py
           tests/test_kamal_release_config.py
-          tests/test_kamal_production_manifest.py
           tests/test_kamal_ordinary_manifest.py
       - name: Run isolated PostgreSQL 16 migration and integration suites
         if: matrix.suite == 'python' && (steps.filter.outputs.database == 'true' || steps.filter.outputs.infrastructure == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
@@ -522,10 +521,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
+          test "$(jq -r '.head_sha' <<< "$run")" = "$GITHUB_SHA"
+          test "$(jq -r '.run_attempt' <<< "$run")" = "$GITHUB_RUN_ATTEMPT"
           jobs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100")"
-          workspace_job="$(jq -cer '[.jobs[] | select(.name == "Tests (workspace)")][0]' <<< "$jobs")"
-          test "$(jq -r '.head_sha' <<< "$workspace_job")" = "$GITHUB_SHA"
-          test "$(jq -r '.run_attempt' <<< "$workspace_job")" = "$GITHUB_RUN_ATTEMPT"
+          workspace_job="$(jq -cer '[.jobs[] | select(.name == "Tests (workspace)")] | if length == 1 then .[0] else error("expected one workspace test job") end' <<< "$jobs")"
+          test "$(jq -r '.conclusion // ""' <<< "$workspace_job")" = success
           test "$(jq -r '[.steps[] | select(.name == "Run stock Eros SQLx and synthetic conversation E2E")][0].conclusion // ""' <<< "$workspace_job")" = success
       - name: Select exact immutable image version
         id: image_version

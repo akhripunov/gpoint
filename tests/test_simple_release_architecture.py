@@ -43,5 +43,6 @@ def test_pr_candidate_runs_build_without_production_deploy():
     eros_gate = next(step for step in build["steps"] if step.get("name") == "Require exact-candidate Eros test evidence")
     assert "/attempts/$GITHUB_RUN_ATTEMPT/jobs" in eros_gate["run"]
     assert ".head_sha" in eros_gate["run"]
+    assert "runs/$GITHUB_RUN_ID" in eros_gate["run"]
     assert "github.event_name == 'pull_request'" not in deploy["if"]
     assert "needs.tests.outputs.mode == 'DEPLOY'" in deploy["if"]

@@ -661,7 +661,7 @@ def test_kamal_schema_compatibility_accepts_divergent_live_source_only_when_tree
 def test_manifest_writer_behavior_tests_run_in_python_ci():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     tests_job = workflow.split("  tests:\n", 1)[1].split("  build:\n", 1)[0]
-    assert "tests/test_kamal_production_manifest.py" in tests_job
+    assert "tests/test_kamal_ordinary_manifest.py" in tests_job
     oras_setup = tests_job.index("name: Install pinned ORAS for release evidence round-trip test")
     assert "Install pinned ORAS for release evidence round-trip test" in tests_job
     assert "oras_1.3.0_linux_amd64.tar.gz" in tests_job

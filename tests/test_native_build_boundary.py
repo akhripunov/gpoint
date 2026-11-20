@@ -205,6 +205,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         guard = next(step for step in build["steps"] if step.get("name") == "Require exact-candidate Eros test evidence")
         self.assertEqual(guard["env"]["GH_TOKEN"], "${{ github.token }}")
         self.assertIn("contains(fromJSON(steps.build_scope.outputs.build_components), 'EROS')", guard["if"])
+        self.assertIn("runs/$GITHUB_RUN_ID", guard["run"])
         self.assertIn("/attempts/$GITHUB_RUN_ATTEMPT/jobs", guard["run"])
         self.assertIn(".head_sha", guard["run"])
         self.assertIn(".run_attempt", guard["run"])
@@ -219,25 +220,34 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             gh.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$GH_ARGS_FILE"\ncat "$GH_FIXTURE"\n')
             gh.chmod(0o755)
             fixture = root / "jobs.json"
+            run_fixture = root / "run.json"
+            run_fixture.write_text(json.dumps({"head_sha": "a" * 40, "run_attempt": 2}))
             fixture.write_text(json.dumps({"jobs": [{
-                "name": "Tests (workspace)", "head_sha": "a" * 40, "run_attempt": 2,
+                "name": "Tests (workspace)", "conclusion": "success",
                 "steps": [{"name": "Run stock Eros SQLx and synthetic conversation E2E",
                            "conclusion": "success"}],
             }]}))
+            gh_calls = root / "gh-calls"
+            gh.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$GH_CALLS_FILE"\ncase "$*" in\n  *"/attempts/"*) cat "$GH_FIXTURE" ;;\n  *) cat "$GH_RUN_FIXTURE" ;;\nesac\n')
+            gh.chmod(0o755)
             env = {
                 **os.environ, "PATH": f"{root}:{os.environ['PATH']}", "GH_TOKEN": "test-token",
-                "GH_FIXTURE": str(fixture), "GH_ARGS_FILE": str(root / "gh-args"),
-                "GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "123",
-                "GITHUB_RUN_ATTEMPT": "2", "GITHUB_SHA": "a" * 40,
+                "GH_FIXTURE": str(fixture), "GH_RUN_FIXTURE": str(run_fixture),
+                "GH_CALLS_FILE": str(gh_calls), "GITHUB_REPOSITORY": "owner/repo",
+                "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_SHA": "a" * 40,
             }
             result = subprocess.run(["bash", "-euo", "pipefail", "-c", guard["run"]],
                                     env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual((root / "gh-args").read_text().strip(),
-                             "api repos/owner/repo/actions/runs/123/attempts/2/jobs?per_page=100")
+            self.assertEqual(gh_calls.read_text().splitlines(), [
+                "api repos/owner/repo/actions/runs/123",
+                "api repos/owner/repo/actions/runs/123/attempts/2/jobs?per_page=100",
+            ])
 
+            run_fixture.write_text(json.dumps({"head_sha": "b" * 40, "run_attempt": 2}))
+            gh_calls.unlink()
             fixture.write_text(json.dumps({"jobs": [{
-                "name": "Tests (workspace)", "head_sha": "b" * 40, "run_attempt": 2,
+                "name": "Tests (workspace)",
                 "steps": [{"name": "Run stock Eros SQLx and synthetic conversation E2E",
                            "conclusion": "success"}],
             }]}))
