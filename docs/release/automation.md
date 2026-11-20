@@ -423,25 +423,25 @@ reintroduced staging paths fail closed. Same-repository PR Build jobs request `p
 candidate images to GHCR; fork PRs do not run that job. This permission does
 not grant production Deploy access. The deleted
 staging workflow/action and obsolete prepared-run adapters account for much of
-the extended-inventory reduction. The six-path measure is down 14.3%, the
-workflow-plus-helper measure is down 11.5%, and the extended inventory is down
-27.1%; the mandatory 50% targets remain unmet. The ordinary-only Kamal manifest also
+the extended-inventory reduction. LOC remains an informational measure, not an
+acceptance gate. At candidate `0b721128f910748fe3643ffe1b83de7d9f27559b`, the
+six-path measure is down 15.1%, workflow plus referenced helpers is down 12.0%,
+and the extended inventory is down 27.1%. The ordinary-only Kamal manifest also
 removed an obsolete cutover branch and its tests. Active migration, backup,
 recovery, digest and runtime identity checks remain. No staging evidence is
 applicable. Exact-SHA hosted Tests, isolated PostgreSQL, Eros/Mini App E2E,
-Buildx and GHCR digest read-back passed for SHA `c514991`; production
-Deploy, Runtime Verify and smoke remain unrun pending separate OWNER approval
-for an exact SHA. Further reduction must preserve the current protected paths;
-no safe retirement of the remaining active helpers is established by this
-audit. The current candidate `ccd70efe6c2bc8d9273019dd5f55cc27075d40b9`
-passed exact-head run [44719646468](https://github.com/akhripunov/gpoint/actions/runs/44719646468): Python, Workspace, isolated PostgreSQL, Eros and Mini App E2E, all four Buildx images, identity/provenance checks and GHCR digest read-back. Production Deploy/Verify was skipped for the PR event.
+Buildx and GHCR digest read-back passed in run
+[44757686891](https://github.com/akhripunov/gpoint/actions/runs/44757686891).
+The PR event correctly skipped production Deploy/Verify. Production Deploy,
+Runtime Verify and smoke remain pending separate OWNER authorization for the
+exact integrated SHA.
 
 ### ME-62 acceptance scenario matrix
 
-Scenario rows use the exact tests named in each row; the current exact-head
-candidate is `ccd70efe6c2bc8d9273019dd5f55cc27075d40b9`, base
-`3d680fa153fd6aebf786455d6f36d3b1a67cc78f`. The exact-head hosted run
-[44719646468](https://github.com/akhripunov/gpoint/actions/runs/44719646468)
+Scenario rows use the exact tests named in each row; current PR candidate is
+`0b721128f910748fe3643ffe1b83de7d9f27559b`, base
+`3d680fa153fd6aebf786455d6f36d3b1a67cc78f`. Exact-head hosted run
+[44757686891](https://github.com/akhripunov/gpoint/actions/runs/44757686891)
 passed Python, Workspace, isolated PostgreSQL, Eros and Mini App E2E, all four
 Buildx images and GHCR digest read-back. The PR event correctly skipped
 production Deploy/Verify. `PASS` below means the stated

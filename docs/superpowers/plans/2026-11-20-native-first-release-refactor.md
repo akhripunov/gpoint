@@ -2,7 +2,7 @@
 
 > **For agentic workers:** Use superpowers:executing-plans. Steps use checkbox syntax; this plan is already OWNER-authorized for execution in the existing ME-62 scope.
 
-**Goal:** Replace custom release controllers and duplicate validation with native GitHub Actions, Git, Docker Buildx/GHCR, and Kamal 2 behavior while preserving every required guarantee and reaching the fixed ≥50% release-code reduction target.
+**Goal:** Use the simplest Native First architecture that preserves every required guarantee, replacing duplicate custom release behavior with native GitHub Actions, Git, Docker Buildx/GHCR, and Kamal 2 mechanisms where that materially simplifies the system.
 
 **Architecture:** Keep `.github/workflows/gpoint-native-release.yml` as the only production controller. Use GitHub's same-run job dependencies, concurrency, protected Environment, matrix and paths-filter mechanisms; Buildx outputs/attestations; actual Kamal/Docker-installed state; and Kamal's lifecycle/health/rollback commands. Retain the smallest adapters needed for GPoint-specific per-component baselines, migration policy, safety evidence and user-facing smoke where the native tools do not provide equivalent guarantees.
 
@@ -42,9 +42,9 @@
 
 ## Fixed measurement
 
-Keep the original baseline and selectors unchanged. Record all seven spec measures (workflow LOC; release-specific helper LOC; shared referenced LOC; controller count; unique image builds; custom state/manifest abstractions; ordinary deploy checks). Count new `.hcl`, composite-action, JS, or other files in the same executable inventory. A source relocation is not a reduction.
+Keep the original baseline and selectors unchanged. Record all seven spec measures (workflow LOC; release-specific helper LOC; shared referenced LOC; controller count; unique image builds; custom state/manifest abstractions; ordinary deploy checks). Count new `.hcl`, composite-action, JS, or other files in the same executable inventory. A source relocation is not a reduction. OWNER update 2026-11-20: the 50% reduction is informational, not a blocking acceptance requirement; do not rewrite code or move complexity solely to lower LOC.
 
-Initial six-path baseline/current: 4,562 / 3,909 LOC. Target: ≤2,281. Current workflow: 2,399 LOC. Additional work required: 1,628 LOC. The broader workflow-plus-referenced-script measure is 7,876 / 6,973; target ≤3,938. Recalculate from Git objects after every accepted refactor.
+At exact PR candidate `0b721128f910748fe3643ffe1b83de7d9f27559b`, fixed measures are: six-path controller/adapters 4,562 / 3,871; workflow 2,437 / 2,363; workflow plus referenced helpers 7,876 / 6,935; extended inventory 12,486 / 9,098. Report recalculated values after material refactors; no percentage threshold gates acceptance.
 
 ## Tasks
 
@@ -118,16 +118,16 @@ Task 4 hosted feedback: exact SHA `1d058bc0aa708656f5c142f996ad82fa15270d21` cau
 - [x] Keep Eros synthetic E2E conditional on relevant code, data or infrastructure baseline changes, isolated in the CI workspace.
 - [x] Preserve protected Environment identity and native Deployment success only after Runtime Verify; no custom polling/identifier removal was proven equivalent.
 
-### Task 6: Verify acceptance and exact reduction
+### Task 6: Verify functional acceptance and record complexity
 
 **Files:**
 - Update: `docs/release/automation.md`
 - Update: `tests/test_simple_release_architecture.py` and existing scenario matrix
 
-- [ ] Run all existing release/scope, migration, OCI, Kamal, smoke, and architecture suites plus `actionlint`, `shellcheck`, and required Docker integration suites.
-- [ ] Prove the full 35-scenario matrix through automated fixtures/local isolated services and exact-head hosted GitHub CI/Buildx/GHCR. Do not run production scenarios.
-- [ ] Report each function block as native replacement or narrowly retained GPoint code with evidence.
-- [ ] Recalculate the unchanged seven measures and confirm ≥50% reduction; no denominator changes or code relocation.
-- [ ] Update the existing Draft PR #181 and ME-62 with exact SHA, file scope, local evidence and exact hosted CI run. Keep PR Draft and unmerged.
-- [ ] Run repository completion gates; report any pre-existing package/DNS failure precisely.
-- [ ] Leave the branch clean with scoped local commits. Production checks remain pending separate exact-SHA OWNER authorization.
+- [x] Run the focused release/scope, OCI, Kamal and architecture suites locally (201 passed on the docs-updated candidate); exact-head hosted run `44757686891` passed Python, Workspace, actionlint, isolated PostgreSQL, Eros/Mini App E2E, Buildx and GHCR digest read-back.
+- [x] Record the 35-scenario matrix using automated fixtures, isolated services and exact-head hosted evidence. Production-only actions remain NOT VERIFIED and are not exercised without separate exact-SHA OWNER authorization.
+- [x] Report each major function block as a native replacement or narrowly retained GPoint code in `docs/release/automation.md`; the block audit found no additional material safe simplification after the dorny, same-run dependency, prepared-run and duplicate Kamal-query removals.
+- [x] Recalculate the unchanged LOC measures for information only; no denominator changes or code relocation.
+- [x] Update the existing Draft PR #181 and ME-62 with exact SHA, scope, local evidence and exact hosted CI run. Keep PR Draft and unmerged.
+- [x] Attempt repository completion gates and record their existing environment failures: `pnpm repo:clean:start` could not resolve `registry.npmjs.org` (`ENOTFOUND`); `CI=true pnpm repo:clean:end` fails with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH` because current pnpm ignores `pnpm.overrides` in `package.json`. Neither command changed tracked files; no dependency or lockfile change is included.
+- [x] Leave the branch clean with scoped local commits. Production checks remain pending a separate exact-SHA OWNER authorization after an integrated main SHA is selected.
