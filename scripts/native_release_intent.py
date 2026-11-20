@@ -428,8 +428,6 @@ def classify_component_build_plan(repo: Path, candidate: str,
         component for component, baseline in component_sources.items()
         if baseline != candidate and component in paths_by_baseline[baseline]
     }
-    if not components and all(source == candidate for source in component_sources.values()):
-        raise ValueError("candidate equals production baseline; no changed component scope")
     # Historical runtime changes may appear when a lagging component SHA is
     # compared with the candidate. Only paths owned by that component count;
     # a newer component baseline has already absorbed its own changes. Unknown

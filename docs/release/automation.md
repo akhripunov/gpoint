@@ -321,7 +321,7 @@ contract tests and exact-SHA hosted CI.
 
 | Function | Current code | Native mechanism | Decision |
 |---|---|---|---|
-| Component path filters | `dorny/paths-filter`; retired `native_change_surface.py` (131 LOC at baseline) | Git and the pinned `dorny/paths-filter` action | **REPLACE / DELETE** — declarative filters now supply the component paths. |
+| CI component path filters | `dorny/paths-filter`; retired `native_change_surface.py` (131 LOC at baseline) | Git and the pinned `dorny/paths-filter` action | **REPLACE / DELETE** — declarative filters select conditional CI work; the separate production planner remains responsible for installed baselines. |
 | Event admission and exact-scope fail-closed rules | `scripts/native_release_intent.py` (574 LOC in this candidate) | GitHub event/dispatch context and workflow conditions | **KEEP, reduce** — policy checks reject unauthorized events, unsafe paths and migration scope; retired migration-rehearsal dispatch handling was removed because the separate protected operation is owned by `gpoint-operations.yml`. Further reduction remains required. |
 | Deleted paths in cumulative component diffs | Retired exact-path deletion allowlist | Git diff status plus the existing component/non-runtime path map | **REPLACE** — deleted runtime paths select their owning component; deleted release scripts and known non-runtime paths do not select an image; unmapped deletions still block. |
 | Installed component source baselines | `scripts/resolve_native_build_scope.py` | GitHub Deployments API, stock Kamal app commands and Docker inspect | **KEEP, reduce** — this adapter resolves installed component identities and exact-SHA evidence used by Build and Deploy. |
@@ -344,10 +344,10 @@ by it:
 
 | Measure | Main baseline | Current local candidate | Change |
 |---|---:|---:|---:|
-| Main controller + five control adapters (six paths) | 4,562 | 3,909 | −14.3% |
-| Workflow LOC | 2,437 | 2,399 | −1.6% |
-| Referenced helper LOC | 5,439 | 4,574 | −15.9% |
-| Combined workflow + referenced scripts LOC | 7,876 | 6,973 | −11.5% |
+| Main controller + five control adapters (six paths) | 4,562 | 3,893 | −14.7% |
+| Workflow LOC | 2,437 | 2,385 | −2.1% |
+| Referenced helper LOC | 5,439 | 4,572 | −16.0% |
+| Combined workflow + referenced scripts LOC | 7,876 | 6,957 | −11.7% |
 | Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,098 | −27.1% |
 | Referenced helper files | 21 | 19 | −2 |
 | Required test matrix runs | 4 | 2 | −50% |
@@ -381,9 +381,9 @@ baseline and selectors are unchanged.
 
 | Measure | Main baseline | Current candidate |
 |---|---:|---:|
-| Native production workflow LOC | 2,437 | 2,399 |
+| Native production workflow LOC | 2,437 | 2,385 |
 | Release-specific referenced-helper LOC | 4,257 | 3,720 |
-| Shared referenced-helper LOC (unique source files) | 1,182 | 854 |
+| Shared referenced-helper LOC (unique source files) | 1,182 | 852 |
 | Production release controllers | 1 | 1 |
 | Additional Layer7 staging deployment workflows | 1 | 0 |
 | Maximum distinct production images in one full run | 4 | 4 |
@@ -490,6 +490,8 @@ or hosted tests as production acceptance.
 ## Local test selection under FULL
 
 FULL is a risk level, not a mandate to run every local test. `classify-release-prepush.py` remains the canonical FAST/FULL procedure. Hosted CI uses the pinned `dorny/paths-filter` action in `gpoint-native-release.yml` for declarative five-component and shared-dependency selection. Run the directly affected local checks; GitHub CI remains authoritative for the exact PR SHA. The production planner tracks Core, AGATA, Mini App, Eros Engine and Eros Relay independently. Engine-only changes build the Eros image. Relay-only changes build the shared Core runtime image and deploy only Relay. The first Eros installation still requires both services. Runtime Verify records separate source SHAs and digests for Engine and Relay. Older successful deployments with a single Eros source SHA use that SHA for both because those deployments updated the pair together. An ambiguous or partial runtime still requires the existing authorized recovery path. The planner compares installed component sources with the exact candidate and fails closed on unknown paths. Do not recreate a second component path map for CI.
+
+`dorny/paths-filter` accepts a commit SHA as one `base` for a non-PR comparison. PR mode obtains its comparison from the pull request API unless configured for local Git. A single action invocation cannot compare each production component against its own independently installed SHA. A matrix would still need a custom collector to combine per-component results, reject unmapped/deleted inputs, and distinguish image-only migration builds from runtime deployments. Therefore the action remains a CI selector; the smaller exact-SHA production planner stays until an equivalent native interface exists. Rename detection remains disabled in the planner so Git reports a move as delete plus add and the existing ownership and migration guards can inspect both paths. See the [`dorny/paths-filter` input and output contract](https://github.com/dorny/paths-filter#usage).
 
 | `classify-release-prepush.py` | Keep outside CI | Implements local FAST/FULL preparation rules only; it is not a release router and does not weaken hosted gates. |
 

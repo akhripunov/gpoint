@@ -920,12 +920,38 @@ def test_known_non_runtime_symlink_still_requires_explicit_component_scope(tmp_p
         MODULE.classify_component_scope(repo, candidate, inventory)
 
 
-def test_candidate_equal_to_baseline_blocks_without_restarting_components(tmp_path):
+def test_candidate_equal_to_every_baseline_is_a_safe_noop(tmp_path):
     repo, baseline, _candidate, inventory = _component_repo(
         tmp_path, {"apps/miniapp/src/main.tsx": "export default 1;\n"}
     )
-    with pytest.raises(ValueError, match="candidate equals production baseline"):
-        MODULE.classify_component_scope(repo, baseline, inventory)
+    plan = MODULE.classify_component_build_plan(
+        repo, baseline, {"CORE": baseline, "AGATA": baseline, "MINIAPP": baseline}
+    )
+    assert plan == {
+        "deploy_scope": "NONE", "build_components": [], "reason": "no_runtime_changes",
+    }
+    result = MODULE.classify_component_scope(repo, baseline, inventory)
+    assert result["scope"] == "NONE"
+    assert not any(value for key, value in result.items() if key.startswith("deploy_"))
+
+
+def test_renamed_component_source_is_classified_as_delete_and_add(tmp_path):
+    repo, _, baseline, _inventory = _component_repo(
+        tmp_path, {"apps/miniapp/src/old.tsx": "export default 1;\n"}
+    )
+    old_path = repo / "apps/miniapp/src/old.tsx"
+    new_path = repo / "apps/miniapp/src/new.tsx"
+    old_path.rename(new_path)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "rename miniapp source")
+    candidate = _git(repo, "rev-parse", "HEAD")
+
+    plan = MODULE.classify_component_build_plan(
+        repo, candidate, {"CORE": baseline, "AGATA": baseline, "MINIAPP": baseline}
+    )
+
+    assert plan["deploy_scope"] == "MINIAPP"
+    assert plan["build_components"] == ["MINIAPP"]
 
 
 def test_component_runtime_inventory_pins_new_roles_and_preserves_untouched_identity(tmp_path):

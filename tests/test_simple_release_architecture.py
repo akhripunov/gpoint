@@ -146,11 +146,11 @@ def test_pr_candidate_runs_build_without_production_deploy():
     assert "github.event_name == 'pull_request'" in eros_e2e["if"]
     assert "contains(github.event.pull_request.labels.*.name, 'me-62-full-build')" in eros_e2e["if"]
     assert "eros_e2e" not in tests["outputs"]
-    eros_gate = next(step for step in build["steps"] if step.get("name") == "Require exact-candidate Eros test evidence")
-    assert "/attempts/$GITHUB_RUN_ATTEMPT/jobs" in eros_gate["run"]
-    assert ".head_sha" in eros_gate["run"]
-    assert "runs/$GITHUB_RUN_ID" in eros_gate["run"]
-    assert eros_gate["env"]["EXPECTED_RUN_HEAD_SHA"].endswith("github.sha }}")
+    assert "tests" in build["needs"]
+    assert "needs.tests.result == 'success'" in build["if"]
+    assert not any(step.get("name") == "Require exact-candidate Eros test evidence" for step in build["steps"])
+    assert "steps.infrastructure_baseline.outputs.eros_engine" in eros_e2e["if"]
+    assert "steps.dispatch_build_scope.outputs.eros_engine" in eros_e2e["if"]
     assert "github.event_name == 'pull_request'" not in deploy["if"]
     assert "needs.tests.outputs.mode == 'DEPLOY'" in deploy["if"]
 
