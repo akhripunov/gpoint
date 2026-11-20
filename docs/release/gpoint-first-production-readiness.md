@@ -3,6 +3,12 @@
 Status: blocked by missing production infrastructure configuration. No production migration or deployment was attempted.
 Date: 2026-09-15
 
+> Historical snapshot only. Its infrastructure states describe 2026-09-15 and
+> are not current runtime evidence or release prerequisites. OWNER's
+> 2026-11-20 directive establishes Layer7 as the existing production VPS and
+> removes staging from the GPoint release model; no staging VPS, database,
+> Environment, or workflow is required.
+
 ## Release identity
 
 - Verified candidate: `5326a89ee1d489d28d040270b16cfd95aa94246e`
@@ -28,7 +34,7 @@ The only commit between the verified candidate and current `main` (`046be97`) ch
 | S3-compatible storage | NOT_CONFIGURED | Infrastructure |
 | Domain/DNS | NOT_CONFIGURED | Infrastructure |
 | TLS/HTTPS | NOT_CONFIGURED | Infrastructure |
-| Staging | NOT_CONFIGURED | Product/Infrastructure decision |
+| Staging | OUT OF SCOPE | No separate staging infrastructure is part of the current release model |
 | Telegram Bot | MISSING | Product/Telegram owner |
 | Telegram Mini App URL | MISSING | Product/Telegram owner |
 

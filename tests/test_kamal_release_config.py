@@ -89,9 +89,9 @@ def test_kamal_agata_and_miniapp_are_separate_services():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     assert "id: miniapp" in workflow and "target: miniapp-runtime" in workflow
     assert "ghcr.io/akhripunov/gpoint-miniapp:${{ github.sha }}" in workflow
-    assert "MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest || steps.prepared.outputs.miniapp_digest }}" in workflow
-    assert "APP_DIGEST: ${{ steps.app.outputs.digest || steps.prepared.outputs.app_digest }}" in workflow
-    assert "AGATA_DIGEST: ${{ steps.agata.outputs.digest || steps.prepared.outputs.agata_digest }}" in workflow
+    assert "MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}" in workflow
+    assert "APP_DIGEST: ${{ steps.app.outputs.digest }}" in workflow
+    assert "AGATA_DIGEST: ${{ steps.agata.outputs.digest }}" in workflow
 
 
 def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
@@ -101,16 +101,16 @@ def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
     assert not ({"workspace", "python"} & set(jobs))
     assert jobs["build"]["needs"] == ["tests"]
     assert "needs.tests.result == 'success'" in jobs["build"]["if"]
-    assert "outputs.mode == 'LAYER7_API'" in jobs["build"]["if"]
-    assert "needs.tests.outputs.mode == 'ARTIFACT_PREPARE'" in jobs["build"]["if"]
+    assert "github.event_name == 'pull_request'" in jobs["build"]["if"]
+    assert "ARTIFACT_PREPARE" not in jobs["build"]["if"]
     build_steps = yaml.safe_dump(jobs["build"]["steps"])
     assert "cache-to: type=gha,scope=gpoint-runtime,mode=max" in build_steps
     assert "sbom: true" in build_steps
     assert "provenance: mode=max" in build_steps
     assert jobs["deploy"]["needs"] == ["tests", "build"]
     assert jobs["deploy"]["environment"] == {
-        "name": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}",
-        "url": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'http://95.133.236.59' || (inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url) }}",
+        "name": "production",
+        "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
     assert "deployment" not in jobs["deploy"]["environment"]
 
@@ -661,7 +661,7 @@ def test_kamal_schema_compatibility_accepts_divergent_live_source_only_when_tree
 def test_manifest_writer_behavior_tests_run_in_python_ci():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     tests_job = workflow.split("  tests:\n", 1)[1].split("  build:\n", 1)[0]
-    assert "tests/test_kamal_production_manifest.py" in tests_job
+    assert "tests/test_kamal_ordinary_manifest.py" in tests_job
     oras_setup = tests_job.index("name: Install pinned ORAS for release evidence round-trip test")
     assert "Install pinned ORAS for release evidence round-trip test" in tests_job
     assert "oras_1.3.0_linux_amd64.tar.gz" in tests_job
@@ -683,7 +683,7 @@ def test_pinned_setup_go_uses_official_digest_pinned_tool_cache_seed():
     seed = steps[seed_index]
     setup = steps[setup_index]
     assert seed_index < setup_index
-    assert seed["if"] == setup["if"] == "matrix.suite == 'release-tooling'"
+    assert seed["if"] == setup["if"] == "matrix.suite == 'workspace'"
     assert "api.github.com/repos/actions/go-versions/releases/assets/303957986" in seed["run"]
     assert "Accept: application/octet-stream" in seed["run"]
     assert "1b6c5c84f587ab036ca904638a39cf4bd272d1e8d439eb9c8bc60f91793e0765" in seed["run"]
@@ -698,8 +698,8 @@ def test_native_release_runs_kamal_after_successful_main_push():
     deploy = workflow["jobs"]["deploy"]
     assert "always()" in deploy["if"] and "needs.build.result == 'success'" in deploy["if"]
     assert deploy["environment"] == {
-        "name": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}",
-        "url": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'http://95.133.236.59' || (inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url) }}",
+        "name": "production",
+        "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
     deploy_script = "\n".join(step.get("run", "") for step in deploy["steps"])
     assert 'test "$APPROVE_PRODUCTION" = true' in deploy_script
@@ -710,7 +710,7 @@ def test_native_release_runs_kamal_after_successful_main_push():
     rollback_workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
     rollback = rollback_workflow["jobs"]["deploy"]
     assert rollback["environment"] == {
-        "name": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}", "url": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'http://95.133.236.59' || (inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url) }}",
+        "name": "production", "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
     rollback_script = "\n".join(step.get("run", "") for step in rollback["steps"])
     assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in rollback_script
@@ -907,7 +907,7 @@ def test_core_hook_binds_component_source_to_release_candidate_before_ssh(tmp_pa
 def test_component_identity_regression_is_in_mandatory_test_job_before_deploy():
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
     tests_job = workflow["jobs"]["tests"]
-    assert tests_job["strategy"]["matrix"]["suite"] == ["workspace", "python", "release-tooling", "eros"]
+    assert tests_job["strategy"]["matrix"]["suite"] == ["workspace", "python"]
     assert workflow["jobs"]["build"]["needs"] == ["tests"]
     assert "needs.tests.result == 'success'" in workflow["jobs"]["build"]["if"]
     assert "tests" in workflow["jobs"]["deploy"]["needs"]
@@ -960,21 +960,6 @@ def test_post_migration_head_requires_checksum_proof_when_old_runtime_lacks_revi
     assert renamed.returncode != 0 and "APPLIED_ALEMBIC_MIGRATION_CHANGED:agata0012" in renamed.stderr
 
 
-def test_native_kamal_keeps_absolute_runner_ssh_config_paths_available():
-    staging = (ROOT / '.github/workflows/gpoint-layer7-staging.yml').read_text()
-    action = (ROOT / '.github/actions/layer7-deploy/action.yml').read_text()
-    # The key is materialized into the runner temp directory from the environment
-    # secret; no HOME-based SSH directory is mounted or assumed.
-    assert 'LAYER7_SSH_KEY=$RUNNER_TEMP/layer7/key' in staging
-    assert 'GPOINT_SSH_KEY=$RUNNER_TEMP/layer7/key' in staging
-    assert 'GPOINT_KNOWN_HOSTS_FILE=$GITHUB_WORKSPACE/infra/staging/layer7_known_hosts' in staging
-    assert '/root/.ssh' not in staging
-    assert '/root/.ssh' not in action
-    transport = (ROOT / 'scripts/layer7-transport.sh').read_text()
-    assert 'StrictHostKeyChecking=yes' in transport
-    assert 'infra/staging/layer7_known_hosts' in transport
-
-
 @pytest.mark.parametrize('name', ['pre-app-boot', 'post-app-boot'])
 def test_kamal_hooks_use_only_the_explicit_pinned_ssh_configuration(name):
     hook = (ROOT / '.kamal/hooks' / name).read_text()
@@ -1003,6 +988,7 @@ def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
         'CANDIDATE_SHA': 'a' * 40, 'IMAGE_VERSION': 'a' * 40 + '-123-1',
         'APP_DIGEST': 'sha256:' + 'b' * 64, 'AGATA_DIGEST': 'sha256:' + 'c' * 64,
         'MINIAPP_DIGEST': 'sha256:' + 'd' * 64, 'EROS_DIGEST': 'sha256:' + 'e' * 64,
+        'EROS_RELAY_DIGEST': 'sha256:' + 'f' * 64,
         'DB_CONTAINER_ID': 'e' * 64,
         'REDIS_CONTAINER_ID': 'f' * 64, 'DEPLOYMENT_ID': '7', 'GITHUB_RUN_ID': '123',
         'GITHUB_RUN_ATTEMPT': '1', 'writer_remote': '/run/gpoint-ordinary-manifest-123-1.py',

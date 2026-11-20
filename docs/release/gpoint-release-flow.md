@@ -10,6 +10,6 @@ Every release is fail-closed and starts from a known Git commit. `latest` is nev
 6. Deploy the exact candidate, verify runtime health, actual running SHA, and DB head.
 7. Publish an immutable remote release ref/tag resolving to the candidate SHA. Never force-move an existing baseline or release tag.
 
-Unknown production state, remote availability, candidate tests, migration head, artifact parity, secrets/config, or rollback/recovery state blocks release. Production secrets remain outside Git. Staging is required when configured; otherwise report `STAGING=NOT_CONFIGURED` and do not claim staging proof.
+Unknown production state, remote availability, candidate tests, migration head, artifact parity, secrets/config, or rollback/recovery state blocks release. Production secrets remain outside Git. Layer7 is the single production VPS; GPoint has no staging VPS, database, GitHub Environment, or release workflow. Validate candidates with local integration tests, isolated Docker/PostgreSQL, and GitHub CI/Buildx/GHCR. Run Kamal Deploy, Runtime Verify, and production smoke only after separate OWNER approval for the exact SHA.
 
 Telegram live smoke is mandatory before public launch. Telegram affiliate live proof is a separate financial gate; until proven, affiliate status remains `UNVERIFIED_EXTERNAL_DEPENDENCY`.

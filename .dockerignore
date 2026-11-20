@@ -12,6 +12,8 @@ tests
 tests/**
 **/test
 **/test/**
+!apps/api/test/
+!apps/api/test/build-output.test.mjs
 **/tests
 **/tests/**
 dist

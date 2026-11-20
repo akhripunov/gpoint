@@ -249,12 +249,11 @@ def test_eros_topology_inventory_shell_loop_has_no_unused_read_variable():
 def test_kamal_roles_share_the_private_eros_network_with_stable_service_aliases():
     api = (ROOT / "config/deploy.eros-api.yml").read_text()
     engine = (ROOT / "config/deploy.eros.yml").read_text()
-    staging_engine = (ROOT / "config/deploy.layer7-staging.eros.yml").read_text()
     model = (ROOT / "services/eros-engine/eros-production-model-config.toml").read_text()
     assert "- shared_internal" in api and "- gpoint_eros_data" in api
     assert "network-alias: gpoint-core-api" in api
     assert "network: gpoint_eros_data" in engine and "network-alias: gpoint-eros" in engine
-    assert "network-alias: gpoint-eros" in staging_engine
+    assert "network-alias: gpoint-eros" in engine
     assert "'EROS_SERVICE_URL': 'http://gpoint-eros:8080'" in (ROOT / "scripts/eros-production-secrets.py").read_text()
     assert model.count("http://gpoint-core-api:3000/eros-worker/v1/") == 2
 
@@ -266,6 +265,7 @@ def test_hosted_stock_eros_e2e_uses_the_policy_approved_upstream_tag():
     build = next(step for step in test_steps if step.get("id") == "eros_test_image")
     pin = next(step for step in test_steps if step.get("name") == "Read pinned Eros upstream source")
     assert test_steps.index(pin) < test_steps.index(build)
+    assert "matrix.suite == 'workspace'" in build["if"]
     assert "services/eros-engine/upstream.sha" in pin["run"]
     assert build["with"]["tags"] == "gpoint-eros:stock-${{ env.EROS_UPSTREAM_SHA }}"
     assert "#${{ env.EROS_UPSTREAM_SHA }}" in build["with"]["context"]

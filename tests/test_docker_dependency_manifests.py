@@ -114,3 +114,11 @@ def test_context_refuses_in_repo_output_and_symlinked_manifest(tmp_path):
     target.symlink_to(real)
     with pytest.raises(ValueError, match='regular file'):
         manifests.write_context(root, tmp_path / 'deps')
+
+
+def test_api_build_output_test_is_not_excluded_from_docker_context():
+    dockerignore = SCRIPT.parents[1] / '.dockerignore'
+    lines = dockerignore.read_text().splitlines()
+
+    assert '!apps/api/test/' in lines
+    assert '!apps/api/test/build-output.test.mjs' in lines

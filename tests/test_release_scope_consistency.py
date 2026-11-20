@@ -1,12 +1,4 @@
-"""Every release classifier must agree on the same accumulated candidate.
-
-The first release of #146 aborted in Deploy because the deploy scope planner met
-`scripts/native_change_surface.py` and had no rule for it. CI had classified the
-same file as release infrastructure. The two questions are different — which
-tests to run, and which images to rebuild — but they must never contradict:
-a path that CI treats as runtime must be mapped by the deploy planner, and a
-path the deploy planner ignores must still force full CI.
-"""
+"""Keep dorny CI selection and production-baseline planning fail-closed."""
 
 import subprocess
 import sys
@@ -17,7 +9,6 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import native_change_surface as surface  # noqa: E402
 import native_release_intent as intent  # noqa: E402
 
 # The production baseline the failed run 43068398600 measured against.
@@ -44,33 +35,18 @@ def candidate_paths():
 
 
 def test_every_candidate_path_is_mapped_or_explicitly_non_runtime(candidate_paths):
+    head = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+    deleted = set(subprocess.check_output(
+        ["git", "-C", str(ROOT), "diff", "--diff-filter=D", "--name-only",
+         PRODUCTION_BASELINE, head], text=True).splitlines())
     unmapped = [path for path in candidate_paths
                 if not intent._component_paths(path)
                 and not intent._known_non_runtime_path(path)
-                and path not in intent.KNOWN_RETIRED_NON_RUNTIME_FILES]
+                and not (path in deleted and path.startswith("scripts/"))]
     assert not unmapped, (
         "the deploy scope planner would abort the release on these paths: "
         f"{unmapped}")
-
-
-def test_ci_never_calls_a_path_runtime_that_the_deploy_planner_ignores(candidate_paths):
-    contradictions = []
-    for path in candidate_paths:
-        deploy_components = intent._component_paths(path)
-        ci_components = surface.classify([path])
-        if not deploy_components and ci_components["full_ci"] is False:
-            # Ignored by Deploy and not escalated by CI: release infrastructure
-            # must still be fully tested, otherwise the path would be invisible.
-            if not intent._known_non_runtime_path(path):
-                contradictions.append(path)
-    assert not contradictions, f"paths invisible to both classifiers: {contradictions}"
-
-
-def test_release_infrastructure_still_forces_full_ci(candidate_paths):
-    infra = [path for path in candidate_paths if path.startswith(("scripts/", ".github/"))]
-    if not infra:
-        pytest.skip("candidate touches no release infrastructure")
-    assert surface.classify(infra)["full_ci"] is True
 
 
 def test_unknown_roots_stay_fail_closed():
@@ -95,8 +71,7 @@ def test_accumulated_candidate_always_requires_candidate_images():
         pytest.skip("production baseline is not in this checkout")
     head = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
-    baseline_sources = {component: PRODUCTION_BASELINE
-                        for component in ("CORE", "AGATA", "MINIAPP", "EROS")}
+    baseline_sources = dict.fromkeys(intent.COMPONENT_ROLES, PRODUCTION_BASELINE)
 
     plan = intent.classify_component_build_plan(ROOT, head, baseline_sources)
 
@@ -161,23 +136,23 @@ def test_build_plan_and_live_scope_agree_on_the_same_production_baseline(tmp_pat
     components, and every component Deploy will update must already be built.
     """
     repo, baseline, candidate, inventory = _scope_repo(tmp_path)
-    sources = {"CORE": baseline, "AGATA": baseline, "MINIAPP": baseline, "EROS": baseline}
+    sources = dict.fromkeys(intent.COMPONENT_ROLES, baseline)
 
     plan = intent.classify_component_build_plan(repo, candidate, sources)
     scope = intent.classify_component_scope(repo, candidate, inventory)
 
     assert scope["scope"] == plan["deploy_scope"]
     live_components = set(scope["scope"].split("+")) - {"NONE"}
-    assert live_components <= set(plan["build_components"]), (
+    assert {intent.COMPONENT_IMAGES[component] for component in live_components} <= set(plan["build_components"]), (
         "Deploy would require an image Build never produced")
 
 
 def test_bootstrap_plan_covers_any_live_scope(tmp_path):
     repo, baseline, candidate, inventory = _scope_repo(tmp_path)
-    sources = {"CORE": baseline, "AGATA": baseline, "MINIAPP": baseline, "EROS": baseline}
+    sources = dict.fromkeys(intent.COMPONENT_ROLES, baseline)
     scope = intent.classify_component_scope(repo, candidate, inventory)
     live_components = set(scope["scope"].split("+")) - {"NONE"}
 
     bootstrap = set(intent.classify_component_build_plan(repo, candidate, sources)["build_components"])
     # A bootstrap build is the whole image set, so any live scope is covered.
-    assert live_components <= bootstrap
+    assert {intent.COMPONENT_IMAGES[component] for component in live_components} <= bootstrap

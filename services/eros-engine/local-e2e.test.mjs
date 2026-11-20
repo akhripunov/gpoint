@@ -163,8 +163,7 @@ test('model config routes chat, embeddings and synthetic dreaming scan to the in
 });
 
 test('runtime Eros profiles keep only the dreaming scan output contract and parameters-only arc rewrite', () => {
-  for (const name of ['eros-production-model-config.toml', 'eros-pilot-model-config.toml',
-    'eros-layer7-staging-model-config.toml']) {
+  for (const name of ['eros-production-model-config.toml', 'eros-pilot-model-config.toml']) {
     const config = readFileSync(new URL(name, directory), 'utf8');
     const dreaming = config.split('[tasks.dreaming_scan]')[1]?.split('\n[tasks.')[0] ?? '';
     const arc = config.split('[tasks.arc_rewrite]')[1] ?? '';
@@ -176,13 +175,8 @@ test('runtime Eros profiles keep only the dreaming scan output contract and para
     assert.match(dreaming, /additional fields may be included and are stored by Eros as opaque metadata/i, name);
     assert.doesNotMatch(dreaming, /privacy rules|never retain|non-sensitive|return only|0–10|0-10|sensitive data/i, name);
     assert.doesNotMatch(arc, /filter_prompt\s*=/, name);
-    if (name === 'eros-layer7-staging-model-config.toml') {
-      assert.match(dreaming, /temperature\s*=\s*0\.2/, name);
-      assert.match(arc, /temperature\s*=\s*0\.3/, name);
-    } else {
-      assert.match(dreaming, /temperature\s*=\s*1\.0/, name);
-      assert.match(arc, /temperature\s*=\s*1\.0/, name);
-    }
+    assert.match(dreaming, /temperature\s*=\s*1\.0/, name);
+    assert.match(arc, /temperature\s*=\s*1\.0/, name);
   }
   const fixture = readFileSync(new URL('test-model-config.toml', directory), 'utf8');
   const fixtureDreaming = fixture.split('[tasks.dreaming_scan]')[1]?.split('\n[tasks.')[0] ?? '';

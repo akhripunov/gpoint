@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 
@@ -17,7 +18,7 @@ def migration(root: Path, name: str, sql: str) -> str:
     path = root / name / "migration.sql"
     path.parent.mkdir(parents=True)
     path.write_text(sql, encoding="utf-8")
-    return MODULE.sha256(path.read_bytes())
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def test_no_pending_migrations_skips_apply_without_changing_live_inventory(tmp_path):

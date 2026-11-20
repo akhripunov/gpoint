@@ -9,11 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/gpoint-native-release.yml"
 
 _ROLLBACK = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
-_BACKUP = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())
 _REHEARSAL = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())
-_STAGING = yaml.safe_load((ROOT / ".github/workflows/gpoint-layer7-staging.yml").read_text())
-_SPECIAL_JOBS = {"rollback": _ROLLBACK, "backup_maintenance": _BACKUP,
-                 "migration_rehearsal": _REHEARSAL, "layer7_staging": _STAGING}
 
 
 
@@ -23,92 +19,48 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert events["push"]["branches"] == ["main"]
     assert events["pull_request"]["branches"] == ["main"]
     deploy = workflow["jobs"]["deploy"]
-    assert "build" in deploy["needs"]
-    assert "push" in deploy.get("if", "")
-    assert "refs/heads/main" in deploy.get("if", "")
-    assert "workflow_dispatch" in deploy.get("if", "")
-    assert deploy["environment"] == {
-        "name": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}",
-        "url": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'http://95.133.236.59' || (inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url) }}",
-    }
-    build = workflow["jobs"]["build"]
-    assert "release_intent" not in workflow["jobs"]
-    assert build["needs"] == ["tests"]
-    assert "outputs.mode == 'DEPLOY'" in build["if"]
-    assert "outputs.mode == 'REHEARSAL'" not in build["if"]
-    assert set(workflow["jobs"]) == {"tests", "build", "deploy"}
-    assert (ROOT / ".github/workflows/gpoint-operations.yml").exists()
-    assert "outputs.mode == 'ARTIFACT_PREPARE'" in build["if"]
-    assert "environment" not in build
-    assert "packages: write" in WORKFLOW.read_text(encoding="utf-8")
     assert deploy["needs"] == ["tests", "build"]
+    assert "push" in deploy["if"] and "refs/heads/main" in deploy["if"]
+    assert "workflow_dispatch" in deploy["if"]
+    assert deploy["environment"]["name"] == "production"
+    build = workflow["jobs"]["build"]
+    assert set(workflow["jobs"]) == {"tests", "build", "deploy"}
+    assert build["needs"] == ["tests"]
+    assert "github.event_name == 'pull_request'" in build["if"]
+    assert "outputs.mode == 'DEPLOY'" in build["if"]
+    assert "ARTIFACT_PREPARE" not in build["if"]
+    assert "LAYER7_API" not in build["if"]
+    assert "LAYER7_EROS" not in build["if"]
+    assert "environment" not in build
+    assert build["permissions"]["packages"] == "write"
+    assert (ROOT / ".github/workflows/gpoint-operations.yml").exists()
 
 
-def test_three_native_release_scenarios_auto_route_test_build_kamal_and_runtime_verify():
-    sys_path = str(ROOT / "scripts")
+def test_layer7_is_production_and_retired_staging_paths_cannot_deploy():
     import sys
-    sys.path.insert(0, sys_path)
+    sys.path.insert(0, str(ROOT / "scripts"))
     from native_release_intent import classify_push, push_deploy_authorized
 
-    native = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    jobs = native["jobs"]
-    layer7_paths = {
-        "apps/api/src/eros-response-prompt.js",
-        "services/eros-engine/eros-layer7-staging-model-config.toml",
-    }
-    ordinary = classify_push(event_name="push", ref="refs/heads/main",
-                             changed_paths={"apps/api/src/main.ts"})
-    migration = classify_push(event_name="push", ref="refs/heads/main",
-                              changed_paths={"packages/db/prisma/migrations/20261116000000_fixture/migration.sql"})
-    layer7 = classify_push(event_name="push", ref="refs/heads/main",
-                           changed_paths=layer7_paths,
-                           commit_message="ME-59 Layer7 Core config\nGPOINT-LAYER7-API")
-
-    assert (ordinary, migration, layer7) == ("DEPLOY", "DEPLOY", "LAYER7_API")
-    assert push_deploy_authorized(mode=ordinary, changed_paths={"apps/api/src/main.ts"})
-    assert push_deploy_authorized(
-        mode=migration,
-        changed_paths={"packages/db/prisma/migrations/20261116000000_fixture/migration.sql"},
-    )
-    assert push_deploy_authorized(mode=layer7, changed_paths=layer7_paths)
-    assert jobs["tests"]["outputs"]["deploy"] == "${{ steps.intent.outputs.deploy }}"
-    assert "needs.tests.result == 'success'" in jobs["build"]["if"]
-    build_scope = next(step for step in jobs["build"]["steps"] if step.get("id") == "build_scope")
-    assert 'if [[ "$RELEASE_MODE" == LAYER7_API ]]' in build_scope["run"]
-    assert 'build_components=["CORE"]' in build_scope["run"]
-    assert "resolve_native_build_scope.py" in build_scope["run"]
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"tests", "build", "deploy"}
+    assert not (ROOT / ".github/workflows/gpoint-layer7-staging.yml").exists()
+    assert not (ROOT / ".github/actions/layer7-deploy/action.yml").exists()
+    legacy_paths = {".github/workflows/gpoint-layer7-staging.yml",
+                    "scripts/layer7_release_scope.py"}
+    for marker in ("GPOINT-ARTIFACT-PREPARE", "GPOINT-LAYER7-API", "GPOINT-LAYER7-EROS"):
+        mode = classify_push(event_name="push", ref="refs/heads/main",
+                             changed_paths=legacy_paths, commit_message=marker)
+        assert mode == "BLOCK"
+        assert not push_deploy_authorized(mode=mode, changed_paths=legacy_paths)
 
     deploy = jobs["deploy"]
-    condition = deploy["if"]
-    assert "needs.tests.outputs.mode == 'LAYER7_API'" in condition
-    assert "needs.tests.outputs.deploy == 'true'" in condition
-    assert "github.actor == github.repository_owner" in condition
-    assert "github.triggering_actor == github.repository_owner" in condition
-    assert deploy["environment"]["name"] == "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}"
-    assert deploy["concurrency"]["group"] == "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'gpoint-layer7-staging' || 'gpoint-production-release' }}"
-    action = next(step for step in deploy["steps"]
-                  if step.get("uses") == "./.github/actions/layer7-deploy")
-    assert action["if"] == "needs.tests.outputs.mode == 'LAYER7_API'"
-    assert action["with"]["prepared_app_digest"] == "${{ needs.build.outputs.app_digest }}"
-    assert action["with"]["scoped_image_version"] == "${{ needs.build.outputs.image_version }}"
-
-    layer7_action = yaml.safe_load((ROOT / ".github/actions/layer7-deploy/action.yml").read_text())
-    steps = layer7_action["runs"]["steps"]
-    scope = next(step for step in steps if step.get("id") == "protected_scope")
-    assert "github.event_name == 'push'" in scope["if"]
-    assert "layer7_release_scope.py paths" in scope["run"]
-    assert "roles.*.source" in scope["run"] or '"roles"]["gpoint-core-api"]["source"]' in scope["run"]
-    assert "GITHUB_EVENT_BEFORE" not in scope.get("env", {})
-    assert "layer7-candidate-paths.txt" not in scope["run"]
-    assert "PREVIOUS_SHA: ${{ github.event.before }}" not in "\n".join(step.get("env", {}).get("PREVIOUS_SHA", "") for step in steps)
-
-    migrations = next(step for step in deploy["steps"] if step.get("id") == "migration_apply")
-    assert "prisma migrate deploy" in migrations["run"]
-    assert "stock" in deploy["name"].lower() or any(
-        "Deploy exact immutable images with stock Kamal" in step.get("name", "") for step in deploy["steps"]
-    )
-    assert any("Verify public routes and exact running services" in step.get("name", "")
-               for step in deploy["steps"])
+    assert "needs.tests.outputs.deploy == 'true'" in deploy["if"]
+    assert "github.actor == github.repository_owner" in deploy["if"]
+    assert deploy["environment"]["name"] == "production"
+    assert deploy["concurrency"]["group"] == "gpoint-production-release"
+    assert not any("LAYER7_API" in step.get("if", "") for step in deploy["steps"])
+    assert any("prisma migrate deploy" in step.get("run", "") for step in deploy["steps"])
 
 
 def test_eros_builds_share_layers_without_publishing_the_test_image():
@@ -250,27 +202,15 @@ def test_deploy_installs_the_pinned_agata_alembic_runtime_before_migration_check
     assert steps[setup]["with"]["cache-dependency-path"] == "services/agata/pyproject.toml"
 
 
-def test_kamal_inventory_summary_uses_shellcheck_safe_markdown_fences():
+def test_kamal_inventory_summary_contains_only_the_crosschecked_version():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     inventory = next(step for step in workflow["jobs"]["deploy"]["steps"]
                      if step.get("id") == "kamal_inventory")
 
     assert "`" not in inventory["run"]
-    assert r"\140\140\140text" in inventory["run"]
-
-    lines = inventory["run"].splitlines()
-    printf_index = next(i for i, line in enumerate(lines)
-                        if "printf 'Current version:" in line)
-    printf_command = "\n".join(line.strip() for line in lines[printf_index:printf_index + 2])
-    result = subprocess.run(
-        ["bash", "-c", "version=sha; containers=containers; details=details; " + printf_command],
-        check=True, capture_output=True, text=True,
-    )
-    assert result.stdout == (
-        "Current version:\n\n```text\nsha\n```\n\n"
-        "Containers:\n\n```text\ncontainers\n```\n\n"
-        "Details:\n\n```text\ndetails\n```\n\n"
-    )
+    assert "Current version: **%s**" in inventory["run"]
+    assert "details" not in inventory["run"]
+    assert "containers" not in inventory["run"]
 
 
 def test_release_event_routing_is_fail_closed_and_does_not_give_prs_prod_access():
@@ -418,8 +358,8 @@ def test_manual_rollback_uses_native_environment_deployment_and_target_metadata(
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     rollback = _ROLLBACK["jobs"]["deploy"]
     assert rollback["environment"] == {
-        "name": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}",
-        "url": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'http://95.133.236.59' || (inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url) }}",
+        "name": "production",
+        "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
     body = "\n".join(step.get("run", "") for step in rollback["steps"])
     assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in body
@@ -566,8 +506,8 @@ def test_migration_rehearsal_uses_immutable_oci_identity_across_docker_hosts():
         assert 'docker image inspect "$agata_image" --format \'{{json .RepoDigests}}\' | grep -F "$agata_image" >/dev/null' in body
         assert f'current_step=ghcr-{role}-repository-digest' in body
 
-    assert build["outputs"]["app_digest"] == "${{ steps.app.outputs.digest || steps.prepared.outputs.app_digest }}"
-    assert build["outputs"]["agata_digest"] == "${{ steps.agata.outputs.digest || steps.prepared.outputs.agata_digest }}"
+    assert build["outputs"]["app_digest"] == "${{ steps.app.outputs.digest }}"
+    assert build["outputs"]["agata_digest"] == "${{ steps.agata.outputs.digest }}"
     assert "app_image_id" not in build.get("outputs", {})
     assert "agata_image_id" not in build.get("outputs", {})
     assert "image inspect" in build_body and "{{.Id}}" not in build_body
@@ -636,7 +576,7 @@ def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
     assert "inputs.mode == 'rollback'" in rollback["if"]
     assert "inputs.mode == 'rollback'" in rollback["if"]
     assert rollback["environment"] == {
-        "name": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'layer7-api-auto' || 'production' }}", "url": "${{ needs.tests.outputs.mode == 'LAYER7_API' && 'http://95.133.236.59' || (inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url) }}",
+        "name": "production", "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
     assert "gpoint-production-release" in rollback["concurrency"]["group"]
     assert rollback["concurrency"]["cancel-in-progress"] is False
@@ -694,3 +634,33 @@ def test_no_runtime_change_skips_the_whole_deploy_job():
         if step.get("id") == "build_scope")
     assert '"VERIFIED"' in build_scope["run"]
     assert '"BOOTSTRAP_FULL"' in build_scope["run"]
+
+
+def test_relay_only_kamal_apply_leaves_engine_and_other_roles_untouched(tmp_path):
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    step = next(s for s in workflow["jobs"]["deploy"]["steps"] if s.get("id") == "kamal_apply")
+    docker = tmp_path / "docker"
+    docker.write_text('#!/bin/sh\nprintf "%s|%s|%s\\n" "$GPOINT_KAMAL_SERVICE" "$GPOINT_KAMAL_EXPECTED_DIGEST" "$*"\n')
+    docker.chmod(0o755)
+    ssh = tmp_path / "ssh"
+    ssh.write_text('#!/bin/sh\nprintf "verify|%s\\n" "$*"\n')
+    ssh.chmod(0o755)
+    sha = "a" * 40
+    relay_digest = "sha256:" + "b" * 64
+    result = subprocess.run(
+        ["bash", "-c", step["run"]], text=True, capture_output=True,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}",
+             "DEPLOY_AGATA": "false", "DEPLOY_CORE": "false", "DEPLOY_MINIAPP": "false",
+             "DEPLOY_EROS": "false", "DEPLOY_EROS_RELAY": "true", "EROS_INSTALLED": "true",
+             "DEPLOY_SCOPE": "EROS_RELAY", "EROS_RELAY_DIGEST": relay_digest,
+             "IMAGE_VERSION": sha + "-9-1", "GPOINT_COMMIT_SHA": sha,
+             "GPOINT_PRODUCTION_HOST": "example.invalid", "GITHUB_WORKSPACE": str(ROOT),
+             "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")},
+    )
+
+    assert result.returncode == 0, result.stderr
+    stop, deploy, verify = result.stdout.splitlines()
+    assert stop.startswith("gpoint-eros-relay||") and "app stop --roles relay" in stop
+    assert deploy.startswith(f"gpoint-eros-relay|{relay_digest}|")
+    assert "deploy --skip-push --version " + sha + "-9-1 --roles relay" in deploy
+    assert verify.endswith(f"gpoint-eros-relay-relay {sha}-9-1 {sha}")

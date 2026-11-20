@@ -45,161 +45,12 @@ TEST_DIRECTORY_NAMES = frozenset({"test", "tests"})
 PRISMA_MIGRATION = re.compile(
     r"^packages/db/prisma/migrations/[0-9]{14}_[a-z0-9_]+/migration\.sql$"
 )
-# ME-36 OWNER-approved removal of the parallel Mac installer and stale shared
-# Worker test. This is an exact path exception; all other deletions still block.
-KNOWN_RETIRED_NON_RUNTIME_FILES = frozenset({
-    ".github/workflows/gpoint-deploy.yml",
-    ".github/workflows/gpoint-first-kamal-cutover.yml",
-    ".github/workflows/gpoint-linear-reconcile.yml",
-    ".github/workflows/gpoint-prepare.yml",
-    ".github/workflows/gpoint-recover-interrupted.yml",
-    "scripts/automated-eros-pilot-release.mjs",
-    "scripts/automated-release.mjs",
-    "scripts/check-release-rehearsal.py",
-    "scripts/collect_kamal_eros_state.py",
-    "scripts/deployment-execution.mjs",
-    "scripts/deployment-execution.test.mjs",
-    "scripts/deployment-run-state.mjs",
-    "scripts/deployment-run-state.test.mjs",
-    "scripts/eros-postgres-acl-deploy.mjs",
-    "scripts/eros-postgres-acl-deploy.test.mjs",
-    "scripts/eros-production-deployment.mjs",
-    "scripts/eros-production-deployment.test.mjs",
-    "scripts/ghcr-receipt.mjs",
-    "scripts/ghcr-receipt.test.mjs",
-    "scripts/github-deployments.mjs",
-    "scripts/github-deployments.test.mjs",
-    "scripts/github_api_preflight.py",
-    "scripts/gpoint-miniapp-static-manifest.py",
-    "scripts/kamal-first-cutover/consumers.sh",
-    "scripts/kamal-first-cutover/pause.sh",
-    "scripts/kamal-first-cutover/recover-post.sh",
-    "scripts/kamal-first-cutover/recover-pre.sh",
-    "scripts/kamal-first-cutover/requests.sh",
-    "scripts/kamal-first-cutover/retire.sh",
-    "scripts/kamal-first-cutover/routes.sh",
-    "scripts/kamal-first-cutover/verify.sh",
-    "scripts/kamal_cutover_credentials.py",
-    "scripts/kamal_cutover_owner.py",
-    "scripts/kamal_eros_state.py",
-    "scripts/kamal_pause_recovery_policy.py",
-    "scripts/package-kamal-cutover.py",
-    "scripts/pause-legacy-gpoint.sh",
-    "scripts/prepare-release.py",
-    "scripts/prepare_coalescing.py",
-    "scripts/prepared_artifact_cache.py",
-    "scripts/publish-release-linear.py",
-    "scripts/publish_ghcr_images.py",
-    "scripts/reconcile-deployment.mjs",
-    "scripts/reconcile-deployment.test.mjs",
-    "scripts/recover-interrupted-apply.mjs",
-    "scripts/recover-interrupted-apply.test.mjs",
-    "scripts/recover-kamal-cutover.py",
-    "scripts/rehearse-release-bundle.mjs",
-    "scripts/release-authorization.mjs",
-    "scripts/release-authorization.test.mjs",
-    "scripts/release-bundle.mjs",
-    "scripts/release-bundle.test.mjs",
-    "scripts/release-component-bundle-v4.mjs",
-    "scripts/release-component-bundle-v4.test.mjs",
-    "scripts/release-component-vps-proof-v4.mjs",
-    "scripts/release-component-vps-proof-v4.test.mjs",
-    "scripts/release-evidence.mjs",
-    "scripts/release-evidence.test.mjs",
-    "scripts/release-gpoint-vps-adapter.mjs",
-    "scripts/release-gpoint.mjs",
-    "scripts/release-gpoint.test.mjs",
-    "scripts/release-gsales-provision.mjs",
-    "scripts/release-gsales.mjs",
-    "scripts/release-gsales.test.mjs",
-    "scripts/release-lock.mjs",
-    "scripts/release-migrations.mjs",
-    "scripts/release-network-read.mjs",
-    "scripts/release-network-read.test.mjs",
-    "scripts/release-oci.mjs",
-    "scripts/release-oci.test.mjs",
-    "scripts/release-orchestrator.mjs",
-    "scripts/release-orchestrator.test.mjs",
-    "scripts/release-preflight-benchmark.py",
-    "scripts/release-readiness.test.mjs",
-    "scripts/release-runner-readiness.mjs",
-    "scripts/release-runner-readiness.test.mjs",
-    "scripts/release-static-baseline-v4.test.mjs",
-    "scripts/release-static-publish-v4.test.mjs",
-    "scripts/release-static-transfer-v4.mjs",
-    "scripts/release-static-transfer-v4.test.mjs",
-    "scripts/release-static-v4.mjs",
-    "scripts/release-static-v4.test.mjs",
-    "scripts/release-telemetry.py",
-    "scripts/release_assets.py",
-    "scripts/release_component_impact_v4.py",
-    "scripts/release_component_manifest_v4.py",
-    "scripts/release_impact_v3.py",
-    "scripts/release_static_exchange_v4.py",
-    "scripts/release_static_executor_v4.py",
-    "scripts/release_static_migrations_v4.py",
-    "scripts/release_static_prepare_v4.py",
-    "scripts/release_ui_artifact_v4.py",
-    "scripts/release_ui_switch_v4.py",
-    "scripts/retire-gpoint-caddy.sh",
-    "scripts/run-kamal-cutover-owner.sh",
-    "scripts/sanitize-kamal-inventory.py",
-    "scripts/sanitize-kamal-resources.py",
-    "scripts/select-release-run.py",
-    "scripts/select-release-run.test.py",
-    "scripts/smoke_bot_image.py",
-    "scripts/start_kamal_cutover_owner.py",
-    "scripts/test_prepare_coalescing.py",
-    "scripts/test_release_preflight_benchmark.py",
-    "scripts/validate-task-authorization.mjs",
-    "scripts/verify-gpoint-backup-restore.sh",
-    "scripts/verify-interrupted-recovery-proof.mjs",
-    "scripts/verify-loaded-images.py",
-    "scripts/worker-runtime-guard.mjs",
-    "scripts/worker-runtime-guard.test.mjs",
-    "services/agata/worker/install_launch_agent.py",
-    "services/gsales/tests/test_shared_worker_http.py",
-    "tests/test_collect_kamal_eros_state.py",
-    "tests/test_deploy_evidence_workflow.py",
-    "tests/test_eros_pilot_artifact.py",
-    "tests/test_eros_postgres_acl_workflow.py",
-    "tests/test_gpoint_docker_cache_v3.py",
-    "tests/test_gpoint_miniapp_static_manifest.py",
-    "tests/test_gpoint_release_trigger_graph.py",
-    "tests/test_interrupted_recovery_workflow.py",
-    "tests/test_kamal_cutover_credentials.py",
-    "tests/test_kamal_cutover_owner.py",
-    "tests/test_kamal_cutover_package.py",
-    "tests/test_kamal_eros_state.py",
-    "tests/test_kamal_pause_recovery_policy.py",
-    "tests/test_me38_recovery_immutable_rehearsal.py",
-    "tests/test_prepare_release_migration_inventory.py",
-    "tests/test_prepare_workflow_summary.py",
-    "tests/test_prepared_artifact_cache.py",
-    "tests/test_publish_ghcr_images.py",
-    "tests/test_publish_ghcr_receipt.py",
-    "tests/test_recover_kamal_cutover.py",
-    "tests/test_release_assets.py",
-    "tests/test_release_component_impact_v4.py",
-    "tests/test_release_impact_v3.py",
-    "tests/test_release_linear.py",
-    "tests/test_release_static_publication_v4.py",
-    "tests/test_start_kamal_cutover_owner.py",
-    "tests/test_unified_release_v1.py",
-    "scripts/network_retry.py",
-    "scripts/verify-release-worker-compatibility.py",
-})
+# Explicitly reviewed non-runtime inputs that do not change an application image.
 KNOWN_NON_RUNTIME_FILES = frozenset({
     ".github/actionlint.yaml",
     ".kamal/hooks/post-app-boot",
     ".kamal/hooks/pre-app-boot",
     "AGENTS.md",
-    "config/deploy.layer7-staging.eros-api.yml",
-    "config/deploy.layer7-staging.eros-relay.yml",
-    "config/deploy.layer7-staging.eros.yml",
-    "config/deploy.layer7-staging.miniapp.yml",
-    "config/deploy.layer7-staging.yml",
-    "infra/staging/layer7_known_hosts",
     "packages/db/prisma/production-approved-migrations.json",
     "scripts/check-kamal-configs.sh",
     "scripts/classify-release-prepush.py",
@@ -207,13 +58,9 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "scripts/eros-production-secrets.py",
     "scripts/gpoint-backup-policy.py",
     "scripts/gpoint-scheduled-backup.py",
-    "scripts/layer7-transport.sh",
-    "scripts/layer7_release_scope.py",
-    "scripts/layer7_staging_database.py",
-    "scripts/layer7_staging_env.py",
-    "scripts/native_change_surface.py",
     "scripts/native_release_intent.py",
     "scripts/prepush.py",
+    "scripts/prisma_migration_checksums.py",
     "scripts/prisma_migration_release_plan.py",
     "scripts/resolve_native_build_scope.py",
     "scripts/resolve_native_environment_deployment.py",
@@ -225,11 +72,8 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "scripts/verify-kamal-role.sh",
     "scripts/verify-layer7-ollama.py",
     "scripts/verify_native_eros_image.py",
-    "scripts/verify_native_prepared_run.py",
     "scripts/verify_native_rollback_evidence.py",
     "scripts/write-kamal-production-manifest.py",
-    "scripts/write_layer7_staging_env.py",
-    "scripts/write_layer7_staging_eros_api_env.py",
     "services/gsales/tests/test_shared_worker_http.py",
     "systemd/gpoint-backup.service",
     "scripts/gpoint-backup-install.sh",
@@ -241,7 +85,10 @@ COMPONENT_ROLES = {
     "MINIAPP": ("gpoint-miniapp-web",),
 }
 EROS_ROLES = ("gpoint-eros-pilot-engine", "gpoint-eros-relay-relay")
-ALL_COMPONENT_ROLES = {**COMPONENT_ROLES, "EROS": EROS_ROLES}
+EROS_COMPONENT_ROLES = {"EROS": EROS_ROLES[:1], "EROS_RELAY": EROS_ROLES[1:]}
+ALL_COMPONENT_ROLES = {**COMPONENT_ROLES, **EROS_COMPONENT_ROLES}
+COMPONENT_IMAGES = {component: component for component in ALL_COMPONENT_ROLES}
+COMPONENT_IMAGES["EROS_RELAY"] = "CORE"
 ROLE_REPOSITORIES = {
     "gpoint-core-api": "ghcr.io/akhripunov/gpoint-runtime",
     "gpoint-core-worker": "ghcr.io/akhripunov/gpoint-runtime",
@@ -264,137 +111,49 @@ BASELINE_ROLES = set(ROLE_REPOSITORIES) - set(EROS_ROLES)
 EXACT_SHA = re.compile(r"^[0-9a-f]{40}$")
 EXACT_VERSION = re.compile(r"^[0-9a-f]{40}-[0-9]+-[0-9]+$")
 EXACT_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
-ARTIFACT_PREPARE_MARKER = "GPOINT-ARTIFACT-PREPARE"
-ARTIFACT_PREPARE_PATHS = frozenset({
-    "apps/api/src/eros-response-prompt.js",
-    "apps/api/src/eros-worker-contract.ts",
-    "apps/api/test/eros-worker-contract.test.ts",
-    ".github/actions/layer7-deploy/action.yml",
-    ".github/workflows/gpoint-layer7-staging.yml",
-    ".github/workflows/gpoint-native-release.yml",
-    "services/eros-engine/eros-language-contract.test.mjs",
-    "services/eros-engine/eros-layer7-staging-model-config.toml",
-    "services/eros-engine/eros-pilot-model-config.toml",
-    "services/eros-engine/eros-production-model-config.toml",
-    "services/eros-engine/local-e2e.test.mjs",
-    "services/eros-engine/test-model-config.toml",
-    "scripts/layer7_release_scope.py",
-    "scripts/native_release_intent.py",
-    "scripts/prisma_migration_release_plan.py",
-    "scripts/verify_native_prepared_run.py",
-    "tests/test_layer7_release_scope.py",
-    "tests/test_layer7_staging_workflow.py",
-    "tests/test_native_prisma_apply_boundary.py",
-    "tests/test_native_release_intent.py",
-    "tests/test_native_prepared_run.py",
-    "tests/test_prisma_migration_release_plan.py",
-})
 EROS_MODEL_CONFIG_PATHS = frozenset({
-    "services/eros-engine/eros-layer7-staging-model-config.toml",
     "services/eros-engine/eros-pilot-model-config.toml",
     "services/eros-engine/eros-production-model-config.toml",
     "services/eros-engine/test-model-config.toml",
 })
-LAYER7_EROS_MARKER = "GPOINT-LAYER7-EROS"
-EROS_UPSTREAM_PIN = "services/eros-engine/upstream.sha"
-EROS_MIGRATION_HELPER = "scripts/eros-native-database.py"
-LAYER7_EROS_RELEASE_PATHS = frozenset({
+RETIRED_LAYER7_STAGING_PATHS = frozenset({
     ".github/actions/layer7-deploy/action.yml",
     ".github/workflows/gpoint-layer7-staging.yml",
-    ".github/workflows/gpoint-native-release.yml",
-    "docs/release/automation.md",
-    EROS_MIGRATION_HELPER,
-    "scripts/layer7_release_scope.py",
-    "scripts/native_release_intent.py",
-    "scripts/verify_native_eros_image.py",
-    "scripts/verify_native_prepared_run.py",
-    "tests/test_eros_native_database.py",
-    "tests/test_eros_native_database_workflow.py",
-    "tests/test_kamal_release_config.py",
-    "tests/test_layer7_release_scope.py",
-    "tests/test_layer7_staging_workflow.py",
-    "tests/test_native_build_boundary.py",
-    "tests/test_native_release_intent.py",
-    "tests/test_native_prisma_apply_boundary.py",
-    "tests/test_native_prepared_run.py",
-})
-LAYER7_API_MARKER = "GPOINT-LAYER7-API"
-LAYER7_API_PROMPT_PATHS = frozenset({
-    "apps/api/src/eros-response-prompt.js",
-    "apps/api/src/eros-worker-contract.ts",
-    "apps/api/test/build-output.test.mjs",
-    "apps/api/test/eros-adapter.test.ts",
-    "apps/api/test/eros-worker-contract.test.ts",
-    "services/eros-engine/eros-language-contract.test.mjs",
-    "services/eros-engine/local-e2e.test.mjs",
-})
-LAYER7_CORE_CONFIG_REQUIRED_PATHS = frozenset({
-    "apps/api/src/eros-response-prompt.js",
+    "config/deploy.layer7-staging.yml",
+    "config/deploy.layer7-staging.miniapp.yml",
+    "config/deploy.layer7-staging.eros-api.yml",
+    "config/deploy.layer7-staging.eros.yml",
+    "config/deploy.layer7-staging.eros-relay.yml",
+    "infra/staging/layer7_known_hosts",
     "services/eros-engine/eros-layer7-staging-model-config.toml",
 })
-LAYER7_API_ADAPTER_PATHS = frozenset({
-    "apps/api/src/eros-adapter.ts",
-    "apps/api/test/eros-adapter.test.ts",
+LEGACY_RELEASE_MARKERS = frozenset({
+    "GPOINT-ARTIFACT-PREPARE",
+    "GPOINT-LAYER7-API",
+    "GPOINT-LAYER7-EROS",
 })
-LAYER7_API_ADAPTER_ROUTE_SUPPORT_PATHS = frozenset({
-    "scripts/native_release_intent.py",
-    "scripts/layer7_release_scope.py",
-    "tests/test_native_release_intent.py",
-    "tests/test_layer7_release_scope.py",
+EROS_UPSTREAM_PIN = "services/eros-engine/upstream.sha"
+INFRASTRUCTURE_PREFIXES = (".github/", ".kamal/", "infra/production/", "scripts/", "systemd/")
+PRODUCTION_KAMAL_CONFIGS = frozenset({
+    "config/deploy.yml", "config/deploy.agata.yml", "config/deploy.eros-api.yml",
+    "config/deploy.eros-relay.yml", "config/deploy.eros.yml", "config/deploy.miniapp.yml",
 })
-LAYER7_API_CONFIG_PATH = "config/deploy.layer7-staging.eros-api.yml"
-LAYER7_API_CONFIG_PATHS = frozenset({
-    LAYER7_API_CONFIG_PATH,
-    ".github/actions/layer7-deploy/action.yml",
-    "scripts/layer7_release_scope.py",
-    "scripts/native_release_intent.py",
-    "tests/test_native_release_intent.py",
-    "tests/test_layer7_release_scope.py",
-    "tests/test_layer7_staging_workflow.py",
-})
-LAYER7_CORE_CONFIG_TOOLING_PATHS = frozenset({
-    ".github/actions/layer7-deploy/action.yml",
-    ".kamal/hooks/pre-app-boot",
-    ".kamal/hooks/post-app-boot",
-    ".github/workflows/gpoint-layer7-staging.yml",
-    ".github/workflows/gpoint-native-release.yml",
-    "docs/release/automation.md",
-    "scripts/layer7_release_scope.py",
-    "scripts/native_change_surface.py",
-    "scripts/native_release_intent.py",
-    "scripts/verify_native_prepared_run.py",
-    "tests/test_kamal_native_automatic_release.py",
-    "tests/test_kamal_post_app_boot_hook.py",
-    "tests/test_kamal_release_config.py",
-    "tests/test_layer7_release_scope.py",
-    "tests/test_layer7_staging_workflow.py",
-    "tests/test_native_build_boundary.py",
-    "tests/test_native_change_surface.py",
-    "tests/test_native_prepared_run.py",
-    "tests/test_native_prisma_apply_boundary.py",
-    "tests/test_native_release_intent.py",
-})
-LAYER7_RELEASE_TOOLING_PREPARE_PATHS = frozenset({
-    ".github/actions/layer7-deploy/action.yml",
-    ".github/workflows/gpoint-layer7-staging.yml",
-    "scripts/verify_native_prepared_run.py",
-    "tests/test_layer7_staging_workflow.py",
-    "tests/test_native_prepared_run.py",
-})
-LAYER7_API_PATHS = (LAYER7_API_PROMPT_PATHS | LAYER7_API_ADAPTER_PATHS
-                    | LAYER7_API_CONFIG_PATHS | EROS_MODEL_CONFIG_PATHS)
-LAYER7_API_RUNTIME_PATHS = frozenset({
-    "apps/api/src/eros-response-prompt.js",
-    "apps/api/src/eros-adapter.ts",
-    LAYER7_API_CONFIG_PATH,
-}) | EROS_MODEL_CONFIG_PATHS
 
 
-def push_deploy_authorized(*, mode: str, changed_paths: set[str] | frozenset[str]) -> bool:
-    """Keep tooling-only Core builds available without applying them to Layer7."""
-    if mode == "DEPLOY":
-        return True
-    return mode == "LAYER7_API" and bool(LAYER7_API_RUNTIME_PATHS & changed_paths)
+def is_infrastructure_change(changed_paths: set[str] | frozenset[str]) -> bool:
+    return any(path in PRODUCTION_KAMAL_CONFIGS | {".dockerignore"}
+               or any(path.startswith(prefix) for prefix in INFRASTRUCTURE_PREFIXES)
+               for path in changed_paths)
+
+
+def push_deploy_authorized(*, mode: str, changed_paths: set[str] | frozenset[str],
+                           cumulative_infrastructure_change: bool = False) -> bool:
+    """Require explicit dispatch approval before production infrastructure Apply."""
+    # Production topology and release-control changes require an explicit
+    # workflow_dispatch through the existing protected production Environment.
+    if cumulative_infrastructure_change or is_infrastructure_change(changed_paths):
+        return False
+    return mode == "DEPLOY"
 
 
 def _path_kind(path: str) -> str:
@@ -412,6 +171,8 @@ def _path_kind(path: str) -> str:
         return "schema"
     if any(part in TEST_DIRECTORY_NAMES for part in parts):
         return "test"
+    if normalized == ".dockerignore":
+        return "ops"
     if normalized.startswith("packages/gpoint-codex-mcp/"):
         return "ops"
     if normalized in APP_ROOT_FILES:
@@ -435,139 +196,35 @@ def classify_push(*, event_name: str, ref: str,
     kinds = {_path_kind(path) for path in changed_paths}
     if "schema" in kinds or "unknown" in kinds:
         return "BLOCK"
-    kamal_component_contract_paths = {
-        ".kamal/hooks/pre-app-boot", ".kamal/hooks/post-app-boot",
-        ".github/actions/layer7-deploy/action.yml",
-        "scripts/native_release_intent.py",
-        "tests/test_kamal_release_config.py", "tests/test_kamal_post_app_boot_hook.py",
-        "tests/test_layer7_staging_workflow.py", "tests/test_native_release_intent.py",
-    }
-    if (".github/actions/layer7-deploy/action.yml" in changed_paths
-            and changed_paths <= kamal_component_contract_paths):
-        # This safety-contract fix must pass hosted TEST before any separately
-        # authorized Layer7 release; merging it alone must not deploy public prod.
-        return "NO_DEPLOY"
     markers = set(commit_message.splitlines())
-    if (".github/workflows/gpoint-layer7-staging.yml" in changed_paths
-            and LAYER7_EROS_MARKER not in markers
-            and not ({"apps/api/src/eros-response-prompt.js",
-                      "services/eros-engine/eros-layer7-staging-model-config.toml"}
-                     <= changed_paths)
-            and not (changed_paths <= LAYER7_CORE_CONFIG_TOOLING_PATHS
-                     and {".github/workflows/gpoint-native-release.yml",
-                          "scripts/verify_native_prepared_run.py"} <= changed_paths)
-            and changed_paths != LAYER7_RELEASE_TOOLING_PREPARE_PATHS):
+    if markers & LEGACY_RELEASE_MARKERS:
+        # Retired staging and artifact markers cannot authorize production Apply.
         return "BLOCK"
-    if ARTIFACT_PREPARE_MARKER in markers:
-        if markers & {LAYER7_API_MARKER, LAYER7_EROS_MARKER}:
-            return "BLOCK"
-        return "ARTIFACT_PREPARE" if changed_paths <= ARTIFACT_PREPARE_PATHS else "BLOCK"
-    if LAYER7_EROS_MARKER in markers:
-        if markers & {ARTIFACT_PREPARE_MARKER, LAYER7_API_MARKER}:
-            return "BLOCK"
-        has_eros_scope = EROS_MIGRATION_HELPER in changed_paths or any(
-            path.startswith("services/eros-engine/") for path in changed_paths
-        )
-        staging_workflow_changed = ".github/workflows/gpoint-layer7-staging.yml" in changed_paths
-        if not has_eros_scope and not staging_workflow_changed:
-            return "BLOCK"
-        if any(not path.startswith("services/eros-engine/")
-               for path in changed_paths - LAYER7_EROS_RELEASE_PATHS):
-            return "BLOCK"
-        return "LAYER7_EROS"
-    if (changed_paths <= LAYER7_CORE_CONFIG_TOOLING_PATHS
-            and {".github/workflows/gpoint-native-release.yml",
-                 "scripts/verify_native_prepared_run.py"} <= changed_paths):
-        return "LAYER7_API"
-    if changed_paths & {EROS_UPSTREAM_PIN, EROS_MIGRATION_HELPER}:
+    if EROS_UPSTREAM_PIN in changed_paths:
         return "BLOCK"
-    if (".github/workflows/gpoint-layer7-staging.yml" in changed_paths
-            and not changed_paths <= ARTIFACT_PREPARE_PATHS):
-        return "BLOCK"
-    if ("apps/api/src/eros-adapter.ts" in changed_paths
-            and LAYER7_API_MARKER not in markers):
-        return "BLOCK"
-    if LAYER7_API_MARKER in markers:
-        if ARTIFACT_PREPARE_MARKER in markers:
-            return "BLOCK"
-        if ({"scripts/native_release_intent.py", "tests/test_native_prepared_run.py"} <= changed_paths
-                and changed_paths <= LAYER7_CORE_CONFIG_TOOLING_PATHS):
-            # Scope fixes with a prepared-run regression can build only Core.
-            return "LAYER7_API"
-        if LAYER7_API_ADAPTER_PATHS & changed_paths:
-            allowed_adapter_change = (
-                LAYER7_API_ADAPTER_PATHS | LAYER7_API_ADAPTER_ROUTE_SUPPORT_PATHS
-            )
-            if (LAYER7_API_ADAPTER_PATHS <= changed_paths
-                    and changed_paths <= allowed_adapter_change):
-                return "LAYER7_API"
-            return "BLOCK"
-        if (LAYER7_CORE_CONFIG_REQUIRED_PATHS <= changed_paths
-                and changed_paths <= (LAYER7_API_PROMPT_PATHS
-                                      | {"services/eros-engine/eros-layer7-staging-model-config.toml"})):
-            return "LAYER7_API"
-        if changed_paths <= LAYER7_API_PROMPT_PATHS:
-            return "LAYER7_API"
-        if (LAYER7_API_CONFIG_PATH in changed_paths and
-                changed_paths <= LAYER7_API_CONFIG_PATHS):
-            return "LAYER7_API"
-        return "BLOCK"
-    if LAYER7_API_CONFIG_PATH in changed_paths:
-        return "BLOCK"
-    if ARTIFACT_PREPARE_MARKER in markers or changed_paths <= ARTIFACT_PREPARE_PATHS:
-        if not changed_paths <= ARTIFACT_PREPARE_PATHS:
-            return "BLOCK"
-        return "ARTIFACT_PREPARE"
     # Prisma schema changes must reach hosted Tests, which compare the full
     # migration history with schema.prisma before Build. Production Apply still
     # requires an exact migration set in the approved migration manifest.
-    # Publishing to main authorizes the complete reviewed candidate. Docs,
-    # release fixes and their app changes use the same Tests -> Build -> Deploy
-    # run; no second manual run repeats CI just because a path is operational.
+    # App and documentation commits use the ordinary Tests -> Build -> Deploy
+    # route. Production topology and release-control changes are held for a
+    # separately approved workflow_dispatch in the protected Environment.
     return "DEPLOY"
 
 
-def validate_prepared_image_digests(build_components: list[str],
-                                    digests: dict[str, str]) -> dict[str, str]:
-    """Require one immutable OCI digest for each, and only each, built component."""
-    allowed = set(ALL_COMPONENT_ROLES)
-    if (not isinstance(build_components, list) or not build_components
-            or any(not isinstance(component, str) or component not in allowed
-                   for component in build_components)
-            or len(build_components) != len(set(build_components))):
-        raise ValueError("prepared build component scope is invalid")
-    if not isinstance(digests, dict) or set(digests) != set(build_components):
-        raise ValueError("prepared image digest set does not match build component scope")
-    if any(not isinstance(digest, str) or not EXACT_DIGEST.fullmatch(digest)
-           for digest in digests.values()):
-        raise ValueError("prepared image digest is not immutable")
-    return {component: digests[component] for component in sorted(digests)}
-
-
 def classify_dispatch(*, ref: str, candidate_sha: str, github_sha: str, actor: str,
-                      repository_owner: str, migration_rehearsal: bool,
-                      approve_production: bool,
+                      repository_owner: str, approve_production: bool,
                       rollback: bool = False,
-                      rollback_eros: bool = False,
-                      use_prepared_images: bool = False) -> tuple[str, bool]:
+                      rollback_eros: bool = False) -> tuple[str, bool]:
     if rollback_eros and not rollback:
         return "INVALID_ROLLBACK", False
     exact = bool(re.fullmatch(r"[0-9a-f]{40}", candidate_sha)) and candidate_sha == github_sha
     owner = bool(repository_owner) and actor.lower() == repository_owner.lower()
-    if rollback and (migration_rehearsal or use_prepared_images):
-        return "INVALID_ROLLBACK", False
-    if migration_rehearsal and use_prepared_images:
-        return "INVALID_REHEARSAL", False
     if rollback:
         if ref == "refs/heads/main" and exact and owner and approve_production:
             # A rollback runs inside the protected Deploy job as a mode, so the
             # release pipeline must admit it exactly like a forward deploy.
             return "ROLLBACK", True
         return "INVALID_ROLLBACK", False
-    if migration_rehearsal:
-        if (ref == "refs/heads/main" and exact and owner and not approve_production):
-            return "REHEARSAL", False
-        return "INVALID_REHEARSAL", False
     if ref == "refs/heads/main" and exact and owner and approve_production:
         return "DEPLOY", True
     if ref == "refs/heads/main":
@@ -646,10 +303,17 @@ def _validate_role_inventory(inventory: dict) -> dict[str, dict[str, str]]:
 
 
 def _component_paths(path: str) -> set[str]:
+    if path in RETIRED_LAYER7_STAGING_PATHS:
+        return set()
     if (PRISMA_MIGRATION.fullmatch(path)
             or path == "packages/db/prisma/production-approved-migrations.json"):
         return set()
     if path == "packages/db/prisma/schema.prisma":
+        return {"CORE"}
+    if path in {
+        "config/deploy.yml",
+        "config/deploy.eros-api.yml",
+    }:
         return {"CORE"}
     if path == "apps/miniapp/index.html" or path.startswith(("apps/miniapp/src/", "apps/miniapp/public/")):
         return {"MINIAPP"}
@@ -657,10 +321,14 @@ def _component_paths(path: str) -> set[str]:
         return {"AGATA"}
     if path in EROS_MODEL_CONFIG_PATHS:
         return set()
+    if path in {"services/eros-engine/eros-pilot-embedding-relay.mjs", "config/deploy.eros-relay.yml"}:
+        return {"EROS_RELAY"}
     if path.startswith(("services/eros-engine/", "config/deploy.eros")):
         return {"EROS"}
     if path in {"infra/production/Gpoint.Dockerfile", "infra/production/nginx-miniapp.conf"}:
         return {"CORE", "MINIAPP"} if path.endswith("Gpoint.Dockerfile") else {"MINIAPP"}
+    if path == ".dockerignore":
+        return {"CORE", "MINIAPP"}
     if path in APP_ROOT_FILES or path in {"pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json"}:
         return {"CORE", "MINIAPP"}
     if path.startswith("apps/"):
@@ -677,6 +345,8 @@ def _non_runtime_documentation_path(path: str) -> bool:
 
 def _known_non_runtime_path(path: str) -> bool:
     """Recognize only verified release/test metadata outside application images."""
+    if path in RETIRED_LAYER7_STAGING_PATHS:
+        return False
     return (_non_runtime_documentation_path(path)
             or path in EROS_MODEL_CONFIG_PATHS
             or path in KNOWN_NON_RUNTIME_FILES
@@ -698,13 +368,15 @@ def classify_component_build_plan(repo: Path, candidate: str,
     """Classify runtime updates and image-only Prisma migration build impact."""
     if not EXACT_SHA.fullmatch(candidate or ""):
         raise ValueError("candidate SHA is invalid")
-    required_sources = set(COMPONENT_ROLES)
     if (not isinstance(component_sources, dict)
-            or set(component_sources) not in (required_sources, required_sources | {"EROS"})):
+            or set(component_sources) not in (set(COMPONENT_ROLES), set(ALL_COMPONENT_ROLES))):
         raise ValueError("component production source inventory is incomplete")
     for component, source in component_sources.items():
         if not isinstance(source, str) or not EXACT_SHA.fullmatch(source):
             raise ValueError(f"{component} production source SHA is invalid")
+    eros_installed = "EROS" in component_sources
+    if not eros_installed:
+        component_sources = {**component_sources, **dict.fromkeys(EROS_COMPONENT_ROLES, component_sources["CORE"])}
     paths_by_baseline: dict[str, set[str]] = {}
     core_migration_paths: set[str] = set()
     core_source = component_sources["CORE"]
@@ -718,10 +390,19 @@ def classify_component_build_plan(repo: Path, candidate: str,
         entries = git_diff_entries(baseline, candidate, repo=repo)
         paths = set()
         for status, path in entries:
-            if status == "D" and path in KNOWN_RETIRED_NON_RUNTIME_FILES:
+            if status == "D":
                 prior = subprocess.check_output(["git", "ls-tree", baseline, "--", path], cwd=repo).decode()
                 if not prior.startswith(("100644 blob ", "100755 blob ")):
-                    raise ValueError("retired candidate path was not a regular file")
+                    raise ValueError("deleted candidate path was not a prior regular file")
+                if path in RETIRED_LAYER7_STAGING_PATHS:
+                    continue
+                deleted_components = _component_paths(path)
+                retired_release_script = path.startswith("scripts/")
+                if not deleted_components and (_known_non_runtime_path(path) or retired_release_script):
+                    continue
+                if not deleted_components:
+                    raise ValueError("deleted or unmapped candidate path needs explicit scope approval")
+                paths.update(deleted_components)
                 continue
             if status not in ("A", "M"):
                 raise ValueError("deleted or renamed candidate path needs explicit scope approval")
@@ -732,6 +413,8 @@ def classify_component_build_plan(repo: Path, candidate: str,
             if not tree.startswith(("100644 blob ", "100755 blob ")):
                 raise ValueError("candidate path is not a regular file and needs explicit scope approval")
             changed_components = _component_paths(path)
+            if eros_installed and path == "infra/production/Gpoint.Dockerfile":
+                changed_components.add("EROS_RELAY")
             if baseline == core_source and PRISMA_MIGRATION.fullmatch(path):
                 core_migration_paths.add(path)
             if not changed_components:
@@ -745,18 +428,14 @@ def classify_component_build_plan(repo: Path, candidate: str,
         component for component, baseline in component_sources.items()
         if baseline != candidate and component in paths_by_baseline[baseline]
     }
-    if not components and all(source == candidate for source in component_sources.values()):
-        raise ValueError("candidate equals production baseline; no changed component scope")
     # Historical runtime changes may appear when a lagging component SHA is
     # compared with the candidate. Only paths owned by that component count;
     # a newer component baseline has already absorbed its own changes. Unknown
     # paths still fail closed above.
+    if not eros_installed and components.intersection(EROS_COMPONENT_ROLES):
+        components.update(EROS_COMPONENT_ROLES)
     runtime_scope = "+".join(sorted(components)) if components else "NONE"
-    build_components = set(components)
-    if "EROS" in components:
-        # Eros API integration and relay share the CORE runtime artifact, but
-        # their Kamal services remain independently scoped from Core roles.
-        build_components.add("CORE")
+    build_components = {COMPONENT_IMAGES[component] for component in components}
     if core_migration_paths:
         build_components.add("CORE")
     return {
@@ -766,16 +445,15 @@ def classify_component_build_plan(repo: Path, candidate: str,
     }
 
 
+def installed_component_sources(inventory: dict) -> dict[str, str]:
+    roles = _validate_role_inventory(inventory)
+    return {component: roles[names[0]]["source_sha"]
+            for component, names in ALL_COMPONENT_ROLES.items() if names[0] in roles}
+
+
 def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dict[str, str | bool]:
     """Classify the exact candidate diff; never broaden an ambiguous scope."""
-    roles = _validate_role_inventory(inventory)
-    component_sources = {
-        component: roles[component_roles[0]]["source_sha"]
-        for component, component_roles in COMPONENT_ROLES.items()
-    }
-    eros_installed = "gpoint-eros-pilot-engine" in roles
-    component_sources["EROS"] = (roles["gpoint-eros-pilot-engine"]["source_sha"] if eros_installed
-                                  else roles["gpoint-core-api"]["source_sha"])
+    component_sources = installed_component_sources(inventory)
     plan = classify_component_build_plan(repo, candidate, component_sources)
     components = set(str(plan["deploy_scope"]).split("+")) - {"NONE"}
     result = {
@@ -785,19 +463,20 @@ def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dic
         "deploy_agata": "AGATA" in components,
         "deploy_miniapp": "MINIAPP" in components,
         "deploy_eros": "EROS" in components,
-        "eros_bootstrap": "EROS" in components and not eros_installed,
+        "deploy_eros_relay": "EROS_RELAY" in components,
+        "eros_bootstrap": "EROS" in components and "EROS" not in component_sources,
     }
     return result
 
 
 def expected_runtime_inventory(scope: str, inventory: dict, candidate: str, version: str,
                                app_digest: str, agata_digest: str, miniapp_digest: str,
-                               *, eros_digest: str = "") -> dict:
+                               *, eros_digest: str = "", eros_relay_digest: str = "") -> dict:
     """Bind every verified role to either the untouched baseline or exact candidate artifact."""
     roles = _validate_role_inventory(inventory)
     scope_components = (set() if scope == "NONE" else
                         set(scope.split("+")) if isinstance(scope, str) else set())
-    valid_components = set(COMPONENT_ROLES) | {"EROS"}
+    valid_components = set(ALL_COMPONENT_ROLES)
     if (scope != "NONE" and (not scope_components or not scope_components.issubset(valid_components)
                               or "+".join(sorted(scope_components)) != scope)
             or not EXACT_SHA.fullmatch(candidate or "")
@@ -805,43 +484,25 @@ def expected_runtime_inventory(scope: str, inventory: dict, candidate: str, vers
         raise ValueError("candidate component runtime plan is malformed")
     updated = scope_components
     digests = {"CORE": app_digest, "AGATA": agata_digest, "MINIAPP": miniapp_digest,
-               "EROS": eros_digest}
+               "EROS": eros_digest, "EROS_RELAY": eros_relay_digest}
     for component, value in digests.items():
         if component in updated and not EXACT_DIGEST.fullmatch(value or ""):
             raise ValueError("updated candidate runtime image digest is invalid")
         if component not in updated and value and not EXACT_DIGEST.fullmatch(value):
             raise ValueError("baseline runtime image digest is invalid")
-    if "EROS" in updated and not EXACT_DIGEST.fullmatch(app_digest or ""):
-        raise ValueError("updated Eros relay runtime image digest is invalid")
+    if (EROS_ROLES[0] not in roles and updated.intersection(EROS_COMPONENT_ROLES)
+            and not EROS_COMPONENT_ROLES.keys() <= updated):
+        raise ValueError("first Eros deploy requires both engine and relay")
     inventory_out = {}
-    group_repo_digests = {
-        "CORE": (f"{ROLE_REPOSITORIES['gpoint-core-api']}@{app_digest}" if app_digest else None),
-        "AGATA": (f"{ROLE_REPOSITORIES['gpoint-agata-api']}@{agata_digest}" if agata_digest else None),
-        "MINIAPP": (f"{ROLE_REPOSITORIES['gpoint-miniapp-web']}@{miniapp_digest}" if miniapp_digest else None),
-        "EROS": (f"{ROLE_REPOSITORIES['gpoint-eros-pilot-engine']}@{eros_digest}" if eros_digest else None),
-    }
     for component, component_roles in ALL_COMPONENT_ROLES.items():
         for role in component_roles:
-            if role not in roles and not (component == "EROS" and component in updated):
-                continue
             baseline = roles.get(role)
-            role_component = component
-            if component == "EROS" and role == "gpoint-eros-relay-relay":
-                # Eros deploys a freshly built CORE runtime image to the relay
-                # role only; the regular Core roles remain untouched on EROS-only scope.
-                role_component = "CORE"
             if component in updated:
-                repository_digest = group_repo_digests[role_component]
-                if not repository_digest:
-                    # For Eros API/relay, this is the no-Core-build case handled
-                    # above; all other updated components require their digest.
-                    raise ValueError(f"updated {component} runtime digest is required")
+                repository_digest = f"{ROLE_REPOSITORIES[role]}@{digests[component]}"
                 inventory_out[role] = {"version": version, "sourceSha": candidate,
                                        "repositoryDigest": repository_digest,
                                        "baselineImageId": None}
-            else:
-                if baseline is None:
-                    continue
+            elif baseline is not None:
                 inventory_out[role] = {"version": baseline["version"], "sourceSha": baseline["source_sha"],
                                        "repositoryDigest": baseline["repo_digest"],
                                        "baselineImageId": baseline["image_id"]}
@@ -865,11 +526,10 @@ def main() -> int:
     parser.add_argument("--actor", default="")
     parser.add_argument("--triggering-actor", default="")
     parser.add_argument("--repository-owner", default="")
-    parser.add_argument("--migration-rehearsal", action="store_true")
     parser.add_argument("--rollback", action="store_true")
     parser.add_argument("--rollback-eros", action="store_true")
-    parser.add_argument("--use-prepared-images", action="store_true")
     parser.add_argument("--approve-production", action="store_true")
+    parser.add_argument("--infrastructure-baseline-sha", default="")
     args = parser.parse_args()
 
     try:
@@ -882,7 +542,19 @@ def main() -> int:
             paths = changed_paths(args.before, args.sha)
             mode = classify_push(event_name=args.event, ref=args.ref, changed_paths=paths,
                                  commit_message=args.commit_message)
-            deploy = push_deploy_authorized(mode=mode, changed_paths=paths)
+            cumulative_infrastructure_change = False
+            if args.ref == "refs/heads/main":
+                if not EXACT_SHA.fullmatch(args.infrastructure_baseline_sha or ""):
+                    # Without a verified production baseline the accumulated
+                    # infrastructure diff is unknown, so automatic Apply stops.
+                    cumulative_infrastructure_change = True
+                else:
+                    cumulative_paths = changed_paths(args.infrastructure_baseline_sha, args.sha)
+                    cumulative_infrastructure_change = is_infrastructure_change(cumulative_paths)
+            deploy = push_deploy_authorized(
+                mode=mode, changed_paths=paths,
+                cumulative_infrastructure_change=cumulative_infrastructure_change,
+            )
         elif args.event == "workflow_dispatch":
             owner = args.repository_owner.lower()
             if not owner or args.triggering_actor.lower() != owner:
@@ -890,11 +562,9 @@ def main() -> int:
             mode, deploy = classify_dispatch(
                 ref=args.ref, candidate_sha=args.candidate_sha, github_sha=args.sha,
                 actor=args.actor, repository_owner=args.repository_owner,
-                migration_rehearsal=args.migration_rehearsal,
                 approve_production=args.approve_production,
                 rollback=args.rollback,
                 rollback_eros=args.rollback_eros,
-                use_prepared_images=args.use_prepared_images,
             )
         else:
             mode, deploy = "NO_DEPLOY", False

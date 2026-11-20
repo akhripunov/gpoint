@@ -83,12 +83,13 @@ def expected_roles_b64(scope="FULL"):
     components = {"CORE": ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot"),
                   "AGATA": ("gpoint-agata-api", "gpoint-agata-memory-worker"),
                   "MINIAPP": ("gpoint-miniapp-web",)}
-    if "EROS" in scope.split("+"):
+    if {"EROS", "EROS_RELAY"}.intersection(scope.split("+")):
         roles.update({
             "gpoint-eros-pilot-engine": ("EROS", "ghcr.io/akhripunov/gpoint-eros", "sha256:" + "a" * 64),
-            "gpoint-eros-relay-relay": ("EROS", "ghcr.io/akhripunov/gpoint-runtime", APP),
+            "gpoint-eros-relay-relay": ("EROS_RELAY", "ghcr.io/akhripunov/gpoint-runtime", "sha256:" + "e" * 64),
         })
-        components["EROS"] = ("gpoint-eros-pilot-engine", "gpoint-eros-relay-relay")
+        components["EROS"] = ("gpoint-eros-pilot-engine",)
+        components["EROS_RELAY"] = ("gpoint-eros-relay-relay",)
     updated = set(components) if scope == "FULL" else set(scope.split("+")) - {"NONE"}
     baseline = "b" * 40
     role_rows = {}
@@ -99,7 +100,7 @@ def expected_roles_b64(scope="FULL"):
                            if component in updated else
                            {"version": baseline + "-40-1", "sourceSha": baseline,
                             "repositoryDigest": repository + "@sha256:" + ("4" if component == "CORE" else "6" if component == "AGATA" else "7" if component == "MINIAPP" else "a" if role == "gpoint-eros-pilot-engine" else "4") * 64,
-                            "baselineImageId": "sha256:" + ("5" if component == "CORE" else "8" if component == "AGATA" else "9") * 64})
+                            "baselineImageId": "sha256:" + ("5" if component == "CORE" else "8" if component == "AGATA" else "9" if component == "MINIAPP" else "a" if component == "EROS" else "b") * 64})
     value = {
         "schema": 1, "candidateSha": SHA, "scope": scope,
         "updatedComponents": sorted(updated), "roles": role_rows,
@@ -136,8 +137,10 @@ def run_ordinary(tmp_path: Path, *, active_caddy=False, role_plan_b64=None):
     args = ordinary_args(output)
     if role_plan_b64:
         args[args.index("--expected-role-identities-b64") + 1] = role_plan_b64
-        if "gpoint-eros-pilot-engine" in json.loads(base64.b64decode(role_plan_b64))["roles"]:
-            args.extend(["--eros-digest", "sha256:" + "a" * 64])
+        roles = json.loads(base64.b64decode(role_plan_b64))["roles"]
+        if "gpoint-eros-pilot-engine" in roles:
+            args.extend(["--eros-digest", "sha256:" + "a" * 64, "--eros-relay-digest",
+                         roles["gpoint-eros-relay-relay"]["repositoryDigest"].split("@")[1]])
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
            "EXPECTED_ROLE_PLAN_B64": args[args.index("--expected-role-identities-b64") + 1]}
     result = subprocess.run([sys.executable, str(WRITER), *args],
@@ -292,7 +295,7 @@ def test_ordinary_manifest_verifies_untouched_component_identity_in_selective_re
 
 
 def test_ordinary_manifest_records_independent_eros_engine_and_relay_artifacts(tmp_path):
-    result, output = run_ordinary(tmp_path, role_plan_b64=expected_roles_b64("EROS"))
+    result, output = run_ordinary(tmp_path, role_plan_b64=expected_roles_b64("EROS_RELAY"))
 
     assert result.returncode == 0, result.stderr
     manifest = json.loads(output.read_text(encoding="utf-8"))
@@ -300,5 +303,8 @@ def test_ordinary_manifest_records_independent_eros_engine_and_relay_artifacts(t
     services = {row["name"].split("-" + row["version"], 1)[0]: row for row in manifest["runtimeServices"]}
     assert len(manifest["runtimeServices"]) == 8
     assert services["gpoint-eros-pilot-engine"]["repositoryDigest"] == manifest["candidate"]["images"]["eros"]
-    assert services["gpoint-eros-relay-relay"]["repositoryDigest"] == "ghcr.io/akhripunov/gpoint-runtime@" + APP
+    assert services["gpoint-eros-relay-relay"]["repositoryDigest"] == "ghcr.io/akhripunov/gpoint-runtime@sha256:" + "e" * 64
+    assert manifest["candidate"]["images"]["eros_relay"] == services["gpoint-eros-relay-relay"]["repositoryDigest"]
+    assert services["gpoint-eros-relay-relay"]["revision"] == SHA
+    assert services["gpoint-eros-pilot-engine"]["revision"] == "b" * 40
     assert services["gpoint-core-api"]["revision"] == "b" * 40

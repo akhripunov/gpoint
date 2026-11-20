@@ -16,60 +16,13 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from native_release_intent import ALL_COMPONENT_ROLES, ROLE_IDENTITY_GROUP, ROLE_REPOSITORIES
+
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 OCI_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
-ROLE_REPOSITORIES = {
-    "gpoint-core-api": "ghcr.io/akhripunov/gpoint-runtime",
-    "gpoint-core-worker": "ghcr.io/akhripunov/gpoint-runtime",
-    "gpoint-core-bot": "ghcr.io/akhripunov/gpoint-runtime",
-    "gpoint-agata-api": "ghcr.io/akhripunov/gpoint-agata-runtime",
-    "gpoint-agata-memory-worker": "ghcr.io/akhripunov/gpoint-agata-runtime",
-    "gpoint-miniapp-web": "ghcr.io/akhripunov/gpoint-miniapp",
-    "gpoint-eros-pilot-engine": "ghcr.io/akhripunov/gpoint-eros",
-    "gpoint-eros-relay-relay": "ghcr.io/akhripunov/gpoint-runtime",
-}
-ROLE_COMPONENTS = {
-    "gpoint-core-api": "CORE", "gpoint-core-worker": "CORE", "gpoint-core-bot": "CORE",
-    "gpoint-agata-api": "AGATA", "gpoint-agata-memory-worker": "AGATA",
-    "gpoint-miniapp-web": "MINIAPP",
-    "gpoint-eros-pilot-engine": "EROS",
-    "gpoint-eros-relay-relay": "EROS",
-}
-ROLE_IDENTITY_GROUP = {
-    **{role: "CORE" for role in ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot")},
-    **{role: "AGATA" for role in ("gpoint-agata-api", "gpoint-agata-memory-worker")},
-    "gpoint-miniapp-web": "MINIAPP",
-    "gpoint-eros-pilot-engine": "EROS_ENGINE",
-    "gpoint-eros-relay-relay": "EROS_RELAY",
-}
-
-
-def read_valid_no_eros_state(path: str, expected_sha: str) -> dict[str, object]:
-    try:
-        contents = Path(path).read_bytes()
-        value = json.loads(contents)
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        raise SystemExit("validated no-Eros state snapshot is unreadable") from None
-    if hashlib.sha256(contents).hexdigest() != expected_sha:
-        raise SystemExit("validated no-Eros state snapshot file hash changed")
-    if not isinstance(value, dict):
-        raise SystemExit("validated no-Eros state snapshot has invalid structure")
-    state_sha = value.get("stateSha256")
-    body = {key: item for key, item in value.items() if key != "stateSha256"}
-    if (value.get("schema") != "gpoint-kamal-eros-state/v1" or value.get("erosAbsent") is not True
-            or not isinstance(state_sha, str) or not SHA256.fullmatch(state_sha)
-            or hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest() != state_sha):
-        raise SystemExit("validated no-Eros state snapshot failed its content check")
-    postgres = value.get("postgres")
-    if (not isinstance(postgres, dict) or not isinstance(postgres.get("systemIdentifier"), str)
-            or not postgres["systemIdentifier"].isdigit()
-            or not isinstance(postgres.get("serverVersionNum"), int)
-            or not SHA256.fullmatch(str(postgres.get("catalogAclSha256", "")))
-            or value.get("database") != {"eros": None, "roles": [], "memberships": [], "gpointErosSchemas": []}
-            or value.get("containers") != [] or value.get("networks") != []):
-        raise SystemExit("validated no-Eros state snapshot is incomplete")
-    return value
+ROLE_COMPONENTS = {role: component for component, roles in ALL_COMPONENT_ROLES.items()
+                   for role in roles}
 
 
 def docker_json(*args: str) -> object:
@@ -83,23 +36,15 @@ def parser() -> argparse.ArgumentParser:
                  "run-id", "attempt", "deployment-id"):
         result.add_argument(f"--{name}", required=True)
     result.add_argument("--eros-digest")
-    result.add_argument("--mode", choices=("cutover", "ordinary"), default="cutover")
-    for name in ("baseline-path", "baseline-sha",
-                 "inventory-path", "inventory-sha", "backup-path", "backup-sha", "restore-path",
-                 "restore-sha", "agata-candidate-head", "agata-live-head", "postgres-system-identifier",
-                 "db-container-id", "redis-container-id", "no-eros-baseline-path",
-                 "no-eros-baseline-sha", "no-eros-postflight-path", "no-eros-postflight-sha"):
-        result.add_argument(f"--{name}")
-    for name in ("media-backup-path", "media-backup-sha", "media-source-manifest-sha",
-                 "media-restore-manifest-sha", "media-file-count", "media-directory-count",
-                 "media-total-bytes", "media-backup-bytes", "prisma-head", "agata-head",
+    result.add_argument("--eros-relay-digest")
+    result.add_argument("--mode", choices=("ordinary",), default="ordinary")
+    for name in ("db-container-id", "redis-container-id", "prisma-head", "agata-head",
                  "prisma-migrations", "prisma-checksums", "baseline-prisma-head",
                  "baseline-prisma-migrations", "baseline-prisma-checksums", "baseline-agata-head",
                  "pending-prisma-migrations", "pending-prisma-checksums", "expected-role-identities-b64"):
         result.add_argument(f"--{name}")
     result.add_argument("--public-routes-verified", action="store_true")
     result.add_argument("--migration-compatibility-verified", action="store_true")
-    result.add_argument("--postgres-acl-fingerprint")
     return result
 
 
@@ -110,180 +55,138 @@ def main() -> int:
     if not SHA40.fullmatch(args.app_source_sha):
         raise SystemExit("application source SHA must be 40 lowercase hex characters")
     expected_role_plan = None
-    if args.mode == "cutover":
-        required = ("baseline_path", "inventory_path", "backup_path", "restore_path",
-                    "agata_candidate_head", "agata_live_head", "postgres_system_identifier",
-                    "no_eros_baseline_path", "no_eros_postflight_path",
-                    "postgres_acl_fingerprint",
-                    "media_backup_path", "media_file_count", "media_directory_count", "media_total_bytes",
-                    "media_backup_bytes")
-        missing = [field.replace("_", " ") for field in required if not getattr(args, field)]
-        if missing:
-            raise SystemExit("cutover manifest is missing: " + ", ".join(missing))
-        for field in ("baseline_sha", "inventory_sha", "backup_sha", "restore_sha",
-                      "no_eros_baseline_sha", "no_eros_postflight_sha",
-                      "media_backup_sha", "media_source_manifest_sha", "media_restore_manifest_sha"):
-            if not SHA256.fullmatch(getattr(args, field) or ""):
-                raise SystemExit(f"{field.replace('_', ' ')} must be a SHA-256 hex digest")
-        if not SHA256.fullmatch(args.postgres_acl_fingerprint or ""):
-            raise SystemExit("postgres ACL fingerprint must be a SHA-256 hex digest")
-    else:
-        if not SHA256.fullmatch(args.db_container_id or "") or not SHA256.fullmatch(args.redis_container_id or ""):
-            raise SystemExit("ordinary manifest needs exact PostgreSQL and Redis container IDs")
-        if (not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", args.prisma_head or "")
-                or not re.fullmatch(r"[A-Za-z0-9_]+", args.agata_head or "")):
-            raise SystemExit("ordinary manifest needs verified Prisma and AGATA migration heads")
-        migrations = (args.prisma_migrations or "").split(",")
-        checksums = (args.prisma_checksums or "").split(",")
-        if (not migrations or any(not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", value) for value in migrations)
-                or len(migrations) != len(set(migrations)) or migrations[-1] != args.prisma_head):
-            raise SystemExit("ordinary manifest needs the exact applied Prisma migration inventory")
-        checksum_rows = {}
-        for value in checksums:
-            name, separator, checksum = value.partition("=")
-            if (not separator or name in checksum_rows
-                    or not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", name)
-                    or not SHA256.fullmatch(checksum)):
-                raise SystemExit("ordinary manifest Prisma checksums are malformed")
-            checksum_rows[name] = checksum
-        if set(checksum_rows) != set(migrations):
-            raise SystemExit("ordinary manifest Prisma checksums do not match applied migrations")
-        baseline_migrations = (args.baseline_prisma_migrations or "").split(",")
-        baseline_checksums = (args.baseline_prisma_checksums or "").split(",")
-        pending_migrations = (args.pending_prisma_migrations or "").split(",") if args.pending_prisma_migrations else []
-        pending_checksums = (args.pending_prisma_checksums or "").split(",") if args.pending_prisma_checksums else []
-        if (not re.fullmatch(r"[A-Za-z0-9_]+", args.baseline_agata_head or "")
-                or args.baseline_agata_head != args.agata_head):
-            raise SystemExit("ordinary manifest AGATA head changed during Deploy")
-        if (not baseline_migrations
-                or any(not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", value) for value in baseline_migrations)
-                or len(baseline_migrations) != len(set(baseline_migrations))
-                or baseline_migrations[-1] != args.baseline_prisma_head):
-            raise SystemExit("ordinary manifest Prisma baseline inventory is malformed")
-        baseline_checksum_rows = {}
-        for value in baseline_checksums:
-            name, separator, checksum = value.partition("=")
-            if (not separator or name in baseline_checksum_rows
-                    or not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", name)
-                    or not SHA256.fullmatch(checksum)):
-                raise SystemExit("ordinary manifest Prisma baseline checksums are malformed")
-            baseline_checksum_rows[name] = checksum
-        pending_checksum_rows = {}
-        for value in pending_checksums:
-            name, separator, checksum = value.partition("=")
-            if (not separator or name in pending_checksum_rows
-                    or not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", name)
-                    or not SHA256.fullmatch(checksum)):
-                raise SystemExit("ordinary manifest pending Prisma checksums are malformed")
-            pending_checksum_rows[name] = checksum
-        if ([name for name in baseline_checksum_rows] != baseline_migrations
-                or list(pending_checksum_rows) != pending_migrations
-                or len(pending_migrations) != len(set(pending_migrations))):
-            raise SystemExit("ordinary manifest migration plan order or checksum coverage is invalid")
-        planned_migrations = baseline_migrations + pending_migrations
-        planned_checksums = baseline_checksums + pending_checksums
-        if (args.baseline_prisma_head != baseline_migrations[-1]
-                or migrations != planned_migrations or checksums != planned_checksums
-                or args.prisma_head != planned_migrations[-1]):
-            raise SystemExit("ordinary manifest live migration transition differs from the exact approved plan")
-        if not args.public_routes_verified or not args.migration_compatibility_verified:
-            raise SystemExit("ordinary manifest needs verified public routes and live-schema compatibility")
-        try:
-            expected_role_plan = json.loads(base64.b64decode(args.expected_role_identities_b64 or "", validate=True))
-        except (ValueError, UnicodeError, json.JSONDecodeError):
-            raise SystemExit("ordinary manifest expected component role inventory is malformed") from None
-        expected_roles = expected_role_plan.get("roles") if isinstance(expected_role_plan, dict) else None
-        if not isinstance(expected_roles, dict) or set(expected_roles) not in (
-                set(ROLE_REPOSITORIES) - {"gpoint-eros-pilot-engine", "gpoint-eros-relay-relay"},
-                set(ROLE_REPOSITORIES)):
-            raise SystemExit("ordinary manifest role inventory is incomplete")
-        role_repositories = {role: ROLE_REPOSITORIES[role] for role in expected_roles}
-        role_components = {role: ROLE_COMPONENTS[role] for role in expected_roles}
-        scope = expected_role_plan.get("scope") if isinstance(expected_role_plan, dict) else None
-        component_names = set(role_components.values())
-        if scope == "FULL":
-            updated_components = component_names
-        elif scope == "NONE":
-            updated_components = set()
-        elif isinstance(scope, str):
-            updated_components = set(scope.split("+"))
-            if (not updated_components.issubset(component_names)
-                    or "+".join(sorted(updated_components)) != scope):
-                updated_components = None
-        else:
+    if not SHA256.fullmatch(args.db_container_id or "") or not SHA256.fullmatch(args.redis_container_id or ""):
+        raise SystemExit("ordinary manifest needs exact PostgreSQL and Redis container IDs")
+    if (not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", args.prisma_head or "")
+            or not re.fullmatch(r"[A-Za-z0-9_]+", args.agata_head or "")):
+        raise SystemExit("ordinary manifest needs verified Prisma and AGATA migration heads")
+    migrations = (args.prisma_migrations or "").split(",")
+    checksums = (args.prisma_checksums or "").split(",")
+    if (not migrations or any(not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", value) for value in migrations)
+            or len(migrations) != len(set(migrations)) or migrations[-1] != args.prisma_head):
+        raise SystemExit("ordinary manifest needs the exact applied Prisma migration inventory")
+    checksum_rows = {}
+    for value in checksums:
+        name, separator, checksum = value.partition("=")
+        if (not separator or name in checksum_rows
+                or not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", name)
+                or not SHA256.fullmatch(checksum)):
+            raise SystemExit("ordinary manifest Prisma checksums are malformed")
+        checksum_rows[name] = checksum
+    if set(checksum_rows) != set(migrations):
+        raise SystemExit("ordinary manifest Prisma checksums do not match applied migrations")
+    baseline_migrations = (args.baseline_prisma_migrations or "").split(",")
+    baseline_checksums = (args.baseline_prisma_checksums or "").split(",")
+    pending_migrations = (args.pending_prisma_migrations or "").split(",") if args.pending_prisma_migrations else []
+    pending_checksums = (args.pending_prisma_checksums or "").split(",") if args.pending_prisma_checksums else []
+    if (not re.fullmatch(r"[A-Za-z0-9_]+", args.baseline_agata_head or "")
+            or args.baseline_agata_head != args.agata_head):
+        raise SystemExit("ordinary manifest AGATA head changed during Deploy")
+    if (not baseline_migrations
+            or any(not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", value) for value in baseline_migrations)
+            or len(baseline_migrations) != len(set(baseline_migrations))
+            or baseline_migrations[-1] != args.baseline_prisma_head):
+        raise SystemExit("ordinary manifest Prisma baseline inventory is malformed")
+    baseline_checksum_rows = {}
+    for value in baseline_checksums:
+        name, separator, checksum = value.partition("=")
+        if (not separator or name in baseline_checksum_rows
+                or not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", name)
+                or not SHA256.fullmatch(checksum)):
+            raise SystemExit("ordinary manifest Prisma baseline checksums are malformed")
+        baseline_checksum_rows[name] = checksum
+    pending_checksum_rows = {}
+    for value in pending_checksums:
+        name, separator, checksum = value.partition("=")
+        if (not separator or name in pending_checksum_rows
+                or not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", name)
+                or not SHA256.fullmatch(checksum)):
+            raise SystemExit("ordinary manifest pending Prisma checksums are malformed")
+        pending_checksum_rows[name] = checksum
+    if ([name for name in baseline_checksum_rows] != baseline_migrations
+            or list(pending_checksum_rows) != pending_migrations
+            or len(pending_migrations) != len(set(pending_migrations))):
+        raise SystemExit("ordinary manifest migration plan order or checksum coverage is invalid")
+    planned_migrations = baseline_migrations + pending_migrations
+    planned_checksums = baseline_checksums + pending_checksums
+    if (args.baseline_prisma_head != baseline_migrations[-1]
+            or migrations != planned_migrations or checksums != planned_checksums
+            or args.prisma_head != planned_migrations[-1]):
+        raise SystemExit("ordinary manifest live migration transition differs from the exact approved plan")
+    if not args.public_routes_verified or not args.migration_compatibility_verified:
+        raise SystemExit("ordinary manifest needs verified public routes and live-schema compatibility")
+    try:
+        expected_role_plan = json.loads(base64.b64decode(args.expected_role_identities_b64 or "", validate=True))
+    except (ValueError, UnicodeError, json.JSONDecodeError):
+        raise SystemExit("ordinary manifest expected component role inventory is malformed") from None
+    expected_roles = expected_role_plan.get("roles") if isinstance(expected_role_plan, dict) else None
+    if not isinstance(expected_roles, dict) or set(expected_roles) not in (
+            set(ROLE_REPOSITORIES) - {"gpoint-eros-pilot-engine", "gpoint-eros-relay-relay"},
+            set(ROLE_REPOSITORIES)):
+        raise SystemExit("ordinary manifest role inventory is incomplete")
+    role_repositories = {role: ROLE_REPOSITORIES[role] for role in expected_roles}
+    role_components = {role: ROLE_COMPONENTS[role] for role in expected_roles}
+    scope = expected_role_plan.get("scope") if isinstance(expected_role_plan, dict) else None
+    component_names = set(role_components.values())
+    if scope == "FULL":
+        updated_components = component_names
+    elif scope == "NONE":
+        updated_components = set()
+    elif isinstance(scope, str):
+        updated_components = set(scope.split("+"))
+        if (not updated_components.issubset(component_names)
+                or "+".join(sorted(updated_components)) != scope):
             updated_components = None
-        if (not isinstance(expected_role_plan, dict)
-                or expected_role_plan.get("schema") != 1 or expected_role_plan.get("candidateSha") != args.sha
-                or updated_components is None or set(expected_role_plan.get("updatedComponents", [])) != updated_components
-                or not isinstance(expected_roles, dict) or set(expected_roles) != set(role_repositories)):
-            raise SystemExit("ordinary manifest component role plan does not match the exact candidate scope")
-        candidate_digests = {
-            "gpoint-core-api": "ghcr.io/akhripunov/gpoint-runtime@" + args.app_digest,
-            "gpoint-core-worker": "ghcr.io/akhripunov/gpoint-runtime@" + args.app_digest,
-            "gpoint-core-bot": "ghcr.io/akhripunov/gpoint-runtime@" + args.app_digest,
-            "gpoint-agata-api": "ghcr.io/akhripunov/gpoint-agata-runtime@" + args.agata_digest,
-            "gpoint-agata-memory-worker": "ghcr.io/akhripunov/gpoint-agata-runtime@" + args.agata_digest,
-            "gpoint-miniapp-web": "ghcr.io/akhripunov/gpoint-miniapp@" + args.miniapp_digest,
-            "gpoint-eros-pilot-engine": "ghcr.io/akhripunov/gpoint-eros@" + (args.eros_digest or ""),
-            "gpoint-eros-relay-relay": "ghcr.io/akhripunov/gpoint-runtime@" + args.app_digest,
-        }
-        has_eros = "gpoint-eros-pilot-engine" in expected_roles
-        if has_eros and not OCI_DIGEST.fullmatch(args.eros_digest or ""):
-            raise SystemExit("ordinary manifest needs the exact stock Eros OCI digest")
-        if not has_eros and args.eros_digest:
-            raise SystemExit("ordinary manifest received an Eros digest without Eros roles")
-        component_identities = {}
-        for role, repository in role_repositories.items():
-            row = expected_roles[role]
-            component = role_components[role]
-            version, source, repo_digest = row.get("version"), row.get("sourceSha"), row.get("repositoryDigest")
-            baseline_image_id = row.get("baselineImageId")
-            if (not re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+", version or "")
-                    or not SHA40.fullmatch(source or "")
-                    or not re.fullmatch(re.escape(repository) + r"@sha256:[0-9a-f]{64}", repo_digest or "")):
-                raise SystemExit("ordinary manifest component role identity is malformed")
-            if component in updated_components:
-                expected_candidate_digest = candidate_digests[role]
-                if (version != args.version or source != args.sha or repo_digest != expected_candidate_digest
-                        or baseline_image_id is not None):
-                    raise SystemExit("ordinary manifest updated role differs from the exact candidate artifact")
-            elif not re.fullmatch(r"sha256:[0-9a-f]{64}", baseline_image_id or ""):
-                raise SystemExit("ordinary manifest untouched role lacks its exact baseline Docker image ID")
-            identity = (version, source, repo_digest, baseline_image_id)
-            identity_group = ROLE_IDENTITY_GROUP[role]
-            if identity_group in component_identities and component_identities[identity_group] != identity:
-                raise SystemExit("ordinary manifest shared component roles have inconsistent identities")
-            component_identities[identity_group] = identity
+    else:
+        updated_components = None
+    if (not isinstance(expected_role_plan, dict)
+            or expected_role_plan.get("schema") != 1 or expected_role_plan.get("candidateSha") != args.sha
+            or updated_components is None or set(expected_role_plan.get("updatedComponents", [])) != updated_components
+            or not isinstance(expected_roles, dict) or set(expected_roles) != set(role_repositories)):
+        raise SystemExit("ordinary manifest component role plan does not match the exact candidate scope")
+    candidate_digests = {
+        "gpoint-core-api": "ghcr.io/akhripunov/gpoint-runtime@" + args.app_digest,
+        "gpoint-core-worker": "ghcr.io/akhripunov/gpoint-runtime@" + args.app_digest,
+        "gpoint-core-bot": "ghcr.io/akhripunov/gpoint-runtime@" + args.app_digest,
+        "gpoint-agata-api": "ghcr.io/akhripunov/gpoint-agata-runtime@" + args.agata_digest,
+        "gpoint-agata-memory-worker": "ghcr.io/akhripunov/gpoint-agata-runtime@" + args.agata_digest,
+        "gpoint-miniapp-web": "ghcr.io/akhripunov/gpoint-miniapp@" + args.miniapp_digest,
+        "gpoint-eros-pilot-engine": "ghcr.io/akhripunov/gpoint-eros@" + (args.eros_digest or ""),
+        "gpoint-eros-relay-relay": "ghcr.io/akhripunov/gpoint-runtime@" + (args.eros_relay_digest or ""),
+    }
+    has_eros = "gpoint-eros-pilot-engine" in expected_roles
+    eros_digests = (args.eros_digest, args.eros_relay_digest)
+    if has_eros and not all(OCI_DIGEST.fullmatch(digest or "") for digest in eros_digests):
+        raise SystemExit("ordinary manifest needs exact Eros Engine and Relay OCI digests")
+    if not has_eros and any(eros_digests):
+        raise SystemExit("ordinary manifest received an Eros digest without Eros roles")
+    component_identities = {}
+    for role, repository in role_repositories.items():
+        row = expected_roles[role]
+        component = role_components[role]
+        version, source, repo_digest = row.get("version"), row.get("sourceSha"), row.get("repositoryDigest")
+        baseline_image_id = row.get("baselineImageId")
+        if (not re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+", version or "")
+                or not SHA40.fullmatch(source or "")
+                or not re.fullmatch(re.escape(repository) + r"@sha256:[0-9a-f]{64}", repo_digest or "")):
+            raise SystemExit("ordinary manifest component role identity is malformed")
+        if component in updated_components:
+            expected_candidate_digest = candidate_digests[role]
+            if (version != args.version or source != args.sha or repo_digest != expected_candidate_digest
+                    or baseline_image_id is not None):
+                raise SystemExit("ordinary manifest updated role differs from the exact candidate artifact")
+        elif not re.fullmatch(r"sha256:[0-9a-f]{64}", baseline_image_id or ""):
+            raise SystemExit("ordinary manifest untouched role lacks its exact baseline Docker image ID")
+        identity = (version, source, repo_digest, baseline_image_id)
+        identity_group = ROLE_IDENTITY_GROUP[role]
+        if identity_group in component_identities and component_identities[identity_group] != identity:
+            raise SystemExit("ordinary manifest shared component roles have inconsistent identities")
+        component_identities[identity_group] = identity
     for field in ("run_id", "attempt", "deployment_id"):
         if not getattr(args, field).isdigit() or int(getattr(args, field)) <= 0:
             raise SystemExit(f"{field.replace('_', ' ')} must be a positive integer")
     if args.version != f"{args.sha}-{args.run_id}-{args.attempt}":
         raise SystemExit("attempt tag does not match the exact candidate SHA and workflow attempt")
-    if args.mode == "cutover":
-        expected_state_name = f"kamal-no-eros-state-{args.run_id}-{args.attempt}"
-        if Path(args.no_eros_baseline_path).name != expected_state_name + ".json":
-            raise SystemExit("no-Eros baseline path does not match the exact cutover attempt")
-        if (Path(args.no_eros_postflight_path).name != expected_state_name + "-postflight.json"
-                or Path(args.no_eros_postflight_path).parent != Path(args.no_eros_baseline_path).parent):
-            raise SystemExit("no-Eros postflight path does not match the exact cutover attempt")
-        no_eros_baseline = read_valid_no_eros_state(args.no_eros_baseline_path, args.no_eros_baseline_sha)
-        no_eros_postflight = read_valid_no_eros_state(args.no_eros_postflight_path, args.no_eros_postflight_sha)
-        if no_eros_baseline != no_eros_postflight:
-            raise SystemExit("no-Eros baseline and postflight state differ")
-        if no_eros_baseline["postgres"]["systemIdentifier"] != args.postgres_system_identifier:
-            raise SystemExit("no-Eros snapshot PostgreSQL identity differs from the production baseline")
-        expected_media_path = (f"/opt/gpoint/backups/gpoint-pre-release-{args.sha}-"
-                               f"{args.run_id}-{args.attempt}.media.tar.age")
-        if args.media_backup_path != expected_media_path:
-            raise SystemExit("media backup path does not match the exact cutover attempt")
-        if args.media_source_manifest_sha != args.media_restore_manifest_sha:
-            raise SystemExit("restored media manifest does not match the source tree")
-        for field in ("media_file_count", "media_directory_count", "media_total_bytes", "media_backup_bytes"):
-            value = getattr(args, field)
-            if not value.isdigit():
-                raise SystemExit(f"{field.replace('_', ' ')} must be a nonnegative integer")
-        if int(args.media_backup_bytes) <= 0:
-            raise SystemExit("media backup bytes must be positive")
     for field in ("app_digest", "agata_digest", "miniapp_digest"):
         if not OCI_DIGEST.fullmatch(getattr(args, field)):
             raise SystemExit(f"{field.replace('_', ' ')} must be an immutable OCI digest")
@@ -296,18 +199,18 @@ def main() -> int:
         ("gpoint-agata-memory-worker", "ghcr.io/akhripunov/gpoint-agata-runtime", args.agata_digest),
         ("gpoint-miniapp-web", "ghcr.io/akhripunov/gpoint-miniapp", args.miniapp_digest),
     ]
-    if args.mode == "ordinary" and expected_role_plan and "gpoint-eros-pilot-engine" in expected_role_plan["roles"]:
+    if "gpoint-eros-pilot-engine" in expected_role_plan["roles"]:
         expected_services.extend([
             ("gpoint-eros-pilot-engine", "ghcr.io/akhripunov/gpoint-eros", args.eros_digest),
-            ("gpoint-eros-relay-relay", "ghcr.io/akhripunov/gpoint-runtime", args.app_digest),
+            ("gpoint-eros-relay-relay", "ghcr.io/akhripunov/gpoint-runtime", args.eros_relay_digest),
         ])
     runtime_services = []
     for prefix, repository, digest in expected_services:
-        expected_role = expected_role_plan["roles"][prefix] if args.mode == "ordinary" else None
-        role_version = expected_role["version"] if expected_role else args.version
-        role_source = expected_role["sourceSha"] if expected_role else args.app_source_sha
-        expected_digest = expected_role["repositoryDigest"] if expected_role else f"{repository}@{digest}"
-        expected_baseline_image_id = expected_role["baselineImageId"] if expected_role else None
+        expected_role = expected_role_plan["roles"][prefix]
+        role_version = expected_role["version"]
+        role_source = expected_role["sourceSha"]
+        expected_digest = expected_role["repositoryDigest"]
+        expected_baseline_image_id = expected_role["baselineImageId"]
         name = f"{prefix}-{role_version}"
         container = docker_json("inspect", name)[0]
         image_id = container["Image"]
@@ -348,74 +251,71 @@ def main() -> int:
             "restartCount": container["RestartCount"],
         })
 
-    ordinary_preservation = None
-    public_ingress = None
-    if args.mode == "ordinary":
-        if not shutil.which("systemctl"):
-            raise SystemExit("cannot verify Caddy state without systemctl")
-        caddy = subprocess.run(["systemctl", "is-active", "--quiet", "caddy"], check=False)
-        if caddy.returncode == 0:
-            raise SystemExit("Caddy must be inactive on ordinary Kamal production topology")
-        if caddy.returncode != 3:
-            raise SystemExit("could not prove Caddy is inactive")
-        for name, expected_id in (("shared_postgres_1", args.db_container_id),
-                                  ("shared_redis_1", args.redis_container_id)):
-            container = docker_json("inspect", name)[0]
-            if container.get("Id") != expected_id or not container.get("State", {}).get("Running"):
-                raise SystemExit(f"{name} changed or stopped during ordinary deployment")
-        proxy = docker_json("inspect", "kamal-proxy")[0]
-        if not proxy.get("State", {}).get("Running"):
-            raise SystemExit("Kamal Proxy is not running")
-        ports = proxy.get("NetworkSettings", {}).get("Ports", {})
-        for port in ("80/tcp", "443/tcp"):
-            bindings = ports.get(port) or []
-            if not any(binding.get("HostPort") == port.split("/", 1)[0] for binding in bindings):
-                raise SystemExit(f"Kamal Proxy does not own public port {port.split('/', 1)[0]}")
-        stopped_compose = []
-        for service in ("api", "worker", "bot", "agata-api", "agata-memory-worker"):
-            result = subprocess.run(["docker", "ps", "-aq", "--filter",
-                                     "label=com.docker.compose.project=compose", "--filter",
-                                     f"label=com.docker.compose.service={service}"],
-                                    check=True, capture_output=True, text=True)
-            container_ids = [value for value in result.stdout.splitlines() if value]
-            if not container_ids:
-                raise SystemExit(f"expected stopped legacy Compose service is missing: {service}")
-            for container_id in container_ids:
-                container = docker_json("inspect", container_id)[0]
-                if container.get("State", {}).get("Running"):
-                    raise SystemExit(f"legacy Compose service must remain stopped: {service}")
-                stopped_compose.append({"service": service, "containerId": container_id, "running": False})
-        stopped_gsales = []
-        for service in ("gsales-api", "gsales-agata-api", "gsales-agata-memory-worker"):
-            result = subprocess.run(["docker", "ps", "-aq", "--filter",
-                                     "label=com.docker.compose.project=compose",
-                                     "--filter", f"label=com.docker.compose.service={service}"],
-                                    check=True, capture_output=True, text=True)
-            container_ids = [value for value in result.stdout.splitlines() if value]
-            if not container_ids:
-                raise SystemExit(f"expected stopped GSales service is missing: {service}")
-            for container_id in container_ids:
-                container = docker_json("inspect", container_id)[0]
-                if container.get("State", {}).get("Running"):
-                    raise SystemExit(f"GSales service must remain stopped: {service}")
-                stopped_gsales.append({"service": service, "containerId": container_id, "running": False})
-        ordinary_preservation = {
-            "postgresContainerId": args.db_container_id,
-            "redisContainerId": args.redis_container_id,
-            "caddy": "INACTIVE",
-            "legacyCompose": "STOPPED",
-            "legacyComposeContainers": stopped_compose,
-            "gsales": "STOPPED",
-            "gsalesContainers": stopped_gsales,
-            "databaseMigrationsAppliedByRelease": bool(pending_migrations),
-            "migrationCompatibility": "PASS",
-        }
-        public_ingress = {"proxy": "kamal-proxy", "httpPort": 80, "httpsPort": 443,
-                          "tls": "PASS", "routes": "PASS"}
+    if not shutil.which("systemctl"):
+        raise SystemExit("cannot verify Caddy state without systemctl")
+    caddy = subprocess.run(["systemctl", "is-active", "--quiet", "caddy"], check=False)
+    if caddy.returncode == 0:
+        raise SystemExit("Caddy must be inactive on ordinary Kamal production topology")
+    if caddy.returncode != 3:
+        raise SystemExit("could not prove Caddy is inactive")
+    for name, expected_id in (("shared_postgres_1", args.db_container_id),
+                              ("shared_redis_1", args.redis_container_id)):
+        container = docker_json("inspect", name)[0]
+        if container.get("Id") != expected_id or not container.get("State", {}).get("Running"):
+            raise SystemExit(f"{name} changed or stopped during ordinary deployment")
+    proxy = docker_json("inspect", "kamal-proxy")[0]
+    if not proxy.get("State", {}).get("Running"):
+        raise SystemExit("Kamal Proxy is not running")
+    ports = proxy.get("NetworkSettings", {}).get("Ports", {})
+    for port in ("80/tcp", "443/tcp"):
+        bindings = ports.get(port) or []
+        if not any(binding.get("HostPort") == port.split("/", 1)[0] for binding in bindings):
+            raise SystemExit(f"Kamal Proxy does not own public port {port.split('/', 1)[0]}")
+    stopped_compose = []
+    for service in ("api", "worker", "bot", "agata-api", "agata-memory-worker"):
+        result = subprocess.run(["docker", "ps", "-aq", "--filter",
+                                 "label=com.docker.compose.project=compose", "--filter",
+                                 f"label=com.docker.compose.service={service}"],
+                                check=True, capture_output=True, text=True)
+        container_ids = [value for value in result.stdout.splitlines() if value]
+        if not container_ids:
+            raise SystemExit(f"expected stopped legacy Compose service is missing: {service}")
+        for container_id in container_ids:
+            container = docker_json("inspect", container_id)[0]
+            if container.get("State", {}).get("Running"):
+                raise SystemExit(f"legacy Compose service must remain stopped: {service}")
+            stopped_compose.append({"service": service, "containerId": container_id, "running": False})
+    stopped_gsales = []
+    for service in ("gsales-api", "gsales-agata-api", "gsales-agata-memory-worker"):
+        result = subprocess.run(["docker", "ps", "-aq", "--filter",
+                                 "label=com.docker.compose.project=compose",
+                                 "--filter", f"label=com.docker.compose.service={service}"],
+                                check=True, capture_output=True, text=True)
+        container_ids = [value for value in result.stdout.splitlines() if value]
+        if not container_ids:
+            raise SystemExit(f"expected stopped GSales service is missing: {service}")
+        for container_id in container_ids:
+            container = docker_json("inspect", container_id)[0]
+            if container.get("State", {}).get("Running"):
+                raise SystemExit(f"GSales service must remain stopped: {service}")
+            stopped_gsales.append({"service": service, "containerId": container_id, "running": False})
+    ordinary_preservation = {
+        "postgresContainerId": args.db_container_id,
+        "redisContainerId": args.redis_container_id,
+        "caddy": "INACTIVE",
+        "legacyCompose": "STOPPED",
+        "legacyComposeContainers": stopped_compose,
+        "gsales": "STOPPED",
+        "gsalesContainers": stopped_gsales,
+        "databaseMigrationsAppliedByRelease": bool(pending_migrations),
+        "migrationCompatibility": "PASS",
+    }
+    public_ingress = {"proxy": "kamal-proxy", "httpPort": 80, "httpsPort": 443,
+                      "tls": "PASS", "routes": "PASS"}
 
     manifest = {
         "schema": "gpoint-kamal-production-manifest/v2",
-        "operationMode": args.mode,
+        "operationMode": "ordinary",
         "result": "PASS",
         "verifiedAtUtc": datetime.now(timezone.utc).isoformat(),
         "candidate": {
@@ -427,56 +327,24 @@ def main() -> int:
                 "agata": f"ghcr.io/akhripunov/gpoint-agata-runtime@{args.agata_digest}",
                 "miniapp": f"ghcr.io/akhripunov/gpoint-miniapp@{args.miniapp_digest}",
                 **({"eros": f"ghcr.io/akhripunov/gpoint-eros@{args.eros_digest}",
-                    "eros_relay": f"ghcr.io/akhripunov/gpoint-runtime@{args.app_digest}"}
-                   if args.mode == "ordinary" and expected_role_plan
-                   and "gpoint-eros-pilot-engine" in expected_role_plan["roles"] else {}),
+                    "eros_relay": f"ghcr.io/akhripunov/gpoint-runtime@{args.eros_relay_digest}"}
+                   if "gpoint-eros-pilot-engine" in expected_role_plan["roles"] else {}),
             },
         },
-        "deploymentScope": ({
+        "deploymentScope": {
             "classification": expected_role_plan["scope"],
             "updatedComponents": expected_role_plan["updatedComponents"],
-        } if args.mode == "ordinary" else {"classification": "FULL", "updatedComponents": ["CORE", "AGATA", "MINIAPP"]}),
+        },
         "runtimeServices": runtime_services,
         "attempt": {"runId": args.run_id, "runAttempt": args.attempt,
                     "githubDeploymentId": args.deployment_id},
-        "evidence": ({
-            "baseline": {"path": args.baseline_path, "sha256": args.baseline_sha},
-            "noErosBaseline": {"path": args.no_eros_baseline_path, "sha256": args.no_eros_baseline_sha,
-                               "result": "PASS"},
-            "noErosPostflight": {"path": args.no_eros_postflight_path, "sha256": args.no_eros_postflight_sha,
-                                 "result": "PASS"},
-            "inventory": {"path": args.inventory_path, "sha256": args.inventory_sha},
-            "encryptedBackup": {"path": args.backup_path, "sha256": args.backup_sha,
-                                "encryption": "age-x25519", "offsiteRestore": "PASS"},
-            "isolatedRestore": {"path": args.restore_path, "sha256": args.restore_sha,
-                                "result": "PASS"},
-            "mediaBackup": {"path": args.media_backup_path, "sha256": args.media_backup_sha,
-                            "bytes": int(args.media_backup_bytes), "encryption": "age-x25519", "offsiteRestore": "PASS",
-                            "fileCount": int(args.media_file_count),
-                            "directoryCount": int(args.media_directory_count),
-                            "totalBytes": int(args.media_total_bytes),
-                            "sourceManifestSha256": args.media_source_manifest_sha,
-                            "restoredManifestSha256": args.media_restore_manifest_sha},
-            "mediaRestore": {"result": "PASS", "manifestSha256": args.media_restore_manifest_sha},
-        } if args.mode == "cutover" else {
+        "evidence": {
             "publicRoutes": "PASS", "migrationCompatibility": "PASS",
             "prismaHead": args.prisma_head, "agataHead": args.agata_head,
-        }),
-        "preservation": ({
-            "postgresSystemIdentifier": args.postgres_system_identifier,
-            "postgresAclFingerprint": args.postgres_acl_fingerprint,
-            "postgresCatalogAclSha256": no_eros_postflight["postgres"]["catalogAclSha256"],
-            "erosAbsent": "PASS",
-            "persistentMediaBackupAndRestore": "PASS",
-            "gsales": "STOPPED",
-            "databaseMigrationsAppliedByCutover": False,
-        } if args.mode == "cutover" else ordinary_preservation),
+        },
+        "preservation": ordinary_preservation,
         "publicIngress": public_ingress,
-        "migrationHeads": ({
-            "agataCandidate": args.agata_candidate_head,
-            "agataLive": args.agata_live_head, "agataParity": "PASS",
-            "prismaStatus": "UP_TO_DATE",
-        } if args.mode == "cutover" else {
+        "migrationHeads": {
             "prismaHead": args.prisma_head,
             "prismaAppliedMigrations": migrations,
             "prismaAppliedChecksums": checksum_rows,
@@ -493,17 +361,12 @@ def main() -> int:
             "liveBaselineUnchanged": not pending_migrations,
             "appliedExactlyApprovedPlan": True,
             "databaseWrites": bool(pending_migrations),
-        }),
-        "verified": ([
-            "public-api-health", "public-miniapp-routes", "exact-image-digests-and-git-sha",
-            "service-health", "media-read-write", "worker-bot-singletons",
-            "media-backup-offsite-readback-and-isolated-restore",
-            "postgres-acl-no-eros-caddy-preservation", "migration-heads", "gsales-stopped",
-        ] if args.mode == "cutover" else [
+        },
+        "verified": [
             "public-api-health", "public-media-route", "public-miniapp-routes",
             "exact-image-digests-and-git-sha", "service-health", "kamal-proxy-public-tls",
             "postgres-redis-preserved", "live-schema-compatibility-and-baseline-unchanged", "gsales-stopped",
-        ]),
+        ],
     }
     output_path = Path(args.output)
     fd, temporary = tempfile.mkstemp(prefix=".kamal-manifest-", dir=output_path.parent)

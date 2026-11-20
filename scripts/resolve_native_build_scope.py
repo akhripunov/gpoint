@@ -16,6 +16,7 @@ from native_release_intent import (
     EXACT_SHA,
     classify_component_build_plan,
 )
+from resolve_native_environment_deployment import latest_deployment_status
 
 
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -28,10 +29,10 @@ COMPONENT_SOURCE_KEYS = {
     "AGATA": "gpoint-agata-source-sha",
     "MINIAPP": "gpoint-miniapp-source-sha",
     "EROS": "gpoint-eros-source-sha",
+    "EROS_RELAY": "gpoint-eros-relay-source-sha",
 }
 REQUIRED_COMPONENTS = ("CORE", "AGATA", "MINIAPP")
 SUPPORTED_TASKS = {"deploy", "rollback"}
-ALL_COMPONENTS = ["CORE", "AGATA", "MINIAPP", "EROS"]
 BOOTSTRAP_BUILD_COMPONENTS = ["CORE", "AGATA", "MINIAPP", "EROS"]
 
 
@@ -45,20 +46,6 @@ def _timestamp(value: object) -> datetime:
     if stamp.tzinfo is None:
         raise ValueError("production Deployment timestamp has no timezone")
     return stamp
-
-
-def _latest_status(statuses: list[dict]) -> dict:
-    if not isinstance(statuses, list) or not statuses:
-        raise ValueError("latest production Deployment has no statuses")
-    try:
-        rows = [(_timestamp(row.get("created_at")), row) for row in statuses]
-    except AttributeError:
-        raise ValueError("production Deployment status is malformed") from None
-    newest = max(stamp for stamp, _row in rows)
-    matches = [row for stamp, row in rows if stamp == newest]
-    if len(matches) != 1:
-        raise ValueError("latest production Deployment status is ambiguous")
-    return matches[0]
 
 
 def _is_github_environment_job_record(deployment: dict) -> bool:
@@ -108,9 +95,11 @@ def _manifest_baseline(environment_url: object, *, deployment_task: str,
         raise ValueError("production Deployment component source evidence is incomplete")
     sources = {component: values[key] for component, key in COMPONENT_SOURCE_KEYS.items()
                if key in values}
-    # Existing V3 manifests predate Eros. Until the first Eros deployment, use
-    # the Core baseline to classify the introduction of the Eros component.
-    sources.setdefault("EROS", sources["CORE"])
+    if "EROS" in sources:
+        # Older verified releases always deployed Engine and Relay together.
+        sources.setdefault("EROS_RELAY", sources["EROS"])
+    elif "EROS_RELAY" in sources:
+        raise ValueError("production Deployment component source evidence is incomplete")
     if any(not EXACT_SHA.fullmatch(source) for source in sources.values()):
         raise ValueError("production Deployment component source SHA is invalid")
     runtime_target_sha = values.get("gpoint-runtime-target-sha")
@@ -154,7 +143,7 @@ def resolve_production_component_sources(deployments: list[dict], statuses_by_id
             or deployment.get("transient_environment") is not False
             or task not in SUPPORTED_TASKS):
         raise ValueError("latest production Deployment identity is unsupported or malformed")
-    status = _latest_status(statuses_by_id.get(identifier, []))
+    status = latest_deployment_status(statuses_by_id.get(identifier, []))
     failed_native = _is_github_environment_job_record(deployment) and status.get("state") in {"failure", "error"}
     if (status.get("state") != "success" and not failed_native) or status.get("environment") != "production":
         raise ValueError("latest production Deployment is not successful")
@@ -197,7 +186,8 @@ def resolve_production_component_sources(deployments: list[dict], statuses_by_id
     if baseline is None:
         return {"status": "BOOTSTRAP_FULL", "deployment_id": identifier,
                 "reason": "successful_legacy_deployment_has_no_component_source_manifest"}
-    return {"status": "VERIFIED", "deployment_id": identifier, **baseline}
+    return {"status": "VERIFIED", "deployment_id": identifier,
+            "deployment_sha": target_sha, **baseline}
 
 
 def resolve_build_plan(repo: Path, candidate_sha: str, deployments: list[dict],
@@ -229,6 +219,7 @@ def resolve_build_plan(repo: Path, candidate_sha: str, deployments: list[dict],
     return {
         "status": "VERIFIED",
         "deployment_id": baseline["deployment_id"],
+        "baseline_sha": baseline["deployment_sha"],
         "manifest_sha256": baseline["manifest_sha256"],
         "baseline_sources": baseline["component_sources"],
         **plan,
@@ -276,7 +267,7 @@ def main() -> int:
         runs_by_id = {}
         jobs_by_id = {}
         for statuses in statuses_by_id.values():
-            status = _latest_status(statuses)
+            status = latest_deployment_status(statuses)
             if status.get("state") not in {"success", "failure", "error"}:
                 continue
             match = RUN_URL.fullmatch(status.get("log_url", ""))

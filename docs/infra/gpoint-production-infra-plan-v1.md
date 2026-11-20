@@ -3,6 +3,12 @@
 Status: planning only. No production deployment, migration, DNS change, TLS issuance, or Telegram configuration change has been performed.
 Date: 2026-09-15
 
+> Historical planning snapshot. The staging option and pending decision below
+> were superseded by the OWNER directive of 2026-11-20: Layer7 is the single
+> GPoint production VPS, and no separate staging VPS, database, GitHub
+> Environment, or release workflow is to be created. Current release
+> validation follows `docs/release/automation.md`.
+
 ## Proposed topology
 
 One VPS runs a reverse proxy and the long-lived GPoint services. PostgreSQL and Redis bind only to the private/container network. Media is stored in an external S3-compatible service.
@@ -67,9 +73,13 @@ Secrets are supplied by the deployment secret manager and never committed.
 | Bot | `TELEGRAM_BOT_TOKEN` | Telegram owner / MISSING |
 | Worker | `REDIS_URL` | Infrastructure / MISSING |
 
-## Staging option
+## Superseded staging proposal (historical only)
 
-Recommended staging shape is the same topology with separate application config and data stores:
+This proposal is retained only as planning history. Do not implement it. The
+OWNER directive of 2026-11-20 establishes Layer7 as the sole production VPS and
+forbids a separate staging VPS, database, Environment, or workflow.
+
+The superseded proposal described a separate topology:
 
 - `staging-app.<GPOINT_DOMAIN>` and `staging-api.<GPOINT_DOMAIN>`.
 - Separate PostgreSQL database.
@@ -78,7 +88,9 @@ Recommended staging shape is the same topology with separate application config 
 - Separate Telegram test bot/configuration.
 - No production business data sharing.
 
-Staging decision is still required from the product owner.
+No staging decision or staging infrastructure is required by the current
+architecture. Validate releases with local integration tests, isolated Docker
+and PostgreSQL, and GitHub CI/Buildx/GHCR.
 
 ## Release gates
 
@@ -98,7 +110,6 @@ VPS_PROVIDER = UNSELECTED
 VPS_PLAN = UNSELECTED
 GPOINT_DOMAIN = UNSELECTED
 S3_PROVIDER = UNSELECTED
-STAGING = YES / NO decision required
 ```
 
 Until these values and production credentials/URLs are supplied, `ENVIRONMENT_GATE=FAIL`, `PRE_APPLY_IMAGE_PARITY_GATE=NOT_READY`, and deployment remains blocked.

@@ -81,9 +81,9 @@ def test_latest_native_deployment_exposes_exact_component_baselines():
     assert baseline == {
         "status": "VERIFIED",
         "deployment_id": 200,
+        "deployment_sha": BASELINE,
         "manifest_sha256": MANIFEST_SHA,
-        "component_sources": {"CORE": BASELINE, "AGATA": BASELINE, "MINIAPP": BASELINE,
-                              "EROS": BASELINE},
+        "component_sources": {"CORE": BASELINE, "AGATA": BASELINE, "MINIAPP": BASELINE},
     }
 
 
@@ -100,7 +100,7 @@ def test_successful_native_environment_record_supplies_component_baselines():
     )
 
     assert baseline["status"] == "VERIFIED"
-    assert baseline["component_sources"] == dict.fromkeys(MODULE.ALL_COMPONENTS, BASELINE)
+    assert baseline["component_sources"] == dict.fromkeys(MODULE.REQUIRED_COMPONENTS, BASELINE)
 
 
 def test_successful_native_environment_record_cannot_hide_invalid_manifest():
@@ -350,7 +350,7 @@ def test_rollback_baseline_requires_all_sources_equal_the_exact_target_sha():
     )
 
     assert baseline["component_sources"] == {
-        "CORE": target, "AGATA": target, "MINIAPP": target, "EROS": target,
+        "CORE": target, "AGATA": target, "MINIAPP": target,
     }
 
 
@@ -375,7 +375,7 @@ def test_native_environment_rollback_tracks_workflow_sha_and_runtime_target_sepa
 
     assert baseline["status"] == "VERIFIED"
     assert baseline["component_sources"] == {
-        "CORE": target, "AGATA": target, "MINIAPP": target, "EROS": target,
+        "CORE": target, "AGATA": target, "MINIAPP": target,
     }
 
 
@@ -442,49 +442,11 @@ def test_selective_plan_returns_verify_only_for_staggered_sources_and_old_migrat
     assert plan["status"] == "VERIFIED"
     assert plan["baseline_sources"] == {
         "CORE": core_source_sha, "AGATA": baseline_sha, "MINIAPP": baseline_sha,
-        "EROS": core_source_sha,
     }
     assert plan["deploy_scope"] == "NONE"
     assert plan["build_components"] == []
     assert plan["reason"] == "no_runtime_changes"
     assert migration_sha != baseline_sha
-
-
-def test_layer7_staging_only_paths_do_not_select_application_images(tmp_path):
-    repo, baseline_sha = repo_with_baseline(tmp_path)
-    paths = (
-        ".github/actionlint.yaml",
-        "config/deploy.layer7-staging.yml",
-        "config/deploy.layer7-staging.miniapp.yml",
-        "config/deploy.layer7-staging.eros-api.yml",
-        "config/deploy.layer7-staging.eros.yml",
-        "config/deploy.layer7-staging.eros-relay.yml",
-        "infra/staging/layer7_known_hosts",
-        "scripts/layer7-transport.sh",
-        "scripts/layer7_staging_database.py",
-        "scripts/layer7_staging_env.py",
-        "scripts/write_layer7_staging_env.py",
-        "scripts/write_layer7_staging_eros_api_env.py",
-    )
-    candidate = baseline_sha
-    for index, path in enumerate(paths):
-        candidate = commit_file(repo, path, f"staging-only {index}\n")
-    deployments, statuses, runs = deployment_fixture(target_sha=baseline_sha,
-                                                       run_head_sha=baseline_sha)
-    statuses[200][0]["environment_url"] = (
-        "https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA
-        + "&gpoint-core-source-sha=" + baseline_sha
-        + "&gpoint-agata-source-sha=" + baseline_sha
-        + "&gpoint-miniapp-source-sha=" + baseline_sha
-    )
-
-    plan = MODULE.resolve_build_plan(
-        repo, candidate, deployments, statuses, runs, repository=REPOSITORY
-    )
-
-    assert plan["deploy_scope"] == "NONE"
-    assert plan["build_components"] == []
-    assert plan["reason"] == "no_runtime_changes"
 
 
 def test_missing_deployment_history_is_fail_closed_for_component_scope(tmp_path):
@@ -498,3 +460,20 @@ def test_missing_deployment_history_is_fail_closed_for_component_scope(tmp_path)
     assert plan == {"status": "BOOTSTRAP_FULL", "deploy_scope": "UNRESOLVED",
                     "build_components": ["CORE", "AGATA", "MINIAPP", "EROS"],
                     "reason": "production_component_baseline_unavailable"}
+
+
+@pytest.mark.parametrize("explicit_relay", [False, True])
+def test_production_deployment_extracts_engine_and_relay_source_shas(explicit_relay):
+    deployments, statuses, runs = deployment_fixture()
+    engine_source = "e" * 40
+    relay_source = "f" * 40 if explicit_relay else engine_source
+    statuses[200][0]["environment_url"] += "&gpoint-eros-source-sha=" + engine_source
+    if explicit_relay:
+        statuses[200][0]["environment_url"] += "&gpoint-eros-relay-source-sha=" + relay_source
+
+    baseline = MODULE.resolve_production_component_sources(
+        deployments, statuses, runs, repository=REPOSITORY
+    )
+
+    assert baseline["component_sources"]["EROS"] == engine_source
+    assert baseline["component_sources"]["EROS_RELAY"] == relay_source

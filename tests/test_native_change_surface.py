@@ -1,136 +1,194 @@
-"""Contract of the shared changed-surface classifier used by CI and release."""
+"""Contracts for declarative Native Release path filters."""
 
 import re
-import sys
+import subprocess
+import json
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-
-from native_change_surface import classify  # noqa: E402
 
 
-def test_docs_only_selection_is_minimal():
-    surface = classify(["docs/release/README.md", "README.md"])
-    assert surface["docs_only"] is True
-    assert surface["full_ci"] is False
-    assert surface["eros"] is False
-    assert surface["miniapp"] is False
+def _filters():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    steps = workflow["jobs"]["tests"]["steps"]
+    step = next(step for step in steps if step.get("id") == "filter")
+    return workflow, step, yaml.safe_load(step["with"]["filters"])
 
 
-def test_staging_eros_config_does_not_select_the_eros_image_build():
-    # Config-only Eros change must not rebuild the stock Eros image, but it is
-    # still an Eros change for reporting purposes.
-    surface = classify(["config/deploy.layer7-staging.eros.yml"])
-    assert surface["eros"] is False
-    assert surface["eros_config"] is True
-    assert surface["full_ci"] is False
+def test_pinned_dorny_filters_cover_five_logical_components():
+    workflow, step, filters = _filters()
+
+    assert step["uses"] == "dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d"
+    assert step["with"]["base"] == (
+        "${{ github.event_name == 'pull_request' && "
+        "github.event.pull_request.base.sha || github.event.before }}"
+    )
+    assert step["with"]["predicate-quantifier"] == "some-with-excludes"
+    assert "pull-requests" in workflow["jobs"]["tests"]["permissions"]
+    assert {"core", "miniapp", "agata", "eros_engine", "eros_relay"} <= set(filters)
+    expected_paths = {
+        "core": "apps/api/**",
+        "miniapp": "apps/miniapp/**",
+        "agata": "services/agata/**",
+        "eros_engine": "services/eros-engine/**",
+        "eros_relay": "services/eros-engine/eros-pilot-embedding-relay.mjs",
+    }
+    for component, path in expected_paths.items():
+        assert path in filters[component]
+    assert "services/eros-engine/eros-pilot-embedding-relay.mjs" not in filters["core"]
+    assert "!services/eros-engine/eros-pilot-embedding-relay.mjs" in filters["eros_engine"]
 
 
-def test_eros_toml_alone_does_not_select_the_image_build():
-    surface = classify(["services/eros-engine/eros-layer7-staging-model-config.toml"])
-    assert surface["eros"] is False
-    assert surface["eros_config"] is True
+def _match_with_picomatch(filters, paths):
+    picomatch = next((ROOT / "node_modules/.pnpm").glob(
+        "picomatch@*/node_modules/picomatch"), None)
+    assert picomatch is not None, "repository-pinned picomatch dependency is required"
+    script = r'''const pm = require(process.argv[1]);
+const payload = JSON.parse(process.argv[2]);
+const [filters, paths] = payload;
+const matches = Object.fromEntries(Object.entries(filters).map(([name, patterns]) => {
+const positives = patterns.filter(pattern => !pattern.startsWith("!"));
+const excludes = patterns.filter(pattern => pattern.startsWith("!")).map(pattern => pattern.slice(1));
+return [name, paths.map(path => positives.some(pattern => pm(pattern)(path))
+  && !excludes.some(pattern => pm(pattern)(path)))];
+}));
+process.stdout.write(JSON.stringify(matches));'''
+    result = subprocess.run(
+        ["node", "-e", script, str(picomatch), json.dumps([filters, paths])],
+        check=True, capture_output=True, text=True,
+    )
+    return json.loads(result.stdout)
 
 
-def test_eros_engine_code_selects_the_image_build():
-    surface = classify(["services/eros-engine/run-local-e2e.sh"])
-    assert surface["eros"] is True
-    assert surface["eros_config"] is False
+def test_all_five_component_filters_match_real_paths():
+    _workflow, _step, filters = _filters()
+    paths = [
+        "apps/api/src/messages.ts",
+        "apps/miniapp/src/main.tsx",
+        "services/agata/src/main.py",
+        "services/eros-engine/src/main.rs",
+        "services/eros-engine/eros-pilot-embedding-relay.mjs",
+    ]
+    matches = _match_with_picomatch(
+        {name: filters[name] for name in ("core", "miniapp", "agata", "eros_engine", "eros_relay")},
+        paths,
+    )
+    assert matches == {
+        "core": [True, False, False, False, False],
+        "miniapp": [False, True, False, False, False],
+        "agata": [False, False, True, False, False],
+        "eros_engine": [False, False, False, True, False],
+        "eros_relay": [False, False, False, False, True],
+    }
 
 
-def test_protected_instructions_fail_closed():
-    surface = classify(["AGENTS.md"])
-    assert surface["protected_paths"] == ["AGENTS.md"]
-    assert surface["full_ci"] is True
-    assert surface["docs_only"] is False
+def test_eros_engine_negative_globs_exclude_relay_and_configuration():
+    _workflow, _step, filters = _filters()
+    paths = [
+        "services/eros-engine/src/main.rs",
+        "services/eros-engine/eros-pilot-embedding-relay.mjs",
+        "services/eros-engine/eros-production-model-config.toml",
+        "services/eros-engine/production.toml",
+    ]
+    matches = _match_with_picomatch({"eros_engine": filters["eros_engine"]}, paths)
+    assert matches["eros_engine"] == [True, False, False, False]
 
 
-def test_miniapp_change_selects_only_miniapp_checks():
-    surface = classify(["apps/miniapp/src/main.tsx"])
-    assert surface["miniapp"] is True
-    assert surface["core"] is False   # a Mini App change must not select CORE
-    assert surface["docs_only"] is False
+def test_shared_dependencies_and_relay_kamal_config_match_intended_filters():
+    _workflow, _step, filters = _filters()
+    paths = ["packages/contracts/src/message.ts", "config/deploy.eros-relay.yml"]
+    matches = _match_with_picomatch(
+        {name: filters[name] for name in ("core", "miniapp", "eros_engine", "eros_relay", "infrastructure")},
+        paths,
+    )
+    assert matches == {
+        "core": [True, False], "miniapp": [True, False],
+        "eros_engine": [False, False], "eros_relay": [False, True],
+        "infrastructure": [False, True],
+    }
 
 
-def test_backend_change_selects_backend_checks():
-    surface = classify(["apps/api/src/messages.ts"])
-    assert surface["core"] is True
-    assert surface["app_backend"] is True
-    assert surface["database"] is False
+def test_shared_build_dependencies_select_core_and_miniapp_filters():
+    _workflow, _step, filters = _filters()
+
+    shared_paths = (
+        "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json",
+        "packages/**", "infra/production/Gpoint.Dockerfile",
+    )
+    for path in shared_paths:
+        assert path in filters["core"]
+        assert path in filters["miniapp"]
+    for path in ("apps/api/package.json", "apps/bot/package.json", "apps/worker/package.json"):
+        assert path in filters["miniapp"]
 
 
-def test_migration_change_fails_closed_to_the_full_suite():
-    surface = classify(["packages/db/prisma/migrations/20261016120000_x/migration.sql"])
-    assert surface["database"] is True
-    assert surface["full_ci"] is True
+def test_database_and_production_infrastructure_filters_are_explicit():
+    workflow, _step, filters = _filters()
+    assert "packages/db/prisma/schema.prisma" in filters["database"]
+    assert "packages/db/prisma/migrations/**" in filters["database"]
+    assert "services/agata/migrations/**" in filters["database"]
+    for path in (".github/**", ".kamal/**", "config/deploy.eros-relay.yml",
+                 "infra/production/**", "scripts/**", "systemd/**"):
+        assert path in filters["infrastructure"]
+    assert "paths" not in workflow.get("on", workflow.get(True))["push"]
 
 
-def test_unknown_path_fails_closed():
-    surface = classify(["weird/unmapped.file"])
-    assert surface["unknown_paths"] == ["weird/unmapped.file"]
-    assert surface["full_ci"] is True
+def test_relay_kamal_change_is_not_core_and_never_auto_applies():
+    import sys
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import native_release_intent as intent  # noqa: E402
+
+    relay_config = "config/deploy.eros-relay.yml"
+    relay_runtime = "services/eros-engine/eros-pilot-embedding-relay.mjs"
+    assert intent._component_paths(relay_config) == {"EROS_RELAY"}
+    assert intent._component_paths(relay_runtime) == {"EROS_RELAY"}
+    assert intent.is_infrastructure_change({relay_config})
+    assert not intent.push_deploy_authorized(mode="DEPLOY", changed_paths={relay_config})
+    assert intent.push_deploy_authorized(mode="DEPLOY", changed_paths={"apps/api/src/messages.ts"})
+    deploy = _filters()[0]["jobs"]["deploy"]
+    assert "production" in deploy["environment"]["name"]
 
 
-def test_empty_change_fails_closed():
-    surface = classify([])
-    assert surface["full_ci"] is True
+def test_eros_relay_kamal_config_stays_separate_from_engine_and_protected_config():
+    _workflow, _step, filters = _filters()
+    assert "config/deploy.eros-relay.yml" in filters["eros_relay"]
+    assert "config/deploy.eros.yml" not in filters["eros_relay"]
+    assert "config/deploy.eros-relay.yml" in filters["infrastructure"]
+    assert "config/deploy.eros.yml" in filters["infrastructure"]
+    assert filters["eros_engine"] != filters["eros_relay"]
 
 
-def test_release_infrastructure_change_fails_closed():
-    surface = classify(["scripts/native_change_surface.py"])
-    assert surface["release_infra"] is True
-    assert surface["full_ci"] is True
-
-
-def test_staging_only_merge_runs_no_heavy_production_checks():
-    # Exact path set of the staging-only merge b997e1a8 that used to run the
-    # stock Eros build, Playwright and a production Deploy attempt.
-    surface = classify([
-        "config/deploy.layer7-staging.eros.yml",
-        "tests/test_layer7_staging_workflow.py",
-    ])
-    assert surface["eros"] is False        # no stock Eros image build
-    assert surface["eros_config"] is True
-    assert surface["miniapp"] is False     # no Chromium/E2E
-    assert surface["database"] is False
-    assert surface["release_infra"] is False
-    assert surface["full_ci"] is False
-
-
-def test_production_eros_api_publishes_only_a_loopback_worker_endpoint():
-    import yaml
-    root = Path(__file__).resolve().parents[1]
-    text = (root / "config/deploy.eros-api.yml").read_text()
+def test_eros_api_remains_loopback_only():
+    text = (ROOT / "config/deploy.eros-api.yml").read_text()
     config = yaml.safe_load(re.sub(r"<%=.*?%>", "rendered", text))
-    publish = config["servers"]["api"]["options"]["publish"]
-    assert publish == ["127.0.0.1:13003:3000"]
-    # Never a public interface, and a different port from staging.
-    assert all(entry.startswith("127.0.0.1:") for entry in publish)
-    staging = yaml.safe_load(
-        re.sub(r"<%=.*?%>", "rendered", (root / "config/deploy.layer7-staging.eros-api.yml").read_text()))
-    assert staging["servers"]["api"]["options"]["publish"] == ["127.0.0.1:13001:3000"]
-    assert publish != staging["servers"]["api"]["options"]["publish"]
-    # The public route keeps using kamal-proxy.
+    assert config["servers"]["api"]["options"]["publish"] == ["127.0.0.1:13003:3000"]
     assert config["servers"]["api"]["proxy"]["path_prefixes"] == ["/api"]
 
 
-def test_latest_merge_has_no_unmapped_component_paths():
-    """A release merge must not be blocked by a path the scope map forgot."""
-    import subprocess
-    import native_release_intent as intent
+def test_latest_commit_paths_are_mapped_or_explicitly_non_runtime():
+    import sys
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import native_release_intent as intent  # noqa: E402
 
-    root = Path(__file__).resolve().parents[1]
     try:
         changed = subprocess.check_output(
-            ["git", "-C", str(root), "diff", "--name-only", "HEAD~1", "HEAD"],
-            text=True, stderr=subprocess.DEVNULL).split()
+            ["git", "-C", str(ROOT), "diff", "--name-only", "HEAD~1", "HEAD"],
+            text=True, stderr=subprocess.DEVNULL,
+        ).split()
     except subprocess.CalledProcessError:
         import pytest
         pytest.skip("single-commit checkout")
     if not changed:
         import pytest
         pytest.skip("no parent diff")
-    unmapped = [p for p in changed
-                if not intent._component_paths(p) and not intent._known_non_runtime_path(p)]
-    assert not unmapped, f"unmapped component paths would block the release: {unmapped}"
+    deleted = set(subprocess.check_output(
+        ["git", "-C", str(ROOT), "diff", "--diff-filter=D", "--name-only", "HEAD~1", "HEAD"],
+        text=True,
+    ).split())
+    unmapped = [path for path in changed
+                if not intent._component_paths(path)
+                and not intent._known_non_runtime_path(path)
+                and not (path in deleted and path.startswith("scripts/"))]
+    assert not unmapped

@@ -9,37 +9,22 @@ import json
 import re
 import sys
 from pathlib import Path
-from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
 
+from native_release_intent import ALL_COMPONENT_ROLES, ROLE_REPOSITORIES
+from resolve_native_environment_deployment import latest_deployment_status
+
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
-ROLE_IMAGES = {
-    "gpoint-core-api": "core",
-    "gpoint-core-worker": "core",
-    "gpoint-core-bot": "core",
-    "gpoint-agata-api": "agata",
-    "gpoint-agata-memory-worker": "agata",
-    "gpoint-miniapp-web": "miniapp",
-    "gpoint-eros-pilot-engine": "eros",
-    "gpoint-eros-relay-relay": "eros_relay",
-}
-REPOSITORIES = {
-    "core": "ghcr.io/akhripunov/gpoint-runtime",
-    "agata": "ghcr.io/akhripunov/gpoint-agata-runtime",
-    "miniapp": "ghcr.io/akhripunov/gpoint-miniapp",
-    "eros": "ghcr.io/akhripunov/gpoint-eros",
-    "eros_relay": "ghcr.io/akhripunov/gpoint-runtime",
-}
+ROLE_IMAGES = {role: component.lower()
+               for component, roles in ALL_COMPONENT_ROLES.items() for role in roles}
+REPOSITORIES = {component.lower(): ROLE_REPOSITORIES[roles[0]]
+                for component, roles in ALL_COMPONENT_ROLES.items()}
 
 
 def _fail(message: str) -> None:
     raise ValueError(message)
-
-
-def _time(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[str, Any]],
@@ -53,7 +38,7 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
         _fail("selected GitHub Deployment does not identify the requested production release")
     if not statuses:
         _fail("selected deployment has no statuses")
-    latest = max(statuses, key=lambda row: _time(row.get("created_at", "")))
+    latest = latest_deployment_status(statuses)
     match = re.fullmatch(r"Kamal success SHA ([0-9a-f]{40}) manifest ([0-9a-f]{64})", latest.get("description", ""))
     environment_url = latest.get("environment_url", "")
     native_manifest_sha = None
@@ -70,7 +55,10 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
             _fail("native Deployment URL metadata contains duplicate fields")
         source_keys = {"gpoint-core-source-sha", "gpoint-agata-source-sha", "gpoint-miniapp-source-sha"}
         eros_source_key = "gpoint-eros-source-sha"
-        supported_keys = source_keys | {eros_source_key, "gpoint-manifest-sha256", "gpoint-runtime-target-sha"}
+        relay_source_key = "gpoint-eros-relay-source-sha"
+        supported_keys = source_keys | {eros_source_key, relay_source_key, "gpoint-manifest-sha256", "gpoint-runtime-target-sha"}
+        if relay_source_key in values and eros_source_key not in values:
+            _fail("native Deployment URL component source evidence is incomplete")
         if set(values) - supported_keys:
             _fail("native Deployment URL metadata contains unsupported fields")
         native_manifest_sha = values.get("gpoint-manifest-sha256")
@@ -87,7 +75,7 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
             }
             if eros_source_key in values:
                 native_sources["eros"] = values[eros_source_key]
-                native_sources["eros_relay"] = values[eros_source_key]
+                native_sources["eros_relay"] = values.get(relay_source_key, values[eros_source_key])
             if any(not SHA40.fullmatch(value) for value in native_sources.values()):
                 _fail("native Deployment URL component source SHA is invalid")
         runtime_target = values.get("gpoint-runtime-target-sha")
@@ -182,8 +170,10 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
         component_versions[image_key] = role_version
         component_sources[image_key] = source_sha
         component_digests[image_key] = repo_digest
-        expected_component = "EROS" if image_key in {"eros", "eros_relay"} else image_key.upper()
-        if service.get("component") not in (None, expected_component):
+        allowed_components = {None, image_key.upper()}
+        if image_key == "eros_relay":
+            allowed_components.add("EROS")
+        if service.get("component") not in allowed_components:
             _fail(f"manifest runtime component is inconsistent for {name}")
     for component, role_names in {
         "core": ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot"),

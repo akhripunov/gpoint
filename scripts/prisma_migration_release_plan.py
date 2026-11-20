@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -12,14 +11,13 @@ import subprocess
 import sys
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from prisma_migration_checksums import build_inventory
+
 
 MIGRATION_NAME = re.compile(r"^[0-9]{14}_[a-z0-9_]+$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 ALLOWLIST_SCHEMA = "gpoint-prisma-production-apply/v1"
-
-
-def sha256(content: bytes) -> str:
-    return hashlib.sha256(content).hexdigest()
 
 
 def release_scope_migrations(repo: Path, baseline_sha: str, candidate_sha: str) -> set[str]:
@@ -47,23 +45,7 @@ def release_scope_migrations(repo: Path, baseline_sha: str, candidate_sha: str) 
 
 
 def migration_inventory(directory: Path) -> list[tuple[str, str]]:
-    directory = Path(directory).resolve(strict=True)
-    if not directory.is_dir():
-        raise ValueError("Prisma migrations path is not a directory")
-    rows: list[tuple[str, str]] = []
-    for entry in sorted(directory.iterdir(), key=lambda item: item.name):
-        sql = entry / "migration.sql"
-        if not sql.exists():
-            if entry.is_dir() and MIGRATION_NAME.fullmatch(entry.name):
-                raise ValueError(f"Prisma migration is missing migration.sql: {entry.name}")
-            continue
-        if (entry.is_symlink() or not entry.is_dir() or sql.is_symlink() or not sql.is_file()
-                or not MIGRATION_NAME.fullmatch(entry.name)):
-            raise ValueError("invalid Prisma migration source inventory")
-        rows.append((entry.name, sha256(sql.read_bytes())))
-    if not rows:
-        raise ValueError("Prisma migration source inventory is empty")
-    return rows
+    return build_inventory(directory, require_migration_sql=True)
 
 
 def validate_allowlist(value: Any, source: dict[str, str] | None) -> dict[str, str]:

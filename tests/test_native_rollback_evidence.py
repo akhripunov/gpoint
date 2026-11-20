@@ -2,8 +2,10 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 SPEC = importlib.util.spec_from_file_location(
     "rollback_evidence", ROOT / "scripts/verify_native_rollback_evidence.py"
 )
@@ -79,6 +81,20 @@ def evidence():
     }
     jobs = [{"name": "Build and publish immutable images", "conclusion": "success"}]
     return deployment, [status], run, jobs, raw
+
+
+def test_rollback_role_matrix_uses_native_release_component_inventory():
+    from native_release_intent import ALL_COMPONENT_ROLES, ROLE_REPOSITORIES
+
+    assert MODULE.ROLE_IMAGES == {
+        role: component.lower()
+        for component, roles in ALL_COMPONENT_ROLES.items()
+        for role in roles
+    }
+    assert MODULE.REPOSITORIES == {
+        component.lower(): ROLE_REPOSITORIES[roles[0]]
+        for component, roles in ALL_COMPONENT_ROLES.items()
+    }
 
 
 def mixed_component_evidence():
@@ -222,6 +238,23 @@ def test_rejects_failed_or_newer_non_success_deployment_status():
         raise AssertionError("non-success latest status was accepted")
 
 
+def test_rejects_ambiguous_latest_deployment_status_timestamps():
+    args = evidence()
+    args[1].append({
+        "state": "failure",
+        "environment": "production",
+        "created_at": args[1][0]["created_at"],
+        "description": "conflicting status at the same timestamp",
+        "log_url": args[1][0]["log_url"],
+    })
+    try:
+        verify(args)
+    except ValueError as exc:
+        assert "ambiguous latest statuses" in str(exc)
+    else:
+        raise AssertionError("conflicting latest Deployment statuses were accepted")
+
+
 def test_rejects_manifest_tamper_target_sha_missing_build_and_attempt_mismatch():
     args = evidence()
     invalid_inputs = (
@@ -254,3 +287,33 @@ def test_rejects_duplicate_role_in_production_manifest():
         assert "duplicate GPoint Kamal role" in str(exc)
     else:
         raise AssertionError("duplicate role accepted")
+
+
+def test_native_rollback_evidence_keeps_distinct_engine_and_relay_provenance():
+    deployment, statuses, run, jobs, raw = eros_evidence()
+    manifest = json.loads(raw)
+    relay_source = "f" * 40
+    relay_digest = "sha256:" + "e" * 64
+    relay_image = "ghcr.io/akhripunov/gpoint-runtime@" + relay_digest
+    manifest["candidate"]["images"]["eros_relay"] = relay_image
+    next(row for row in manifest["runtimeServices"] if row["name"].startswith("gpoint-eros-relay-relay-")).update(
+        name="gpoint-eros-relay-relay-" + relay_source + "-120-1",
+        revision=relay_source, repositoryDigest=relay_image, component="EROS_RELAY",
+    )
+    raw = json.dumps(manifest).encode()
+    run["run_attempt"] = 1
+    statuses[0]["environment_url"] = (
+        "https://gpoint.one/#gpoint-manifest-sha256=" + hashlib.sha256(raw).hexdigest()
+        + "&gpoint-core-source-sha=" + SHA
+        + "&gpoint-agata-source-sha=" + SHA
+        + "&gpoint-miniapp-source-sha=" + SHA
+        + "&gpoint-eros-source-sha=" + SHA
+        + "&gpoint-eros-relay-source-sha=" + relay_source
+    )
+    statuses[0]["log_url"] = f"https://github.com/akhripunov/gpoint/actions/runs/{RUN_ID}/attempts/1"
+
+    result = verify((deployment, statuses, run, jobs, raw))
+
+    assert result["digests"]["eros_relay"] == relay_digest
+    assert result["component_sources"]["eros_relay"] == relay_source
+    assert result["component_sources"]["eros"] == SHA
