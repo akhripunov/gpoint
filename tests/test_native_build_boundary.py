@@ -1,5 +1,4 @@
 import unittest
-import json
 import os
 from pathlib import Path
 import subprocess
@@ -189,7 +188,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(baseline["if"], "github.event_name == 'push' && github.ref == 'refs/heads/main'")
         self.assertIn("--infrastructure-baseline-sha", intent["run"])
 
-    def test_cumulative_engine_scope_runs_e2e_and_build_requires_exact_pass(self):
+    def test_cumulative_engine_scope_runs_e2e_and_build_requires_same_run_tests_success(self):
         tests = self.workflow["jobs"]["tests"]
         steps = {step.get("id"): step for step in tests["steps"] if step.get("id")}
         dispatch_scope = steps["dispatch_build_scope"]
@@ -202,60 +201,14 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(steps["eros_test_image"]["if"], steps["eros_e2e"]["if"])
         self.assertNotIn("eros_e2e", tests["outputs"])
         build = self.workflow["jobs"]["build"]
-        guard = next(step for step in build["steps"] if step.get("name") == "Require exact-candidate Eros test evidence")
-        self.assertEqual(guard["env"]["GH_TOKEN"], "${{ github.token }}")
-        self.assertEqual(guard["env"]["EXPECTED_RUN_HEAD_SHA"], "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}")
-        self.assertIn("contains(fromJSON(steps.build_scope.outputs.build_components), 'EROS')", guard["if"])
-        self.assertIn("runs/$GITHUB_RUN_ID", guard["run"])
-        self.assertIn("/attempts/$GITHUB_RUN_ATTEMPT/jobs", guard["run"])
-        self.assertIn(".head_sha", guard["run"])
-        self.assertIn(".run_attempt", guard["run"])
-        self.assertIn("Run stock Eros SQLx and synthetic conversation E2E", guard["run"])
+        self.assertIn("tests", build["needs"])
+        self.assertIn("needs.tests.result == 'success'", build["if"])
+        self.assertFalse(any(step.get("name") == "Require exact-candidate Eros test evidence"
+                             for step in build["steps"]))
 
-    def test_eros_gate_reads_success_from_the_exact_run_attempt(self):
-        guard = next(step for step in self.workflow["jobs"]["build"]["steps"]
-                     if step.get("name") == "Require exact-candidate Eros test evidence")
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            gh = root / "gh"
-            gh.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$GH_ARGS_FILE"\ncat "$GH_FIXTURE"\n')
-            gh.chmod(0o755)
-            fixture = root / "jobs.json"
-            run_fixture = root / "run.json"
-            run_fixture.write_text(json.dumps({"head_sha": "a" * 40, "run_attempt": 2}))
-            fixture.write_text(json.dumps({"jobs": [{
-                "name": "Tests (workspace)", "conclusion": "success",
-                "steps": [{"name": "Run stock Eros SQLx and synthetic conversation E2E",
-                           "conclusion": "success"}],
-            }]}))
-            gh_calls = root / "gh-calls"
-            gh.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$GH_CALLS_FILE"\ncase "$*" in\n  *"/attempts/"*) cat "$GH_FIXTURE" ;;\n  *) cat "$GH_RUN_FIXTURE" ;;\nesac\n')
-            gh.chmod(0o755)
-            env = {
-                **os.environ, "PATH": f"{root}:{os.environ['PATH']}", "GH_TOKEN": "test-token",
-                "GH_FIXTURE": str(fixture), "GH_RUN_FIXTURE": str(run_fixture),
-                "GH_CALLS_FILE": str(gh_calls), "GITHUB_REPOSITORY": "owner/repo",
-                "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
-                "GITHUB_SHA": "m" * 40, "EXPECTED_RUN_HEAD_SHA": "a" * 40,
-            }
-            result = subprocess.run(["bash", "-euo", "pipefail", "-c", guard["run"]],
-                                    env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(gh_calls.read_text().splitlines(), [
-                "api repos/owner/repo/actions/runs/123",
-                "api repos/owner/repo/actions/runs/123/attempts/2/jobs?per_page=100",
-            ])
-
-            run_fixture.write_text(json.dumps({"head_sha": "b" * 40, "run_attempt": 2}))
-            gh_calls.unlink()
-            fixture.write_text(json.dumps({"jobs": [{
-                "name": "Tests (workspace)",
-                "steps": [{"name": "Run stock Eros SQLx and synthetic conversation E2E",
-                           "conclusion": "success"}],
-            }]}))
-            failed = subprocess.run(["bash", "-euo", "pipefail", "-c", guard["run"]],
-                                    env=env, capture_output=True, text=True)
-            self.assertNotEqual(failed.returncode, 0)
+    def test_no_build_job_step_performs_duplicate_actions_run_lookup(self):
+        steps = self.workflow["jobs"]["build"]["steps"]
+        self.assertFalse(any("actions/runs/" in step.get("run", "") for step in steps))
 
     def test_main_push_runs_ci_build_and_kamal_production_jobs(self):
         triggers = self.workflow.get("on", self.workflow.get(True))
@@ -424,18 +377,19 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("compose.service=$service", steps[preflight]["run"])
         self.assertIn("agata-memory-worker", steps[preflight]["run"])
 
-    def test_stock_kamal_inventory_commands_precede_supplementary_docker_inspection(self):
+    def test_stock_kamal_version_crosscheck_precedes_authoritative_docker_inspection(self):
         deploy = self.workflow["jobs"]["deploy"]
         steps = deploy["steps"]
         names = [step.get("name", "") for step in steps]
-        cli_index = names.index("Read live application version and containers with Kamal")
+        cli_index = names.index("Read live application version with Kamal")
         topology_index = names.index("Verify installed Kamal topology before ordinary release")
         self.assertLess(cli_index, topology_index)
         kamal_inventory = steps[cli_index]
         self.assertEqual(kamal_inventory.get("id"), "kamal_inventory")
         commands = kamal_inventory["run"]
-        for command in ("kamal app version", "kamal app details", "kamal app containers"):
-            self.assertIn(command, commands)
+        self.assertIn("kamal app version", commands)
+        self.assertNotIn("kamal app details", commands)
+        self.assertNotIn("kamal app containers", commands)
         self.assertIn("--env KAMAL_REGISTRY_PASSWORD", commands)
         self.assertIn("--env GPOINT_APP_SOURCE_SHA", commands)
         self.assertIn("--env GPOINT_COMMIT_SHA", commands)
@@ -445,14 +399,9 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("2>&1", commands)
         self.assertIn("[redacted]", commands)
         self.assertIn("Kamal inventory could not resolve one exact current version", commands)
-        self.assertIn("Kamal inventory details do not include expected role/version", commands)
-        self.assertIn("Kamal inventory containers do not include expected role/version", commands)
         self.assertIn("message.splitlines()[-12:]", commands)
         self.assertNotIn("[:300]", commands)
         self.assertIn('>> "$GITHUB_OUTPUT"', commands)
-        for role in ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot",
-                     "gpoint-agata-api", "gpoint-agata-memory-worker", "gpoint-miniapp-web"):
-            self.assertIn(role, commands)
         self.assertIn("config/deploy.yml", commands)
         self.assertIn("config/deploy.agata.yml", commands)
         self.assertIn("config/deploy.miniapp.yml", commands)
@@ -463,6 +412,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
                 for value in topology["env"].values()
             ))
         self.assertIn("KAMAL_CORE_VERSION", topology["run"])
+        self.assertIn("verify-kamal-production-baseline.py", topology["run"])
+        self.assertIn("RepoDigests", (ROOT / "scripts/verify-kamal-production-baseline.py").read_text())
 
     def test_pinned_kamal_image_is_pulled_and_digest_platform_checked_before_safe_config_test(self):
         tests_steps = self.workflow["jobs"]["tests"]["steps"]

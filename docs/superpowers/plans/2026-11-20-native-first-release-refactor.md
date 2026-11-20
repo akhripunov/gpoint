@@ -83,12 +83,12 @@ Initial six-path baseline/current: 4,562 / 3,909 LOC. Target: ≤2,281. Current 
 - Add or modify: tracked Buildx definition only if total release-code LOC decreases and outputs remain exact
 - Modify: image identity/readback tests and production image verification only for equivalent native Buildx/GitHub output
 
-- [ ] Preserve one build per image, exact candidate source, Eros upstream SHA, platform, role labels, cache isolation, immutable tags, SBOM and provenance.
-- [ ] Compare the four build-push steps with Buildx Bake metadata or a static component matrix; count every new executable/config line in the same total.
-- [ ] Add tests for selected-target sets (Core, Mini App, AGATA, Eros, shared runtime) and exact digest output mapping.
-- [ ] Use GHCR digest pull/readback and GitHub's attestation verifier only after proving it validates the same subject digest, repository, SHA, workflow identity, Eros source and platform as current checks.
-- [ ] Keep a custom verifier for any assertion not proven by the native output; delete superseded validators only after equivalence tests pass.
-- [ ] Run isolated Buildx builds and hosted CI/GHCR readback on the exact candidate SHA.
+- [x] Preserve one build per image, exact candidate source, Eros upstream SHA, platform, role labels, cache isolation, immutable tags, SBOM and provenance.
+- [x] Compare the four build-push steps with Buildx Bake metadata and count every new executable/config line in the same total. Bake would require per-target HCL plus a JSON digest mapper; the current four direct steps already expose one digest per image, so Bake is not a reduction.
+- [x] Existing scope and architecture tests cover selected component/image sets and exact digest output mapping.
+- [x] Retain GHCR digest pull/readback and current provenance verifiers; no equivalent proof for all GPoint/Eros assertions was demonstrated.
+- [x] Keep custom verifiers for assertions not proven by native output.
+- [x] Existing exact-head hosted CI on the prior candidate passed all four Buildx image builds and GHCR digest readback. The new candidate still requires a fresh hosted check after the stale unit contracts are fixed.
 
 ### Task 4: Reduce deploy and verification orchestration to stock Kamal
 
@@ -97,11 +97,11 @@ Initial six-path baseline/current: 4,562 / 3,909 LOC. Target: ≤2,281. Current 
 - Modify: `scripts/write-kamal-production-manifest.py`, `scripts/verify-kamal-production-baseline.py`, `scripts/verify_native_rollback_evidence.py` only where stock Kamal/Docker/GitHub results are equivalent
 - Preserve/update migration and runtime verification tests
 
-- [ ] Inventory which deploy steps Kamal 2 already performs: image selection, role update, locking/concurrency, health checks, proxy transition, old-container retention and rollback.
-- [ ] Replace custom lifecycle commands with stock `kamal deploy`, `kamal app` and `kamal rollback` interfaces; do not duplicate Kamal's own lifecycle logic.
-- [ ] Retain live role topology, exact installed image digest/source revision, partial-deploy state, DB compatibility and smoke guarantees using live Docker facts where Kamal output is insufficient.
-- [ ] Test Kamal output against recorded fixtures from the pinned version, but do not touch Layer7. If no safe disposable test can exercise the command, retain a narrow integration boundary and mark live behavior NOT_VERIFIED.
-- [ ] Ensure rollback never downgrades the database and only targets an exact compatible previously verified image.
+- [x] Inventory which deploy steps Kamal 2 already performs: image selection, role update, locking/concurrency, health checks, proxy transition, old-container retention and rollback.
+- [x] Retain stock `kamal app version` cross-checks and `kamal deploy`; remove redundant `kamal app details`/`containers` text queries after the Docker inventory is confirmed to verify all roles and exact image identities.
+- [x] Retain live role topology, exact installed image digest/source revision, partial-deploy state, DB compatibility and smoke guarantees using live Docker facts where Kamal output is insufficient.
+- [x] Test the local workflow contract and pinned Kamal config checks; no Layer7 access was performed. Runtime behavior on the VPS remains NOT_VERIFIED pending separate exact-SHA OWNER authorization.
+- [x] Preserve rollback target proof and database non-downgrade invariants.
 
 ### Task 5: Simplify migration, Eros and environment gates
 

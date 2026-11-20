@@ -224,6 +224,19 @@ def test_production_release_controller_and_unique_image_build_counts_are_explici
     assert len([job for job in workflow["jobs"].values() if job.get("environment", {}).get("name") == "production"]) == 1
 
 
+def test_deploy_uses_one_authoritative_live_inventory_not_redundant_kamal_text_views():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    steps = workflow["jobs"]["deploy"]["steps"]
+    inventory = next(step for step in steps if step.get("id") == "kamal_inventory")
+    topology = next(step for step in steps if step.get("id") == "topology")
+
+    assert "kamal app version" in inventory["run"]
+    assert "kamal app details" not in inventory["run"]
+    assert "kamal app containers" not in inventory["run"]
+    assert "verify-kamal-production-baseline.py" in topology["run"]
+    assert "RepoDigests" in (ROOT / "scripts/verify-kamal-production-baseline.py").read_text()
+
+
 def test_all_seven_complexity_measures_keep_the_fixed_source_inventory():
     documentation = (ROOT / "docs/release/automation.md").read_text()
     baseline_workflow = _workflow_source(RELEASE_BASE)

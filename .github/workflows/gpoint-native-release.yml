@@ -826,7 +826,7 @@ jobs:
           set -euo pipefail
           docker pull --platform linux/amd64 "$KAMAL_IMAGE"
           echo "KAMAL_IMAGE_PULL=PASS PLATFORM=linux/amd64 DIGEST=sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625"
-      - name: Read live application version and containers with Kamal
+      - name: Read live application version with Kamal
         if: (inputs.mode != 'rollback')
         id: kamal_inventory
         env:
@@ -853,15 +853,12 @@ jobs:
             case "$config" in
               config/deploy.yml)
                 version_output=core_version
-                roles=(gpoint-core-api gpoint-core-worker gpoint-core-bot)
                 ;;
               config/deploy.agata.yml)
                 version_output=agata_version
-                roles=(gpoint-agata-api gpoint-agata-memory-worker)
                 ;;
               config/deploy.miniapp.yml)
                 version_output=miniapp_version
-                roles=(gpoint-miniapp-web)
                 ;;
             esac
             if version_text="$(kamal app version --config-file "$config" 2>&1)"; then
@@ -893,28 +890,9 @@ jobs:
               exit 1
             fi
             version="${versions[0]}"
-            details="$(kamal app details --config-file "$config")"
-            containers="$(kamal app containers --config-file "$config")"
-            if [[ -z "$details" || -z "$containers" ]]; then
-              echo "Kamal inventory returned empty details or container output for $config." >&2
-              exit 1
-            fi
-            for role in "${roles[@]}"; do
-              if ! grep -F -- "$role-$version" <<< "$details" >/dev/null; then
-                echo "Kamal inventory details do not include expected role/version: $role-$version." >&2
-                exit 1
-              fi
-              if ! grep -F -- "$role-$version" <<< "$containers" >/dev/null; then
-                echo "Kamal inventory containers do not include expected role/version: $role-$version." >&2
-                exit 1
-              fi
-            done
             printf '%s=%s\n' "$version_output" "$version" >> "$GITHUB_OUTPUT"
-            {
-              printf '### Kamal inventory: %s\n\n' "$config"
-              printf 'Current version:\n\n\140\140\140text\n%s\n\140\140\140\n\nContainers:\n\n\140\140\140text\n%s\n\140\140\140\n\nDetails:\n\n\140\140\140text\n%s\n\140\140\140\n\n' \
-                "$version" "$containers" "$details"
-            } >> "$GITHUB_STEP_SUMMARY"
+            printf '### Kamal inventory: %s\n\nCurrent version: `%s`\n\n' \
+              "$config" "$version" >> "$GITHUB_STEP_SUMMARY"
           done
       - name: Verify installed Kamal topology before ordinary release
         if: (inputs.mode != 'rollback')

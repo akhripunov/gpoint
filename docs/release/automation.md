@@ -326,9 +326,11 @@ contract tests and exact-SHA hosted CI.
 | Deleted paths in cumulative component diffs | Retired exact-path deletion allowlist | Git diff status plus the existing component/non-runtime path map | **REPLACE** — deleted runtime paths select their owning component; deleted release scripts and known non-runtime paths do not select an image; unmapped deletions still block. |
 | Installed component source baselines | `scripts/resolve_native_build_scope.py` | GitHub Deployments API, stock Kamal app commands and Docker inspect | **KEEP, reduce** — this adapter resolves installed component identities and exact-SHA evidence used by Build and Deploy. |
 | Build and OCI provenance | Build steps plus `scripts/verify_native_image_readback.py`, `verify_native_image_attestation.py`, `verify_native_eros_image.py` | Docker Buildx, GHCR digest, SBOM and GitHub artifact provenance | **KEEP** — retain only digest/source/platform/provenance checks not supplied by the native outputs. |
+| Buildx build orchestration | Four component-specific `docker/build-push-action` steps | Buildx Bake with per-target metadata | **KEEP current steps** — the four targets use different source contexts, Dockerfile targets, labels, cache scopes and conditional inputs. Bake returns target metadata as one JSON output that still needs mapping into the existing four digest contracts; a tracked Bake definition plus adapter does not reduce total code and would make partial registry export behavior less explicit. |
 | Native cross-run prepared-image reuse | Dispatch inputs, prepared-run API/log verification and digest fallback outputs | Buildx in the same Native release run | **DELETE** — production Build creates and reads back each required image in its own exact-SHA run. |
 | Migration admission and parity | `scripts/prisma_migration_release_plan.py`, `scripts/verify-kamal-migration-parity.py` | Prisma, SQLx, isolated PostgreSQL and Alembic tools | **KEEP, reduce** — stock tools execute migrations; exact approval, checksum and compatibility boundaries remain custom. |
 | Live role topology and component manifest | `scripts/verify-kamal-production-baseline.py`, `scripts/write-kamal-production-manifest.py` | Kamal 2 app inventory and Docker inspect | **KEEP, reduce** — the adapters verify identities and per-component provenance absent from Kamal's required machine-readable output. |
+| Kamal diagnostic text capture | `kamal app details` and `kamal app containers` for each of three configs | `kamal app version` plus one authoritative Docker inspect inventory | **DELETE duplicate views** — the workflow cross-checks Kamal's version against live role versions; the Docker adapter verifies the complete running role set, image IDs, source labels, and immutable GHCR RepoDigests. The removed human-readable tables added remote queries but no independent acceptance evidence. |
 | Eros database backup, rehearsal and recovery | `scripts/eros-native-database.py` | PostgreSQL `pg_dump`/`pg_restore`, stock Eros SQLx migrations | **KEEP, reduce** — preserve isolated restore, ledger and recovery checks; remove duplicate orchestration only after equivalent integration proof. |
 | Standalone release readiness report | Retired `scripts/release-readiness.mjs` (71 LOC at baseline) | Native GitHub Deployment plus Runtime Verify | **DELETED** — no active workflow/package caller; historical audit remains in the archive. |
 | Dormant unified release v1 contract | `scripts/unified_release_v1/` (286 Python LOC plus metadata) | Native V5 workflow and current component adapters | **DELETED** — repository-wide search found no active import, workflow, package or test caller; its README and project metadata point only to retired `gpoint-prepare.yml` / `gpoint-deploy.yml`. |
@@ -344,10 +346,10 @@ by it:
 
 | Measure | Main baseline | Current local candidate | Change |
 |---|---:|---:|---:|
-| Main controller + five control adapters (six paths) | 4,562 | 3,893 | −14.7% |
-| Workflow LOC | 2,437 | 2,385 | −2.1% |
+| Main controller + five control adapters (six paths) | 4,562 | 3,871 | −15.1% |
+| Workflow LOC | 2,437 | 2,363 | −3.0% |
 | Referenced helper LOC | 5,439 | 4,572 | −16.0% |
-| Combined workflow + referenced scripts LOC | 7,876 | 6,957 | −11.7% |
+| Combined workflow + referenced scripts LOC | 7,876 | 6,935 | −12.0% |
 | Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,098 | −27.1% |
 | Referenced helper files | 21 | 19 | −2 |
 | Required test matrix runs | 4 | 2 | −50% |
@@ -381,7 +383,7 @@ baseline and selectors are unchanged.
 
 | Measure | Main baseline | Current candidate |
 |---|---:|---:|
-| Native production workflow LOC | 2,437 | 2,385 |
+| Native production workflow LOC | 2,437 | 2,363 |
 | Release-specific referenced-helper LOC | 4,257 | 3,720 |
 | Shared referenced-helper LOC (unique source files) | 1,182 | 852 |
 | Production release controllers | 1 | 1 |
@@ -545,13 +547,12 @@ Runtime Verify проверяет все шесть ролей, digest, source S
 image ID неизменённых ролей, health и database/cache identities. PostgreSQL,
 Redis, proxy и неизменённые компоненты не перезапускаются.
 
-До дополнительной Docker-инспекции Deploy вызывает для каждой Kamal-конфигурации
-`kamal app version`, `kamal app details` и `kamal app containers`. Workflow
-проверяет актуальную версию и наличие ожидаемых role/version записей в штатном
-выводе Kamal, затем сверяет её с inventory. Docker read-only проверки дополняют
-этот inventory точными OCI digest/image ID, количеством работающих контейнеров,
-mounts и сетевой/database идентичностью, которых Kamal CLI не выдаёт в требуемом
-машиночитаемом виде.
+До дополнительной Docker-инспекции Deploy вызывает `kamal app version` для
+Core, AGATA и Mini App и сверяет версии с соответствующими запущенными ролями.
+Отдельные текстовые `kamal app details` и `kamal app containers` удалены как
+повторные диагностические запросы: окончательный состав ролей, единые версии и
+source SHA, OCI digest/image ID, количество работающих контейнеров, mounts и
+сетевую/database идентичность проверяет read-only Docker inventory.
 
 До сборки отдельный Build-шаг читает только GitHub Production Deployment history
 и связанный успешный Native Actions run. Он проверяет точный workflow, SHA,
