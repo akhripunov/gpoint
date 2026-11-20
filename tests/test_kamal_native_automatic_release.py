@@ -202,27 +202,15 @@ def test_deploy_installs_the_pinned_agata_alembic_runtime_before_migration_check
     assert steps[setup]["with"]["cache-dependency-path"] == "services/agata/pyproject.toml"
 
 
-def test_kamal_inventory_summary_uses_shellcheck_safe_markdown_fences():
+def test_kamal_inventory_summary_contains_only_the_crosschecked_version():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     inventory = next(step for step in workflow["jobs"]["deploy"]["steps"]
                      if step.get("id") == "kamal_inventory")
 
     assert "`" not in inventory["run"]
-    assert r"\140\140\140text" in inventory["run"]
-
-    lines = inventory["run"].splitlines()
-    printf_index = next(i for i, line in enumerate(lines)
-                        if "printf 'Current version:" in line)
-    printf_command = "\n".join(line.strip() for line in lines[printf_index:printf_index + 2])
-    result = subprocess.run(
-        ["bash", "-c", "version=sha; containers=containers; details=details; " + printf_command],
-        check=True, capture_output=True, text=True,
-    )
-    assert result.stdout == (
-        "Current version:\n\n```text\nsha\n```\n\n"
-        "Containers:\n\n```text\ncontainers\n```\n\n"
-        "Details:\n\n```text\ndetails\n```\n\n"
-    )
+    assert "Current version: **%s**" in inventory["run"]
+    assert "details" not in inventory["run"]
+    assert "containers" not in inventory["run"]
 
 
 def test_release_event_routing_is_fail_closed_and_does_not_give_prs_prod_access():

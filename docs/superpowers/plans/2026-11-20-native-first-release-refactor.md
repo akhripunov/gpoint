@@ -103,6 +103,8 @@ Initial six-path baseline/current: 4,562 / 3,909 LOC. Target: ≤2,281. Current 
 - [x] Test the local workflow contract and pinned Kamal config checks; no Layer7 access was performed. Runtime behavior on the VPS remains NOT_VERIFIED pending separate exact-SHA OWNER authorization.
 - [x] Preserve rollback target proof and database non-downgrade invariants.
 
+Task 4 hosted feedback: exact SHA `1d058bc0aa708656f5c142f996ad82fa15270d21` caught shellcheck SC2016 from literal Markdown backticks in a single-quoted `printf`, plus old tests expecting the removed detail/container output. Removed the formatting trigger and rewrote the obsolete test contract. Updated local boundary/scope suite: 196 passed; the corrected exact SHA is pending hosted validation.
+
 ### Task 5: Simplify migration, Eros and environment gates
 
 **Files:**

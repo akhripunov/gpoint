@@ -891,7 +891,7 @@ jobs:
             fi
             version="${versions[0]}"
             printf '%s=%s\n' "$version_output" "$version" >> "$GITHUB_OUTPUT"
-            printf '### Kamal inventory: %s\n\nCurrent version: `%s`\n\n' \
+            printf '### Kamal inventory: %s\n\nCurrent version: **%s**\n\n' \
               "$config" "$version" >> "$GITHUB_STEP_SUMMARY"
           done
       - name: Verify installed Kamal topology before ordinary release
