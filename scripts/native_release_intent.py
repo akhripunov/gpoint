@@ -63,6 +63,7 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "scripts/prisma_migration_checksums.py",
     "scripts/prisma_migration_release_plan.py",
     "scripts/resolve_native_build_scope.py",
+    "scripts/resolve_native_environment_deployment.py",
     "scripts/transition-agata-worker-v3.py",
     "scripts/verify-eros-runtime-labels.py",
     "scripts/verify-gpoint-scheduled-backup-restore.sh",

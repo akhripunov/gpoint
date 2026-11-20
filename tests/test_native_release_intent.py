@@ -813,6 +813,7 @@ def test_known_release_infrastructure_candidate_has_no_application_component_sco
         "scripts/native_release_intent.py": "updated scope classifier\n",
         "scripts/prisma_migration_release_plan.py": "updated migration planner\n",
         "scripts/resolve_native_build_scope.py": "updated build resolver\n",
+        "scripts/resolve_native_environment_deployment.py": "updated deployment resolver\n",
         "scripts/verify-gpoint-scheduled-backup-restore.sh": "updated restore verifier\n",
         "scripts/verify-kamal-migration-parity.py": "updated migration verifier\n",
         "scripts/verify-kamal-production-baseline.py": "updated runtime verifier\n",
