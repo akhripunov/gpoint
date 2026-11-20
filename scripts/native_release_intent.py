@@ -209,6 +209,7 @@ KNOWN_RETIRED_NON_RUNTIME_FILES = frozenset({
     "tests/test_kamal_cutover_package.py",
     "tests/test_kamal_eros_state.py",
     "tests/test_kamal_pause_recovery_policy.py",
+    "tests/test_kamal_production_manifest.py",
     "tests/test_me38_recovery_immutable_rehearsal.py",
     "tests/test_prepare_release_migration_inventory.py",
     "tests/test_prepare_workflow_summary.py",

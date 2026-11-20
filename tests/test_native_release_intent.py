@@ -26,6 +26,7 @@ def test_retired_host_transition_and_shared_worker_fixture_are_known_non_runtime
     ('services/agata/worker/install_launch_agent.py', True),
     ('services/gsales/tests/test_shared_worker_http.py', True),
     ('.github/workflows/gpoint-layer7-staging.yml', True),
+    ('tests/test_kamal_production_manifest.py', True),
     ('scripts/layer7_release_scope.py', True),
     ('services/agata/worker/unreviewed_installer.py', False),
 ])
