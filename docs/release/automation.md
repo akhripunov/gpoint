@@ -297,9 +297,9 @@ by it:
 |---|---:|---:|---:|
 | Main controller + five control adapters (six paths) | 4,562 | 3,921 | −14.0% |
 | Workflow LOC | 2,437 | 2,397 | −1.6% |
-| Referenced helper LOC | 5,439 | 4,589 | −15.6% |
-| Combined workflow + referenced scripts LOC | 7,876 | 6,986 | −11.3% |
-| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,261 | −25.8% |
+| Referenced helper LOC | 5,439 | 4,587 | −15.7% |
+| Combined workflow + referenced scripts LOC | 7,876 | 6,984 | −11.3% |
+| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,259 | −25.8% |
 | Referenced helper files | 21 | 19 | −2 |
 | Required test matrix runs | 4 | 2 | −50% |
 | Ordinary workflow named jobs | 3 | 3 | unchanged |
