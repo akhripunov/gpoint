@@ -223,7 +223,6 @@ KNOWN_RETIRED_NON_RUNTIME_FILES = frozenset({
     "tests/test_release_linear.py",
     "tests/test_release_static_publication_v4.py",
     "tests/test_start_kamal_cutover_owner.py",
-    "scripts/resolve_native_environment_deployment.py",
     "tests/test_native_environment_deployment.py",
     "scripts/network_retry.py",
     "scripts/verify-release-worker-compatibility.py",
@@ -675,9 +674,7 @@ def expected_runtime_inventory(scope: str, inventory: dict, candidate: str, vers
                 inventory_out[role] = {"version": version, "sourceSha": candidate,
                                        "repositoryDigest": repository_digest,
                                        "baselineImageId": None}
-            else:
-                if baseline is None:
-                    continue
+            elif baseline is not None:
                 inventory_out[role] = {"version": baseline["version"], "sourceSha": baseline["source_sha"],
                                        "repositoryDigest": baseline["repo_digest"],
                                        "baselineImageId": baseline["image_id"]}

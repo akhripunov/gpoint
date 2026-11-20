@@ -440,6 +440,7 @@ jobs:
           tests/test_layer7_ollama_verifier.py
           tests/test_verify_kamal_production_baseline.py
           tests/test_native_rollback_evidence.py
+          tests/test_native_environment_deployment.py
           tests/test_kamal_release_config.py
           tests/test_kamal_ordinary_manifest.py
       - name: Run isolated PostgreSQL 16 migration and integration suites

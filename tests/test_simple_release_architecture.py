@@ -1,9 +1,18 @@
 from pathlib import Path
+import re
 
 import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_native_workflow_references_only_existing_release_scripts():
+    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    paths = set(re.findall(r"(?<![A-Za-z0-9_])scripts/[A-Za-z0-9_./-]+\.(?:py|sh|mjs|js)", workflow))
+    assert paths
+    missing = sorted(path for path in paths if not (ROOT / path).is_file())
+    assert not missing
 
 
 def test_layer7_is_not_configured_as_a_staging_release_target():

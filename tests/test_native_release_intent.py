@@ -16,7 +16,7 @@ def test_retired_host_transition_and_shared_worker_fixture_are_known_non_runtime
 @pytest.mark.parametrize('path,allowed', [
     ('docs/release/RELEASE_PERFORMANCE.md', True),
     ('scripts/release-readiness.mjs', True),
-    ('scripts/resolve_native_environment_deployment.py', True),
+    ('scripts/resolve_native_environment_deployment.py', False),
     ('tests/test_native_environment_deployment.py', True),
     ('tests/test_release_component_manifest_v4.py', True),
     ('tests/test_release_static_exchange_v4.py', True),
