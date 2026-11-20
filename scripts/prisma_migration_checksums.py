@@ -13,7 +13,7 @@ MIGRATION_NAME = re.compile(r"^[0-9]{14}_[a-z0-9_]+$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
-def build_inventory(migrations_dir: Path) -> list[tuple[str, str]]:
+def build_inventory(migrations_dir: Path, *, require_migration_sql: bool = False) -> list[tuple[str, str]]:
     migrations_dir = Path(migrations_dir).resolve(strict=True)
     if not migrations_dir.is_dir():
         raise ValueError("Prisma migrations path must be a directory")
@@ -21,6 +21,8 @@ def build_inventory(migrations_dir: Path) -> list[tuple[str, str]]:
     for migration_dir in sorted(migrations_dir.iterdir(), key=lambda path: path.name):
         sql_path = migration_dir / "migration.sql"
         if not sql_path.exists():
+            if require_migration_sql and migration_dir.is_dir() and MIGRATION_NAME.fullmatch(migration_dir.name):
+                raise ValueError(f"Prisma migration is missing migration.sql: {migration_dir.name}")
             continue
         if (not MIGRATION_NAME.fullmatch(migration_dir.name)
                 or migration_dir.is_symlink() or not migration_dir.is_dir()

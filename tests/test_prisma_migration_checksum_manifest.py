@@ -50,7 +50,7 @@ def test_database_history_rejects_drift_unknown_and_duplicate_entries(source, ap
 
 def test_rehearsal_verifies_old_history_from_exact_source_manifest():
     root = Path(__file__).resolve().parents[1]
-    workflow = (root / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (root / ".github/workflows/gpoint-operations.yml").read_text()
     verifier = (root / "scripts/verify-gpoint-scheduled-backup-restore.sh").read_text()
 
     assert "prisma_migration_checksums.py write" in workflow
