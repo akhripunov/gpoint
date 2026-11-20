@@ -132,7 +132,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             "fail-fast": False,
             "matrix": {"suite": ["workspace", "python"]},
         })
-        self.assertEqual(tests["runs-on"], "ubuntu-latest")
+        self.assertEqual(tests["runs-on"], "ubuntu-24.04")
         # These are the exact required contexts enforced by public-main-integrity.
         self.assertEqual(tests["strategy"]["matrix"]["suite"], ["workspace", "python"])
         intent = next(step for step in tests["steps"] if step.get("id") == "intent")

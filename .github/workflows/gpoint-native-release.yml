@@ -57,7 +57,9 @@ jobs:
     outputs:
       mode: ${{ steps.intent.outputs.mode }}
       deploy: ${{ steps.intent.outputs.deploy }}
-    runs-on: ubuntu-latest
+    # Playwright's --with-deps package list is not available on the moving
+    # ubuntu-latest image; pin the test matrix to its supported Ubuntu image.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
