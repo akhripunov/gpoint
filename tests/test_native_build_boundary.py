@@ -204,6 +204,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         build = self.workflow["jobs"]["build"]
         guard = next(step for step in build["steps"] if step.get("name") == "Require exact-candidate Eros test evidence")
         self.assertEqual(guard["env"]["GH_TOKEN"], "${{ github.token }}")
+        self.assertEqual(guard["env"]["EXPECTED_RUN_HEAD_SHA"], "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}")
         self.assertIn("contains(fromJSON(steps.build_scope.outputs.build_components), 'EROS')", guard["if"])
         self.assertIn("runs/$GITHUB_RUN_ID", guard["run"])
         self.assertIn("/attempts/$GITHUB_RUN_ATTEMPT/jobs", guard["run"])
@@ -234,7 +235,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
                 **os.environ, "PATH": f"{root}:{os.environ['PATH']}", "GH_TOKEN": "test-token",
                 "GH_FIXTURE": str(fixture), "GH_RUN_FIXTURE": str(run_fixture),
                 "GH_CALLS_FILE": str(gh_calls), "GITHUB_REPOSITORY": "owner/repo",
-                "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_SHA": "a" * 40,
+                "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
+                "GITHUB_SHA": "m" * 40, "EXPECTED_RUN_HEAD_SHA": "a" * 40,
             }
             result = subprocess.run(["bash", "-euo", "pipefail", "-c", guard["run"]],
                                     env=env, capture_output=True, text=True)

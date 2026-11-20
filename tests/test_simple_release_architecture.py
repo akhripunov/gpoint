@@ -44,5 +44,6 @@ def test_pr_candidate_runs_build_without_production_deploy():
     assert "/attempts/$GITHUB_RUN_ATTEMPT/jobs" in eros_gate["run"]
     assert ".head_sha" in eros_gate["run"]
     assert "runs/$GITHUB_RUN_ID" in eros_gate["run"]
+    assert eros_gate["env"]["EXPECTED_RUN_HEAD_SHA"].endswith("github.sha }}")
     assert "github.event_name == 'pull_request'" not in deploy["if"]
     assert "needs.tests.outputs.mode == 'DEPLOY'" in deploy["if"]

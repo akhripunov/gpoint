@@ -519,10 +519,11 @@ jobs:
         if: contains(fromJSON(steps.build_scope.outputs.build_components), 'EROS')
         env:
           GH_TOKEN: ${{ github.token }}
+          EXPECTED_RUN_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
-          test "$(jq -r '.head_sha' <<< "$run")" = "$GITHUB_SHA"
+          test "$(jq -r '.head_sha' <<< "$run")" = "$EXPECTED_RUN_HEAD_SHA"
           test "$(jq -r '.run_attempt' <<< "$run")" = "$GITHUB_RUN_ATTEMPT"
           jobs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100")"
           workspace_job="$(jq -cer '[.jobs[] | select(.name == "Tests (workspace)")] | if length == 1 then .[0] else error("expected one workspace test job") end' <<< "$jobs")"
