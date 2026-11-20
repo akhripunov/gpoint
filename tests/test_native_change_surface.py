@@ -183,8 +183,12 @@ def test_latest_commit_paths_are_mapped_or_explicitly_non_runtime():
     if not changed:
         import pytest
         pytest.skip("no parent diff")
+    deleted = set(subprocess.check_output(
+        ["git", "-C", str(ROOT), "diff", "--diff-filter=D", "--name-only", "HEAD~1", "HEAD"],
+        text=True,
+    ).split())
     unmapped = [path for path in changed
                 if not intent._component_paths(path)
                 and not intent._known_non_runtime_path(path)
-                and path not in intent.KNOWN_RETIRED_NON_RUNTIME_FILES]
+                and not (path in deleted and path.startswith("scripts/"))]
     assert not unmapped

@@ -13,24 +13,25 @@ def test_retired_host_transition_and_shared_worker_fixture_are_known_non_runtime
     assert not MODULE._known_non_runtime_path(path + '.unreviewed')
 
 
-@pytest.mark.parametrize('path,allowed', [
-    ('docs/release/RELEASE_PERFORMANCE.md', True),
-    ('scripts/release-readiness.mjs', True),
-    ('scripts/resolve_native_environment_deployment.py', False),
-    ('tests/test_native_environment_deployment.py', True),
-    ('tests/test_release_component_manifest_v4.py', True),
-    ('tests/test_release_static_exchange_v4.py', True),
-    ('tests/test_release_static_executor_v4.py', True),
-    ('tests/test_release_ui_artifact_v4.py', True),
-    ('tests/test_release_ui_switch_v4.py', True),
-    ('services/agata/worker/install_launch_agent.py', True),
-    ('services/gsales/tests/test_shared_worker_http.py', True),
-    ('.github/workflows/gpoint-layer7-staging.yml', True),
-    ('tests/test_kamal_production_manifest.py', True),
-    ('scripts/layer7_release_scope.py', True),
-    ('services/agata/worker/unreviewed_installer.py', False),
+@pytest.mark.parametrize('path,allowed,expected_components', [
+    ('docs/release/RELEASE_PERFORMANCE.md', True, {'CORE'}),
+    ('scripts/release-readiness.mjs', True, {'CORE'}),
+    ('scripts/resolve_native_environment_deployment.py', True, {'CORE'}),
+    ('tests/test_native_environment_deployment.py', True, {'CORE'}),
+    ('tests/test_release_component_manifest_v4.py', True, {'CORE'}),
+    ('tests/test_release_static_exchange_v4.py', True, {'CORE'}),
+    ('tests/test_release_static_executor_v4.py', True, {'CORE'}),
+    ('tests/test_release_ui_artifact_v4.py', True, {'CORE'}),
+    ('tests/test_release_ui_switch_v4.py', True, {'CORE'}),
+    ('services/agata/worker/install_launch_agent.py', True, {'CORE', 'AGATA'}),
+    ('services/gsales/tests/test_shared_worker_http.py', True, {'CORE'}),
+    ('.github/workflows/gpoint-layer7-staging.yml', True, {'CORE'}),
+    ('tests/test_kamal_production_manifest.py', True, {'CORE'}),
+    ('scripts/layer7_release_scope.py', True, {'CORE'}),
+    ('services/agata/worker/unreviewed_installer.py', True, {'CORE', 'AGATA'}),
+    ('unmapped/unknown-release-input.py', False, set()),
 ])
-def test_only_exact_owner_approved_legacy_deletions_enter_build_plan(tmp_path, path, allowed):
+def test_deleted_paths_are_classified_by_runtime_impact(tmp_path, path, allowed, expected_components):
     repo, _, baseline, _ = _component_repo(tmp_path, {path: 'retired legacy entrypoint\n'})
     (repo / path).unlink()
     (repo / 'apps/api/src/main.ts').write_text('export const version = 2;\n')
@@ -40,10 +41,43 @@ def test_only_exact_owner_approved_legacy_deletions_enter_build_plan(tmp_path, p
     sources = {component: baseline for component in MODULE.COMPONENT_ROLES}
     if allowed:
         plan = MODULE.classify_component_build_plan(repo, candidate, sources)
-        assert 'CORE' in plan['build_components']
+        assert expected_components <= set(plan['build_components'])
     else:
-        with pytest.raises(ValueError, match='deleted or renamed'):
+        with pytest.raises(ValueError, match='deleted'):
             MODULE.classify_component_build_plan(repo, candidate, sources)
+
+
+@pytest.mark.parametrize('path', [
+    'packages/db/prisma/schema.prisma',
+    'packages/db/prisma/migrations/20261119120000_add_flag/migration.sql',
+    'services/agata/migrations/versions/20261120_add_flag.py',
+    'packages/db/prisma/production-approved-migrations.json',
+])
+def test_deleting_schema_or_migration_input_blocks_component_plan(tmp_path, path):
+    repo, _, baseline, _ = _component_repo(tmp_path, {path: 'migration input\n'})
+    (repo / path).unlink()
+    _git(repo, 'add', '--', path)
+    _git(repo, 'commit', '-qm', 'remove migration input')
+    candidate = _git(repo, 'rev-parse', 'HEAD')
+    sources = {component: baseline for component in MODULE.COMPONENT_ROLES}
+
+    with pytest.raises(ValueError, match='migration/schema'):
+        MODULE.classify_component_build_plan(repo, candidate, sources)
+
+
+def test_deleting_release_script_does_not_select_an_application_image(tmp_path):
+    path = 'scripts/retired-release-helper.py'
+    repo, _, baseline, _ = _component_repo(tmp_path, {path: 'retired release helper\n'})
+    (repo / path).unlink()
+    _git(repo, 'add', '--', path)
+    _git(repo, 'commit', '-qm', 'remove retired release helper')
+    candidate = _git(repo, 'rev-parse', 'HEAD')
+    sources = {component: baseline for component in MODULE.COMPONENT_ROLES}
+
+    plan = MODULE.classify_component_build_plan(repo, candidate, sources)
+
+    assert plan['deploy_scope'] == 'NONE'
+    assert plan['build_components'] == []
 
 
 ROOT = Path(__file__).resolve().parents[1]

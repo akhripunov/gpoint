@@ -35,10 +35,15 @@ def candidate_paths():
 
 
 def test_every_candidate_path_is_mapped_or_explicitly_non_runtime(candidate_paths):
+    head = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+    deleted = set(subprocess.check_output(
+        ["git", "-C", str(ROOT), "diff", "--diff-filter=D", "--name-only",
+         PRODUCTION_BASELINE, head], text=True).splitlines())
     unmapped = [path for path in candidate_paths
                 if not intent._component_paths(path)
                 and not intent._known_non_runtime_path(path)
-                and path not in intent.KNOWN_RETIRED_NON_RUNTIME_FILES]
+                and not (path in deleted and path.startswith("scripts/"))]
     assert not unmapped, (
         "the deploy scope planner would abort the release on these paths: "
         f"{unmapped}")

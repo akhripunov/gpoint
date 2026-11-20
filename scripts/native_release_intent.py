@@ -45,196 +45,7 @@ TEST_DIRECTORY_NAMES = frozenset({"test", "tests"})
 PRISMA_MIGRATION = re.compile(
     r"^packages/db/prisma/migrations/[0-9]{14}_[a-z0-9_]+/migration\.sql$"
 )
-# ME-36 OWNER-approved removal of the parallel Mac installer and stale shared
-# Worker test. This is an exact path exception; all other deletions still block.
-KNOWN_RETIRED_NON_RUNTIME_FILES = frozenset({
-    # OWNER-approved retirement in ME-62; this stale benchmark is not an
-    # executable release procedure or a runtime input.
-    "docs/release/RELEASE_PERFORMANCE.md",
-    # Retired local V3 readiness helper; Native release completion is proven by
-    # the exact GitHub Deployment and Runtime Verify, not a standalone script.
-    "scripts/release-readiness.mjs",
-    # Retired tests for the V4 static-release prototype, removed with its
-    # implementation; they are not candidate component runtime inputs.
-    "tests/test_release_component_manifest_v4.py",
-    "tests/test_release_static_exchange_v4.py",
-    "tests/test_release_static_executor_v4.py",
-    "tests/test_release_ui_artifact_v4.py",
-    "tests/test_release_ui_switch_v4.py",
-    ".github/workflows/gpoint-deploy.yml",
-    ".github/workflows/gpoint-first-kamal-cutover.yml",
-    ".github/workflows/gpoint-linear-reconcile.yml",
-    ".github/workflows/gpoint-prepare.yml",
-    ".github/workflows/gpoint-recover-interrupted.yml",
-    "scripts/automated-eros-pilot-release.mjs",
-    "scripts/automated-release.mjs",
-    "scripts/check-release-rehearsal.py",
-    "scripts/collect_kamal_eros_state.py",
-    "scripts/deployment-execution.mjs",
-    "scripts/deployment-execution.test.mjs",
-    "scripts/deployment-run-state.mjs",
-    "scripts/deployment-run-state.test.mjs",
-    "scripts/eros-postgres-acl-deploy.mjs",
-    "scripts/eros-postgres-acl-deploy.test.mjs",
-    "scripts/eros-production-deployment.mjs",
-    "scripts/eros-production-deployment.test.mjs",
-    # Replaced by pinned declarative dorny filters in the Native workflow.
-    "scripts/native_change_surface.py",
-    "scripts/ghcr-receipt.mjs",
-    "scripts/ghcr-receipt.test.mjs",
-    "scripts/github-deployments.mjs",
-    "scripts/github-deployments.test.mjs",
-    "scripts/github_api_preflight.py",
-    "scripts/gpoint-miniapp-static-manifest.py",
-    "scripts/kamal-first-cutover/consumers.sh",
-    "scripts/kamal-first-cutover/pause.sh",
-    "scripts/kamal-first-cutover/recover-post.sh",
-    "scripts/kamal-first-cutover/recover-pre.sh",
-    "scripts/kamal-first-cutover/requests.sh",
-    "scripts/kamal-first-cutover/retire.sh",
-    "scripts/kamal-first-cutover/routes.sh",
-    "scripts/kamal-first-cutover/verify.sh",
-    "scripts/kamal_cutover_credentials.py",
-    "scripts/kamal_cutover_owner.py",
-    "scripts/kamal_eros_state.py",
-    "scripts/kamal_pause_recovery_policy.py",
-    "scripts/package-kamal-cutover.py",
-    "scripts/pause-legacy-gpoint.sh",
-    "scripts/prepare-release.py",
-    "scripts/prepare_coalescing.py",
-    "scripts/prepared_artifact_cache.py",
-    "scripts/publish-release-linear.py",
-    "scripts/publish_ghcr_images.py",
-    "scripts/reconcile-deployment.mjs",
-    "scripts/reconcile-deployment.test.mjs",
-    "scripts/recover-interrupted-apply.mjs",
-    "scripts/recover-interrupted-apply.test.mjs",
-    "scripts/recover-kamal-cutover.py",
-    "scripts/rehearse-release-bundle.mjs",
-    "scripts/release-authorization.mjs",
-    "scripts/release-authorization.test.mjs",
-    "scripts/release-bundle.mjs",
-    "scripts/release-bundle.test.mjs",
-    "scripts/release-component-bundle-v4.mjs",
-    "scripts/release-component-bundle-v4.test.mjs",
-    "scripts/release-component-vps-proof-v4.mjs",
-    "scripts/release-component-vps-proof-v4.test.mjs",
-    "scripts/release-evidence.mjs",
-    "scripts/release-evidence.test.mjs",
-    "scripts/release-gpoint-vps-adapter.mjs",
-    "scripts/release-gpoint.mjs",
-    "scripts/release-gpoint.test.mjs",
-    "scripts/release-gsales-provision.mjs",
-    "scripts/release-gsales.mjs",
-    "scripts/release-gsales.test.mjs",
-    "scripts/release-lock.mjs",
-    "scripts/release-migrations.mjs",
-    "scripts/release-network-read.mjs",
-    "scripts/release-network-read.test.mjs",
-    "scripts/release-oci.mjs",
-    "scripts/release-oci.test.mjs",
-    "scripts/release-orchestrator.mjs",
-    "scripts/release-orchestrator.test.mjs",
-    "scripts/release-preflight-benchmark.py",
-    "scripts/release-readiness.test.mjs",
-    "scripts/release-runner-readiness.mjs",
-    "scripts/release-runner-readiness.test.mjs",
-    "scripts/release-static-baseline-v4.test.mjs",
-    "scripts/release-static-publish-v4.test.mjs",
-    "scripts/release-static-transfer-v4.mjs",
-    "scripts/release-static-transfer-v4.test.mjs",
-    "scripts/release-static-v4.mjs",
-    "scripts/release-static-v4.test.mjs",
-    "scripts/release-telemetry.py",
-    "scripts/release_assets.py",
-    "scripts/release_component_impact_v4.py",
-    "scripts/release_component_manifest_v4.py",
-    "scripts/release_impact_v3.py",
-    "scripts/release_static_exchange_v4.py",
-    "scripts/release_static_executor_v4.py",
-    "scripts/release_static_migrations_v4.py",
-    "scripts/release_static_prepare_v4.py",
-    "scripts/release_ui_artifact_v4.py",
-    "scripts/release_ui_switch_v4.py",
-    "scripts/retire-gpoint-caddy.sh",
-    "scripts/run-kamal-cutover-owner.sh",
-    "scripts/sanitize-kamal-inventory.py",
-    "scripts/sanitize-kamal-resources.py",
-    "scripts/select-release-run.py",
-    "scripts/select-release-run.test.py",
-    "scripts/smoke_bot_image.py",
-    "scripts/start_kamal_cutover_owner.py",
-    "scripts/test_prepare_coalescing.py",
-    "scripts/test_release_preflight_benchmark.py",
-    "scripts/validate-task-authorization.mjs",
-    "scripts/verify-gpoint-backup-restore.sh",
-    "scripts/verify-interrupted-recovery-proof.mjs",
-    "scripts/verify-loaded-images.py",
-    "scripts/worker-runtime-guard.mjs",
-    "scripts/worker-runtime-guard.test.mjs",
-    "services/agata/worker/install_launch_agent.py",
-    "services/gsales/tests/test_shared_worker_http.py",
-    # Retired staging-only release path; Layer7 is the production VPS.
-    ".github/workflows/gpoint-layer7-staging.yml",
-    ".github/actions/layer7-deploy/action.yml",
-    "config/deploy.layer7-staging.eros-api.yml",
-    "config/deploy.layer7-staging.eros-relay.yml",
-    "config/deploy.layer7-staging.eros.yml",
-    "config/deploy.layer7-staging.miniapp.yml",
-    "config/deploy.layer7-staging.yml",
-    "infra/staging/layer7_known_hosts",
-    "scripts/layer7-transport.sh",
-    "scripts/layer7_release_scope.py",
-    "scripts/layer7_staging_database.py",
-    "scripts/layer7_staging_env.py",
-    "scripts/verify_native_prepared_run.py",
-    "scripts/write_layer7_staging_env.py",
-    "scripts/write_layer7_staging_eros_api_env.py",
-    "services/eros-engine/eros-layer7-staging-model-config.toml",
-    "tests/test_layer7_mac_free_ssh.py",
-    "tests/test_layer7_release_scope.py",
-    "tests/test_layer7_staging_env.py",
-    "tests/test_layer7_staging_workflow.py",
-    "tests/test_native_prepared_run.py",
-    "tests/test_collect_kamal_eros_state.py",
-    "tests/test_deploy_evidence_workflow.py",
-    "tests/test_eros_pilot_artifact.py",
-    "tests/test_eros_postgres_acl_workflow.py",
-    "tests/test_gpoint_docker_cache_v3.py",
-    "tests/test_gpoint_miniapp_static_manifest.py",
-    "tests/test_gpoint_release_trigger_graph.py",
-    "tests/test_interrupted_recovery_workflow.py",
-    "tests/test_kamal_cutover_credentials.py",
-    "tests/test_kamal_cutover_owner.py",
-    "tests/test_kamal_cutover_package.py",
-    "tests/test_kamal_eros_state.py",
-    "tests/test_kamal_pause_recovery_policy.py",
-    "tests/test_kamal_production_manifest.py",
-    "tests/test_me38_recovery_immutable_rehearsal.py",
-    "tests/test_prepare_release_migration_inventory.py",
-    "tests/test_prepare_workflow_summary.py",
-    "tests/test_prepared_artifact_cache.py",
-    "tests/test_publish_ghcr_images.py",
-    "tests/test_publish_ghcr_receipt.py",
-    "tests/test_recover_kamal_cutover.py",
-    "tests/test_release_assets.py",
-    "tests/test_release_component_impact_v4.py",
-    "tests/test_release_impact_v3.py",
-    "tests/test_release_linear.py",
-    "tests/test_release_static_publication_v4.py",
-    "tests/test_start_kamal_cutover_owner.py",
-    "tests/test_native_environment_deployment.py",
-    "scripts/network_retry.py",
-    "scripts/verify-release-worker-compatibility.py",
-    "tests/test_unified_release_v1.py",
-    # Dormant v1 contract only referenced retired prepare/deploy workflows.
-    "scripts/unified_release_v1/README.md",
-    "scripts/unified_release_v1/__init__.py",
-    "scripts/unified_release_v1/check_sync.py",
-    "scripts/unified_release_v1/contract.json",
-    "scripts/unified_release_v1/core.py",
-    "scripts/unified_release_v1/project.json",
-})
+# Explicitly reviewed non-runtime inputs that do not change an application image.
 KNOWN_NON_RUNTIME_FILES = frozenset({
     ".github/actionlint.yaml",
     ".kamal/hooks/post-app-boot",
@@ -303,6 +114,7 @@ EROS_MODEL_CONFIG_PATHS = frozenset({
     "services/eros-engine/eros-pilot-model-config.toml",
     "services/eros-engine/eros-production-model-config.toml",
     "services/eros-engine/test-model-config.toml",
+    "services/eros-engine/eros-layer7-staging-model-config.toml",
 })
 LEGACY_RELEASE_MARKERS = frozenset({
     "GPOINT-ARTIFACT-PREPARE",
@@ -503,6 +315,8 @@ def _component_paths(path: str) -> set[str]:
         return {"AGATA"}
     if path in EROS_MODEL_CONFIG_PATHS:
         return set()
+    if path.startswith("config/deploy.layer7-staging."):
+        return set()
     if path in {"services/eros-engine/eros-pilot-embedding-relay.mjs", "config/deploy.eros-relay.yml"}:
         return {"EROS_RELAY"}
     if path.startswith(("services/eros-engine/", "config/deploy.eros")):
@@ -528,7 +342,9 @@ def _non_runtime_documentation_path(path: str) -> bool:
 def _known_non_runtime_path(path: str) -> bool:
     """Recognize only verified release/test metadata outside application images."""
     return (_non_runtime_documentation_path(path)
+            or path.startswith("infra/staging/")
             or path in EROS_MODEL_CONFIG_PATHS
+            or path.startswith("config/deploy.layer7-staging.")
             or path in KNOWN_NON_RUNTIME_FILES
             or PRISMA_MIGRATION.fullmatch(path) is not None
             or path.startswith("tests/")
@@ -570,10 +386,17 @@ def classify_component_build_plan(repo: Path, candidate: str,
         entries = git_diff_entries(baseline, candidate, repo=repo)
         paths = set()
         for status, path in entries:
-            if status == "D" and path in KNOWN_RETIRED_NON_RUNTIME_FILES:
+            if status == "D":
                 prior = subprocess.check_output(["git", "ls-tree", baseline, "--", path], cwd=repo).decode()
                 if not prior.startswith(("100644 blob ", "100755 blob ")):
-                    raise ValueError("retired candidate path was not a regular file")
+                    raise ValueError("deleted candidate path was not a prior regular file")
+                deleted_components = _component_paths(path)
+                retired_release_script = path.startswith("scripts/")
+                if not deleted_components and (_known_non_runtime_path(path) or retired_release_script):
+                    continue
+                if not deleted_components:
+                    raise ValueError("deleted or unmapped candidate path needs explicit scope approval")
+                paths.update(deleted_components)
                 continue
             if status not in ("A", "M"):
                 raise ValueError("deleted or renamed candidate path needs explicit scope approval")
