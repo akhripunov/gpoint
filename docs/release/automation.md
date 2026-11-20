@@ -351,6 +351,58 @@ for an exact SHA. Further reduction must preserve the current protected paths;
 no safe retirement of the remaining active helpers is established by this
 audit.
 
+### ME-62 acceptance scenario matrix
+
+Exact candidate `d1a10c9edc502148a9b98c91971569d078ecad1d`, base
+`3d680fa153fd6aebf786455d6f36d3b1a67cc78f`. Local focused tests passed, and
+exact-head hosted run [44707245719](https://github.com/akhripunov/gpoint/actions/runs/44707245719)
+passed Python, Workspace, isolated PostgreSQL, Eros and Mini App E2E, all four
+Buildx image builds, immutable identity validation and GHCR read-back. The PR
+event correctly skipped production Deploy/Verify. `PASS` below means the stated
+local/hosted test evidence passed; it does not imply production execution.
+
+| # | Input | Expected → actual | Result and evidence |
+|---:|---|---|---|
+| 01 | Docs-only diff | CI only; no image or Deploy → planner returns no image scope | PASS — `test_build_plan_skips_images_for_documentation_only_diff`; `test_documentation_only_candidate_verifies_runtime_without_restarting_components` |
+| 02 | Core-only diff | Core only → Core selected | PASS — `test_build_plan_uses_per_component_sources_and_builds_core_for_prisma_migrations` |
+| 03 | Mini App-only diff | Mini App only → Mini App selected | PASS — `test_component_scope_regressions_keep_eros_independent` and path planner tests |
+| 04 | AGATA-only diff | AGATA only → AGATA selected | PASS — `test_shared_dependency_and_agata_migration_paths_select_their_real_images` |
+| 05 | Eros Engine-only diff | Engine plus required Eros E2E → selected; exact Eros E2E passed | PASS — `test_cumulative_engine_scope_runs_e2e_and_build_requires_exact_pass`; run 44707245719 |
+| 06 | Eros Relay-only diff | Relay only; no Core deploy/Engine E2E → separate relay scope | PASS — `test_eros_relay_source_updates_only_relay_with_shared_runtime_image` |
+| 07 | Core and installed Relay share image | One runtime image, independent deploy scope → shared image selected once | PASS — `test_shared_runtime_dockerfile_builds_core_once_for_core_and_installed_relay` |
+| 08 | Shared dependency diff | Every dependent image → dependency planner selects affected images | PASS — `test_shared_dependency_and_agata_migration_paths_select_their_real_images` |
+| 09 | Unknown file | Fail closed → blocked | PASS — `test_unknown_paths_block_instead_of_becoming_a_deploy_or_silent_prepare` |
+| 10 | Unknown installed baseline | Fail closed → baseline resolution blocks | PASS — `test_push_apply_gate_uses_verified_accumulated_production_baseline` and resolver tests |
+| 11 | Different component baselines | Compare each component independently → staggered baseline test passes | PASS — `test_staggered_component_baselines_do_not_redeploy_already_updated_components` |
+| 12 | Earlier component release skipped | Preserve unshipped changes → cumulative planner retains scope | PASS — `test_component_scope_regressions_keep_eros_independent` and build-scope tests |
+| 13 | Earlier component release failed | Preserve unshipped changes → exact source baselines retain scope | PASS — failed/skipped source cases in native intent suite |
+| 14 | Partial component release | Determine actual state and fail closed → per-role runtime identity checks block inconsistency | PASS — `test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails_closed`; production recovery itself NOT VERIFIED |
+| 15 | Infra commit A followed by API commit B | Ordinary push cannot bypass protected infrastructure scope → cumulative infra test blocks | PASS — `test_api_commit_cannot_bypass_approval_for_accumulated_infrastructure` |
+| 16 | Migration-free release | No unnecessary migration/backup gates → pending-migration plan is empty | PASS — migration plan tests and exact candidate CI; production apply NOT VERIFIED |
+| 17 | Safe migration | Apply only exact approved plan → isolated PostgreSQL migration/integration passes | PASS — exact run 44707245719; no production migration performed |
+| 18 | Dangerous/unapproved migration | Protected approval required → classifier rejects unsafe migration scope | PASS — `test_agata_migration_and_unknown_schema_paths_remain_blocked_from_prisma_apply` |
+| 19 | Migration failure | Stop Apply; never auto-downgrade DB → failure path blocks, no rollback migration | PASS — migration and deploy boundary tests; production DB unchanged |
+| 20 | Eros Engine change | Run relevant SQLx/E2E → exact hosted Eros E2E passed | PASS — run 44707245719 |
+| 21 | Ordinary infrastructure-only PR | Skip irrelevant Eros E2E and images → path-selection tests show no app scope | PASS — `test_known_release_infrastructure_candidate_has_no_application_component_scope`; full-build label on this acceptance PR intentionally overrides selective Build |
+| 22 | Concurrent production runs | Serialize without cancelling baseline/Apply → shared non-cancelling lock asserted | PASS — `test_production_mutations_share_one_non_cancelling_lock` |
+| 23 | Image build failure | Deploy forbidden → Deploy requires successful Build | PASS — `test_main_push_runs_exact_candidate_tests_build_kamal_and_verify` and routing matrix |
+| 24 | GHCR publication/read-back failure | Deploy forbidden → PR exact Build and digest read-back passed | PASS — actual GHCR Build/read-back in run 44707245719; failure gate covered by boundary tests |
+| 25 | Wrong digest or provenance | Deploy forbidden → immutable identity/provenance validators reject mismatch | PASS — image validation suite and exact Build read-back in run 44707245719 |
+| 26 | Wrong production topology | Deploy forbidden → topology preflight rejects non-Kamal/Compose state | PASS — `test_ordinary_release_rejects_compose_topology_before_deploy`; live production topology NOT VERIFIED |
+| 27 | Incompatible rollback target | Reject target → exact previous deployment evidence is required | PASS — rollback evidence suite; no production rollback performed |
+| 28 | Compatible production rollback | Kamal rollback plus smoke → not executed | NOT VERIFIED — requires separate OWNER authorization for exact SHA |
+| 29 | Single Telegram Bot polling role | One active role → config/verification enforces one running Bot | PASS — `test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails_closed`; live process count NOT VERIFIED |
+| 30 | Production secrets on PR | No production secrets in PR job → Tests job has read-only token permissions; Build uses GHCR write only | PASS — workflow permission tests and run 44707245719; no production secret exposure |
+| 31 | Fork PR | No GHCR publish or production Deploy → Build condition excludes fork | PASS — `test_pr_candidate_runs_build_without_production_deploy`; no fork run was created |
+| 32 | Same-repository PR | Test Build allowed; Deploy forbidden → Build/GHCR read-back passed, Deploy skipped | PASS — run 44707245719 |
+| 33 | Protected infrastructure dispatch | OWNER/ref/exact SHA and Environment protection required → classifier and workflow gates assert these conditions | PASS — Native intent and boundary tests; live GitHub protection settings NOT VERIFIED |
+| 34 | Current Layer7 | Production target only, never staging → workflow has only `production` Environment | PASS — `test_layer7_is_production_and_retired_staging_paths_cannot_deploy`; live VPS identity NOT re-read in this task |
+| 35 | Retired staging paths | No active calls → workflow/configs absent; remaining path strings are fail-closed compatibility tests/classifiers only | PASS — `test_layer7_is_not_configured_as_a_staging_release_target` and repository source audit |
+
+Production-only checks explicitly remain unverified. No staging infrastructure
+or replacement workflow exists or is required. Do not interpret passing local
+or hosted tests as production acceptance.
+
 ## Local test selection under FULL
 
 FULL is a risk level, not a mandate to run every local test. `classify-release-prepush.py` remains the canonical FAST/FULL procedure. Hosted CI uses the pinned `dorny/paths-filter` action in `gpoint-native-release.yml` for declarative five-component and shared-dependency selection. Run the directly affected local checks; GitHub CI remains authoritative for the exact PR SHA. The production planner tracks Core, AGATA, Mini App, Eros Engine and Eros Relay independently. Engine-only changes build the Eros image. Relay-only changes build the shared Core runtime image and deploy only Relay. The first Eros installation still requires both services. Runtime Verify records separate source SHAs and digests for Engine and Relay. Older successful deployments with a single Eros source SHA use that SHA for both because those deployments updated the pair together. An ambiguous or partial runtime still requires the existing authorized recovery path. The planner compares installed component sources with the exact candidate and fails closed on unknown paths. Do not recreate a second component path map for CI.
