@@ -16,33 +16,13 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from native_release_intent import ALL_COMPONENT_ROLES, ROLE_IDENTITY_GROUP, ROLE_REPOSITORIES
+
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 OCI_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
-ROLE_REPOSITORIES = {
-    "gpoint-core-api": "ghcr.io/akhripunov/gpoint-runtime",
-    "gpoint-core-worker": "ghcr.io/akhripunov/gpoint-runtime",
-    "gpoint-core-bot": "ghcr.io/akhripunov/gpoint-runtime",
-    "gpoint-agata-api": "ghcr.io/akhripunov/gpoint-agata-runtime",
-    "gpoint-agata-memory-worker": "ghcr.io/akhripunov/gpoint-agata-runtime",
-    "gpoint-miniapp-web": "ghcr.io/akhripunov/gpoint-miniapp",
-    "gpoint-eros-pilot-engine": "ghcr.io/akhripunov/gpoint-eros",
-    "gpoint-eros-relay-relay": "ghcr.io/akhripunov/gpoint-runtime",
-}
-ROLE_COMPONENTS = {
-    "gpoint-core-api": "CORE", "gpoint-core-worker": "CORE", "gpoint-core-bot": "CORE",
-    "gpoint-agata-api": "AGATA", "gpoint-agata-memory-worker": "AGATA",
-    "gpoint-miniapp-web": "MINIAPP",
-    "gpoint-eros-pilot-engine": "EROS",
-    "gpoint-eros-relay-relay": "EROS_RELAY",
-}
-ROLE_IDENTITY_GROUP = {
-    **{role: "CORE" for role in ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot")},
-    **{role: "AGATA" for role in ("gpoint-agata-api", "gpoint-agata-memory-worker")},
-    "gpoint-miniapp-web": "MINIAPP",
-    "gpoint-eros-pilot-engine": "EROS_ENGINE",
-    "gpoint-eros-relay-relay": "EROS_RELAY",
-}
+ROLE_COMPONENTS = {role: component for component, roles in ALL_COMPONENT_ROLES.items()
+                   for role in roles}
 
 
 def docker_json(*args: str) -> object:
