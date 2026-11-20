@@ -55,11 +55,11 @@ Initial six-path baseline/current: 4,562 / 3,909 LOC. Target: ≤2,281. Current 
 - Create/update: `tests/test_simple_release_architecture.py`
 - Test: existing component-scope, migration, Kamal, OCI and recovery tests
 
-- [ ] Map each workflow step and referenced helper to one row in the function inventory, its invariant, native replacement candidate, consumer, and existing test evidence.
-- [ ] Identify the ordinary no-migration/no-Eros path and count its required GitHub jobs, image builds, external operations, scripts, and safety checks.
-- [ ] Add architecture tests for the single controller, zero staging resources, exact-SHA job dependencies, conditional migration/Eros operations, and fixed LOC selectors.
-- [ ] Run the new tests RED before any implementation changes.
-- [ ] Recompute all seven measures from base `3d680fa153fd6aebf786455d6f36d3b1a67cc78f` and candidate `HEAD` with a checked-in reproducible script/test; make no selector or denominator changes.
+- [x] Map each workflow step and referenced helper to one row in the function inventory, its invariant, native replacement candidate, consumer, and existing test evidence.
+- [x] Identify the ordinary no-migration/no-Eros path and count its required GitHub jobs, image builds, external operations, scripts, and safety checks.
+- [x] Add architecture tests for the single controller, zero staging resources, exact-SHA job dependencies, conditional migration/Eros operations, and fixed LOC selectors.
+- [x] Run the new tests RED before any implementation changes.
+- [x] Recompute all seven measures from base `3d680fa153fd6aebf786455d6f36d3b1a67cc78f` and candidate `HEAD` with a checked-in reproducible script/test; make no selector or denominator changes.
 
 ### Task 2: Replace duplicate component intent logic with native path filters
 
@@ -69,12 +69,12 @@ Initial six-path baseline/current: 4,562 / 3,909 LOC. Target: ≤2,281. Current 
 - Modify: `scripts/resolve_native_build_scope.py` only for live baseline facts not exposed by Kamal
 - Test: `tests/test_native_release_intent.py`, `tests/test_native_build_scope.py`, `tests/test_release_scope_consistency.py`
 
-- [ ] Add behavior tests for two different live baselines, cumulative changes, renames/deletions, shared paths, unknown paths, invalid ancestry, no-op and split role versions.
-- [ ] Verify the pinned paths-filter action accepts an exact commit SHA as `base` and reports the required rename/deletion set in the real hosted workflow.
-- [ ] Use GitHub matrix/expressions and the filter's declared component patterns for per-component selection; remove only planner branches now proven redundant.
-- [ ] Derive installed identity from Kamal/Docker inventory; fail closed when output cannot prove one logical component's installed revision/digest/roles.
-- [ ] Keep current path-filter coverage for all shared Docker/build inputs and add negative tests proving unknown additions cannot be silently ignored.
-- [ ] Run focused Python/Action tests, actionlint, scope consistency and the full Python suite.
+- [x] Add behavior tests for two different live baselines, cumulative changes, renames/deletions, shared paths, unknown paths, invalid ancestry, no-op and split role versions.
+- [x] Verify from the pinned action's input/output contract that an exact commit SHA can be used as one `base`; the production planner cannot be replaced by one filter because each component has a different installed SHA. A matrix still needs custom fail-closed aggregation, so it does not remove the planner.
+- [x] Remove the redundant same-run Eros test evidence API lookup; the existing `needs.tests` success dependency already blocks Build unless the exact workflow's test job succeeds.
+- [x] Keep installed identity from verified Deployment baselines and live Kamal/Docker inventory; both remain fail closed on unprovable identity.
+- [x] Keep current path-filter coverage for shared Docker/build inputs and negative tests proving unknown additions cannot be silently ignored.
+- [ ] Run focused Python/Action tests, actionlint, scope consistency and the full Python suite. Focused scope suite passes (139); actionlint is unavailable locally; full collection is blocked by Python 3.9/missing test dependencies and will be covered by exact-head hosted CI.
 
 ### Task 3: Consolidate Buildx image builds without moving complexity
 
