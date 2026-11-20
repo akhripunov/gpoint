@@ -115,6 +115,16 @@ EROS_MODEL_CONFIG_PATHS = frozenset({
     "services/eros-engine/eros-pilot-model-config.toml",
     "services/eros-engine/eros-production-model-config.toml",
     "services/eros-engine/test-model-config.toml",
+})
+RETIRED_LAYER7_STAGING_PATHS = frozenset({
+    ".github/actions/layer7-deploy/action.yml",
+    ".github/workflows/gpoint-layer7-staging.yml",
+    "config/deploy.layer7-staging.yml",
+    "config/deploy.layer7-staging.miniapp.yml",
+    "config/deploy.layer7-staging.eros-api.yml",
+    "config/deploy.layer7-staging.eros.yml",
+    "config/deploy.layer7-staging.eros-relay.yml",
+    "infra/staging/layer7_known_hosts",
     "services/eros-engine/eros-layer7-staging-model-config.toml",
 })
 LEGACY_RELEASE_MARKERS = frozenset({
@@ -293,6 +303,8 @@ def _validate_role_inventory(inventory: dict) -> dict[str, dict[str, str]]:
 
 
 def _component_paths(path: str) -> set[str]:
+    if path in RETIRED_LAYER7_STAGING_PATHS:
+        return set()
     if (PRISMA_MIGRATION.fullmatch(path)
             or path == "packages/db/prisma/production-approved-migrations.json"):
         return set()
@@ -308,8 +320,6 @@ def _component_paths(path: str) -> set[str]:
     if path.startswith("services/agata/"):
         return {"AGATA"}
     if path in EROS_MODEL_CONFIG_PATHS:
-        return set()
-    if path.startswith("config/deploy.layer7-staging."):
         return set()
     if path in {"services/eros-engine/eros-pilot-embedding-relay.mjs", "config/deploy.eros-relay.yml"}:
         return {"EROS_RELAY"}
@@ -335,9 +345,10 @@ def _non_runtime_documentation_path(path: str) -> bool:
 
 def _known_non_runtime_path(path: str) -> bool:
     """Recognize only verified release/test metadata outside application images."""
+    if path in RETIRED_LAYER7_STAGING_PATHS:
+        return False
     return (_non_runtime_documentation_path(path)
             or path in EROS_MODEL_CONFIG_PATHS
-            or path.startswith("config/deploy.layer7-staging.")
             or path in KNOWN_NON_RUNTIME_FILES
             or PRISMA_MIGRATION.fullmatch(path) is not None
             or path.startswith("tests/")
@@ -383,7 +394,7 @@ def classify_component_build_plan(repo: Path, candidate: str,
                 prior = subprocess.check_output(["git", "ls-tree", baseline, "--", path], cwd=repo).decode()
                 if not prior.startswith(("100644 blob ", "100755 blob ")):
                     raise ValueError("deleted candidate path was not a prior regular file")
-                if path == "infra/staging/layer7_known_hosts":
+                if path in RETIRED_LAYER7_STAGING_PATHS:
                     continue
                 deleted_components = _component_paths(path)
                 retired_release_script = path.startswith("scripts/")

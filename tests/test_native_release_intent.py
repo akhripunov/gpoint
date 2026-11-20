@@ -25,8 +25,15 @@ def test_retired_host_transition_and_shared_worker_fixture_are_known_non_runtime
     ('tests/test_release_ui_switch_v4.py', True, {'CORE'}),
     ('services/agata/worker/install_launch_agent.py', True, {'CORE', 'AGATA'}),
     ('services/gsales/tests/test_shared_worker_http.py', True, {'CORE'}),
+    ('.github/actions/layer7-deploy/action.yml', True, {'CORE'}),
     ('.github/workflows/gpoint-layer7-staging.yml', True, {'CORE'}),
+    ('config/deploy.layer7-staging.yml', True, {'CORE'}),
+    ('config/deploy.layer7-staging.miniapp.yml', True, {'CORE'}),
+    ('config/deploy.layer7-staging.eros-api.yml', True, {'CORE'}),
+    ('config/deploy.layer7-staging.eros.yml', True, {'CORE'}),
+    ('config/deploy.layer7-staging.eros-relay.yml', True, {'CORE'}),
     ('infra/staging/layer7_known_hosts', True, {'CORE'}),
+    ('services/eros-engine/eros-layer7-staging-model-config.toml', True, {'CORE'}),
     ('tests/test_kamal_production_manifest.py', True, {'CORE'}),
     ('scripts/layer7_release_scope.py', True, {'CORE'}),
     ('services/agata/worker/unreviewed_installer.py', True, {'CORE', 'AGATA'}),
@@ -66,8 +73,12 @@ def test_deleting_schema_or_migration_input_blocks_component_plan(tmp_path, path
         MODULE.classify_component_build_plan(repo, candidate, sources)
 
 
-def test_new_infra_staging_path_is_not_silently_ignored(tmp_path):
-    path = 'infra/staging/new-release-target.yml'
+@pytest.mark.parametrize('path', [
+    'infra/staging/new-release-target.yml',
+    'config/deploy.layer7-staging.api.yml',
+    'services/eros-engine/eros-layer7-staging-model-config.toml',
+])
+def test_new_staging_path_is_not_silently_ignored(tmp_path, path):
     repo, baseline, candidate, _ = _component_repo(tmp_path, {path: 'target: staging\n'})
     sources = {component: baseline for component in MODULE.COMPONENT_ROLES}
 
