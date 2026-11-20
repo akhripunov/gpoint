@@ -294,11 +294,11 @@ by it:
 
 | Measure | Main baseline | Current local candidate | Change |
 |---|---:|---:|---:|
-| Main controller + five control adapters (six paths) | 4,562 | 4,096 | −10.2% |
+| Main controller + five control adapters (six paths) | 4,562 | 4,097 | −10.2% |
 | Workflow LOC | 2,437 | 2,397 | −1.6% |
-| Referenced helper LOC | 5,439 | 4,763 | −12.4% |
-| Combined workflow + referenced scripts LOC | 7,876 | 7,160 | −9.1% |
-| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,435 | −24.4% |
+| Referenced helper LOC | 5,439 | 4,764 | −12.4% |
+| Combined workflow + referenced scripts LOC | 7,876 | 7,161 | −9.1% |
+| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,436 | −24.4% |
 | Referenced helper files | 21 | 19 | −2 |
 | Required test matrix runs | 4 | 2 | −50% |
 | Ordinary workflow named jobs | 3 | 3 | unchanged |
