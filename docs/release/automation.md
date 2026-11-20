@@ -294,11 +294,11 @@ by it:
 
 | Measure | Main baseline | Current local candidate | Change |
 |---|---:|---:|---:|
-| Main controller + five control adapters (six paths) | 4,562 | 4,116 | −9.8% |
+| Main controller + five control adapters (six paths) | 4,562 | 4,096 | −10.2% |
 | Workflow LOC | 2,437 | 2,397 | −1.6% |
-| Referenced helper LOC | 5,439 | 4,819 | −11.4% |
-| Combined workflow + referenced scripts LOC | 7,876 | 7,216 | −8.4% |
-| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,489 | −24.0% |
+| Referenced helper LOC | 5,439 | 4,781 | −12.1% |
+| Combined workflow + referenced scripts LOC | 7,876 | 7,178 | −8.9% |
+| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,451 | −24.3% |
 | Referenced helper files | 21 | 19 | −2 |
 | Required test matrix runs | 4 | 2 | −50% |
 | Ordinary workflow named jobs | 3 | 3 | unchanged |
@@ -332,13 +332,14 @@ count. Same-repository PR Build jobs request `packages: write` and can publish
 candidate images to GHCR; fork PRs do not run that job. This permission does
 not grant production Deploy access. The deleted
 staging workflow/action and obsolete prepared-run adapters account for most of
-the extended-inventory reduction. The six-path measure is down 9.8%, the
-workflow-plus-helper measure is down 8.4%, and the extended inventory is down
-24.0%; the mandatory 50% target remains unmet. The ordinary-only Kamal manifest also
+the extended-inventory reduction. The six-path measure is down 10.2%, the
+workflow-plus-helper measure is down 8.9%, and the extended inventory is down
+24.3%; the mandatory 50% target remains unmet. The ordinary-only Kamal manifest also
 removed an obsolete cutover branch and its tests. Active migration, backup,
 recovery, digest and runtime identity checks remain. No staging evidence is
 applicable. Exact-SHA hosted Tests, Eros/Mini App E2E, all-four-image Buildx and
-GHCR digest read-back passed for the current code candidate. Production
+GHCR digest read-back passed for SHA `ab78ffb`; later PR candidates are checked
+separately. Production
 Deploy, Runtime Verify and smoke remain unrun pending separate OWNER approval
 for an exact SHA. Further reduction must preserve the current protected paths;
 no safe retirement of the remaining active helpers is established by this
