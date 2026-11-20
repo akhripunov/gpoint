@@ -288,6 +288,7 @@ selective updates preserve its one-poller invariant.
 | Eros database backup, rehearsal and recovery | `scripts/eros-native-database.py` | PostgreSQL `pg_dump`/`pg_restore`, stock Eros SQLx migrations | **KEEP, reduce** — preserve isolated restore, ledger and recovery checks; remove duplicate orchestration only after equivalent integration proof. |
 | Standalone release readiness report | Retired `scripts/release-readiness.mjs` (71 LOC at baseline) | Native GitHub Deployment plus Runtime Verify | **DELETED** — no active workflow/package caller; historical audit remains in the archive. |
 | Dormant unified release v1 contract | `scripts/unified_release_v1/` (286 Python LOC plus metadata) | Native V5 workflow and current component adapters | **DELETED** — repository-wide search found no active import, workflow, package or test caller; its README and project metadata point only to retired `gpoint-prepare.yml` / `gpoint-deploy.yml`. |
+| Legacy Eros Pilot Compose deploy adapter | `scripts/eros-pilot-deployment.mjs` and its standalone unit test (150 LOC implementation) | Native Kamal production controller and its exact-SHA Runtime Verify | **DELETED** — repository-wide source/workflow/package audit found no runtime caller; production Eros services deploy through Native Kamal. Production Compose configuration was left intact. |
 
 Measured against `3d680fa153fd6aebf786455d6f36d3b1a67cc78f` (current main at task
 start), using the Native workflow plus the unique `scripts/` files referenced
@@ -299,7 +300,7 @@ by it:
 | Workflow LOC | 2,437 | 2,397 | −1.6% |
 | Referenced helper LOC | 5,439 | 4,578 | −15.8% |
 | Combined workflow + referenced scripts LOC | 7,876 | 6,975 | −11.4% |
-| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,250 | −25.9% |
+| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,100 | −27.1% |
 | Referenced helper files | 21 | 19 | −2 |
 | Required test matrix runs | 4 | 2 | −50% |
 | Ordinary workflow named jobs | 3 | 3 | unchanged |
@@ -339,7 +340,7 @@ not grant production Deploy access. The deleted
 staging workflow/action and obsolete prepared-run adapters account for most of
 the extended-inventory reduction. The six-path measure is down 14.1%, the
 workflow-plus-helper measure is down 11.4%, and the extended inventory is down
-25.9%; the mandatory 50% target remains unmet. The ordinary-only Kamal manifest also
+27.1%; the mandatory 50% target remains unmet. The ordinary-only Kamal manifest also
 removed an obsolete cutover branch and its tests. Active migration, backup,
 recovery, digest and runtime identity checks remain. No staging evidence is
 applicable. Exact-SHA hosted Tests, Eros/Mini App E2E, all-four-image Buildx and

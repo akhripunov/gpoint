@@ -29,6 +29,13 @@ def test_layer7_is_not_configured_as_a_staging_release_target():
     assert all(not (ROOT / path).exists() for path in retired_paths)
 
 
+def test_retired_eros_pilot_compose_deployer_is_not_a_release_tool():
+    package = __import__("json").loads((ROOT / "package.json").read_text())
+    assert not (ROOT / "scripts/eros-pilot-deployment.mjs").exists()
+    assert not (ROOT / "scripts/eros-pilot-deployment.test.mjs").exists()
+    assert "eros-pilot-deployment" not in package["scripts"]["test:release"]
+
+
 def test_pr_candidate_runs_build_without_production_deploy():
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
