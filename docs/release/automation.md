@@ -212,7 +212,10 @@ edit/check/commit, существенного ожидания и каждого
 `.github/workflows/gpoint-native-release.yml` remains the single production
 controller. Its ordinary path is `Tests → Build/GHCR → protected Deploy →
 Runtime Verify`. A permitted push to `main` starts the path automatically. PRs
-run the same required tests and do not receive production secrets or GHCR write.
+run the same required tests and do not receive production secrets or Deploy
+access. Eligible same-repository PR Build jobs receive `packages: write` only to
+publish candidate images for immutable GHCR read-back. Fork PRs never enter
+that Build job.
 
 The required test matrix is exactly `workspace` and `python`. Workspace also
 contains actionlint, pinned Kamal configuration/proxy checks, and the conditional
@@ -300,11 +303,11 @@ by it:
 
 | Measure | Main baseline | Current local candidate | Change |
 |---|---:|---:|---:|
-| Main controller + five control adapters (six paths) | 4,562 | 3,897 | −14.6% |
+| Main controller + five control adapters (six paths) | 4,562 | 3,909 | −14.3% |
 | Workflow LOC | 2,437 | 2,399 | −1.6% |
-| Referenced helper LOC | 5,439 | 4,562 | −16.1% |
-| Combined workflow + referenced scripts LOC | 7,876 | 6,961 | −11.6% |
-| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,086 | −27.2% |
+| Referenced helper LOC | 5,439 | 4,574 | −15.9% |
+| Combined workflow + referenced scripts LOC | 7,876 | 6,973 | −11.5% |
+| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,098 | −27.1% |
 | Referenced helper files | 21 | 19 | −2 |
 | Required test matrix runs | 4 | 2 | −50% |
 | Ordinary workflow named jobs | 3 | 3 | unchanged |
@@ -338,13 +341,15 @@ count. The current candidate replaces the exact retired-path deletion list with
 status-aware scope classification. Runtime deletions now select their owning
 component; a deleted release script has no image impact, while cumulative
 infrastructure changes still require the protected dispatch route. Unmapped
-deletions continue to fail closed. Same-repository PR Build jobs request `packages: write` and can publish
+deletions continue to fail closed. Exact retired Layer7 staging paths are
+ignored only when deleted from the cumulative candidate diff; new and
+reintroduced staging paths fail closed. Same-repository PR Build jobs request `packages: write` and can publish
 candidate images to GHCR; fork PRs do not run that job. This permission does
 not grant production Deploy access. The deleted
 staging workflow/action and obsolete prepared-run adapters account for much of
-the extended-inventory reduction. The six-path measure is down 14.6%, the
-workflow-plus-helper measure is down 11.6%, and the extended inventory is down
-27.2%; the mandatory 50% targets remain unmet. The ordinary-only Kamal manifest also
+the extended-inventory reduction. The six-path measure is down 14.3%, the
+workflow-plus-helper measure is down 11.5%, and the extended inventory is down
+27.1%; the mandatory 50% targets remain unmet. The ordinary-only Kamal manifest also
 removed an obsolete cutover branch and its tests. Active migration, backup,
 recovery, digest and runtime identity checks remain. No staging evidence is
 applicable. Exact-SHA hosted Tests, isolated PostgreSQL, Eros/Mini App E2E,
@@ -352,15 +357,17 @@ Buildx and GHCR digest read-back passed for SHA `c514991`; production
 Deploy, Runtime Verify and smoke remain unrun pending separate OWNER approval
 for an exact SHA. Further reduction must preserve the current protected paths;
 no safe retirement of the remaining active helpers is established by this
-audit.
+audit. The current candidate `ccd70efe6c2bc8d9273019dd5f55cc27075d40b9`
+passed exact-head run [44719646468](https://github.com/akhripunov/gpoint/actions/runs/44719646468): Python, Workspace, isolated PostgreSQL, Eros and Mini App E2E, all four Buildx images, identity/provenance checks and GHCR digest read-back. Production Deploy/Verify was skipped for the PR event.
 
 ### ME-62 acceptance scenario matrix
 
-Exact candidate `c514991c84ce60f48b92b82f5b7380fc0b8901c0`, base
+Scenario rows use the exact tests named in each row; the current exact-head
+candidate is `ccd70efe6c2bc8d9273019dd5f55cc27075d40b9`, base
 `3d680fa153fd6aebf786455d6f36d3b1a67cc78f`. The exact-head hosted run
-[44711957261](https://github.com/akhripunov/gpoint/actions/runs/44711957261)
-passed Python, Workspace, isolated PostgreSQL, Eros and Mini App E2E, Buildx
-image publication and GHCR digest read-back. The PR event correctly skipped
+[44719646468](https://github.com/akhripunov/gpoint/actions/runs/44719646468)
+passed Python, Workspace, isolated PostgreSQL, Eros and Mini App E2E, all four
+Buildx images and GHCR digest read-back. The PR event correctly skipped
 production Deploy/Verify. `PASS` below means the stated
 local/hosted test evidence passed; it does not imply production execution.
 
@@ -400,7 +407,7 @@ local/hosted test evidence passed; it does not imply production execution.
 | 32 | Same-repository PR | Test Build allowed; Deploy forbidden → Build/GHCR read-back passed, Deploy skipped | PASS — run 44711957261 |
 | 33 | Protected infrastructure dispatch | OWNER/ref/exact SHA and Environment protection required → classifier and workflow gates assert these conditions | PASS — Native intent and boundary tests; live GitHub protection settings NOT VERIFIED |
 | 34 | Current Layer7 | Production target only, never staging → workflow has only `production` Environment | PASS — `test_layer7_is_production_and_retired_staging_paths_cannot_deploy`; live VPS identity NOT re-read in this task |
-| 35 | Retired staging paths | No active release calls → workflow/configs absent; old exact paths remain only as fail-closed classifiers/tests. Other `staging` mentions are dated history, test fixtures, or local atomic/temp-directory operations; none names a GPoint environment or server. | PASS — `test_layer7_is_not_configured_as_a_staging_release_target` and repository-wide source audit |
+| 35 | Retired staging paths | No active release calls → workflow/configs absent; exact retired paths are accepted only as deletions and additions/reintroductions are blocked. Other `staging` mentions are dated history, test fixtures, or local atomic/temp-directory operations; none names a GPoint environment or server. | PASS — `test_layer7_is_not_configured_as_a_staging_release_target`, `test_new_staging_path_is_not_silently_ignored`, and run 44719646468 |
 
 Production-only checks explicitly remain unverified. No staging infrastructure
 or replacement workflow exists or is required. Do not interpret passing local
