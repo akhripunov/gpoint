@@ -148,6 +148,10 @@ def test_pr_candidate_runs_build_without_production_deploy():
     assert "eros_e2e" not in tests["outputs"]
     assert "tests" in build["needs"]
     assert "needs.tests.result == 'success'" in build["if"]
+    path_filter = next(step for step in tests["steps"] if step.get("id") == "filter")
+    assert path_filter["with"]["base"] == "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}"
+    assert path_filter["with"]["token"] == ""
+    assert "pull-requests" not in tests["permissions"]
     assert not any(step.get("name") == "Require exact-candidate Eros test evidence" for step in build["steps"])
     assert "steps.infrastructure_baseline.outputs.eros_engine" in eros_e2e["if"]
     assert "steps.dispatch_build_scope.outputs.eros_engine" in eros_e2e["if"]

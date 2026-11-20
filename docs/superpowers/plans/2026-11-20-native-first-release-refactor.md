@@ -112,11 +112,11 @@ Task 4 hosted feedback: exact SHA `1d058bc0aa708656f5c142f996ad82fa15270d21` cau
 - Modify: `scripts/eros-native-database.py`, `scripts/prisma_migration_release_plan.py`, `scripts/verify-kamal-migration-parity.py`, `scripts/resolve_native_environment_deployment.py` only after call-graph/equivalence tests
 - Test: isolated PostgreSQL, migration-safety, Eros DB and protected Environment boundaries
 
-- [ ] Keep ordinary releases free of migration backup/restore operations when no pending migration exists.
-- [ ] Invoke Prisma, SQLx and Alembic stock commands directly where their status/plan output already proves the required result.
-- [ ] Keep exact approved migration set, applied migration/checksum immutability, cross-stack compatibility and backup/restore gates when native tools do not enforce them.
-- [ ] Keep Eros synthetic E2E conditional on relevant code/data changes and the test isolated from production.
-- [ ] Preserve Environment identity and native Deployment success only after Runtime Verify; remove any custom polling or duplicate IDs only if GitHub job/deployment relationships prove exact equivalence.
+- [x] Keep ordinary releases free of migration backup/restore operations when no pending migration exists; the workflow gates the backup and database Apply on the exact `migration_plan.apply` output.
+- [x] Invoke Prisma, SQLx and Alembic stock commands directly where their status/plan output proves the framework-specific result; Alembic graph discovery already uses native `ScriptDirectory`.
+- [x] Keep the exact approved migration set, applied migration/checksum immutability, cross-stack compatibility and backup/restore gates. Prisma `migrate deploy` applies every pending migration and does not check schema drift, so it cannot replace these GPoint release boundaries.
+- [x] Keep Eros synthetic E2E conditional on relevant code, data or infrastructure baseline changes, isolated in the CI workspace.
+- [x] Preserve protected Environment identity and native Deployment success only after Runtime Verify; no custom polling/identifier removal was proven equivalent.
 
 ### Task 6: Verify acceptance and exact reduction
 

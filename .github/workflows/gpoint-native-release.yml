@@ -52,7 +52,6 @@ jobs:
     permissions:
       contents: read
       deployments: read
-      pull-requests: read
     # Both required suites compute identical release intent outputs.
     outputs:
       mode: ${{ steps.intent.outputs.mode }}
@@ -95,6 +94,7 @@ jobs:
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          token: ''
           predicate-quantifier: 'some-with-excludes'
           filters: |
             core:
