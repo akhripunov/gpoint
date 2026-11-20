@@ -15,6 +15,11 @@
 > digest текущего run через stock Kamal 2, а GitHub Deployment становится
 > успешным только после Runtime Verify и smoke.
 >
+> Native production SSH принимает только документированный адрес Layer7
+> `95.133.236.59`; устаревший или ошибочный `GPOINT_KAMAL_HOST` блокируется
+> до записи SSH credentials и до любой удалённой команды. Изменение адреса
+> требует согласованного обновления guard и matching host-key конфигурации.
+>
 > Same-repository PR от `OWNER`, `MEMBER` или `COLLABORATOR` может собрать
 > только выбранные компоненты и проверить GHCR readback без production secrets
 > и без доступа к Deploy. Полная четырёхобразная проверка PR запускается

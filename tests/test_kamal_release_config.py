@@ -278,6 +278,28 @@ def test_production_host_comes_from_exact_environment_and_known_hosts():
     assert "--env GPOINT_APP_SOURCE_SHA" in native_workflow
 
 
+def test_native_release_rejects_non_layer7_ssh_target_before_remote_setup():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    credentials = next(step for step in workflow["jobs"]["deploy"]["steps"]
+                       if step.get("name") == "Install verified Kamal SSH credentials")
+    script = credentials["run"]
+    guard = next((line.strip() for line in script.splitlines()
+                  if "GPOINT_PRODUCTION_HOST" in line and "95.133.236.59" in line), None)
+
+    assert guard is not None, "the release must reject a host other than the documented Layer7 VPS"
+    assert "ssh-keygen -F" in script
+    assert script.index(guard) < script.index('ssh-keygen -F "$GPOINT_PRODUCTION_HOST"')
+
+    valid = subprocess.run(["bash", "-c", guard],
+                           env={**os.environ, "GPOINT_PRODUCTION_HOST": "95.133.236.59"},
+                           text=True, capture_output=True)
+    invalid = subprocess.run(["bash", "-c", guard],
+                             env={**os.environ, "GPOINT_PRODUCTION_HOST": "old-host.example"},
+                             text=True, capture_output=True)
+    assert valid.returncode == 0
+    assert invalid.returncode != 0
+
+
 def test_kamal_pre_app_boot_checks_the_pulled_digest_before_boot():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     hook = (ROOT / ".kamal/hooks/pre-app-boot").read_text()
