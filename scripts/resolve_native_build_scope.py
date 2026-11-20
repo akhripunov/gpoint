@@ -16,6 +16,7 @@ from native_release_intent import (
     EXACT_SHA,
     classify_component_build_plan,
 )
+from resolve_native_environment_deployment import latest_deployment_status
 
 
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -45,20 +46,6 @@ def _timestamp(value: object) -> datetime:
     if stamp.tzinfo is None:
         raise ValueError("production Deployment timestamp has no timezone")
     return stamp
-
-
-def _latest_status(statuses: list[dict]) -> dict:
-    if not isinstance(statuses, list) or not statuses:
-        raise ValueError("latest production Deployment has no statuses")
-    try:
-        rows = [(_timestamp(row.get("created_at")), row) for row in statuses]
-    except AttributeError:
-        raise ValueError("production Deployment status is malformed") from None
-    newest = max(stamp for stamp, _row in rows)
-    matches = [row for stamp, row in rows if stamp == newest]
-    if len(matches) != 1:
-        raise ValueError("latest production Deployment status is ambiguous")
-    return matches[0]
 
 
 def _is_github_environment_job_record(deployment: dict) -> bool:
@@ -156,7 +143,7 @@ def resolve_production_component_sources(deployments: list[dict], statuses_by_id
             or deployment.get("transient_environment") is not False
             or task not in SUPPORTED_TASKS):
         raise ValueError("latest production Deployment identity is unsupported or malformed")
-    status = _latest_status(statuses_by_id.get(identifier, []))
+    status = latest_deployment_status(statuses_by_id.get(identifier, []))
     failed_native = _is_github_environment_job_record(deployment) and status.get("state") in {"failure", "error"}
     if (status.get("state") != "success" and not failed_native) or status.get("environment") != "production":
         raise ValueError("latest production Deployment is not successful")
@@ -280,7 +267,7 @@ def main() -> int:
         runs_by_id = {}
         jobs_by_id = {}
         for statuses in statuses_by_id.values():
-            status = _latest_status(statuses)
+            status = latest_deployment_status(statuses)
             if status.get("state") not in {"success", "failure", "error"}:
                 continue
             match = RUN_URL.fullmatch(status.get("log_url", ""))

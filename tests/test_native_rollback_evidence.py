@@ -238,6 +238,23 @@ def test_rejects_failed_or_newer_non_success_deployment_status():
         raise AssertionError("non-success latest status was accepted")
 
 
+def test_rejects_ambiguous_latest_deployment_status_timestamps():
+    args = evidence()
+    args[1].append({
+        "state": "failure",
+        "environment": "production",
+        "created_at": args[1][0]["created_at"],
+        "description": "conflicting status at the same timestamp",
+        "log_url": args[1][0]["log_url"],
+    })
+    try:
+        verify(args)
+    except ValueError as exc:
+        assert "ambiguous latest statuses" in str(exc)
+    else:
+        raise AssertionError("conflicting latest Deployment statuses were accepted")
+
+
 def test_rejects_manifest_tamper_target_sha_missing_build_and_attempt_mismatch():
     args = evidence()
     invalid_inputs = (

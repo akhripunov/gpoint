@@ -9,11 +9,11 @@ import json
 import re
 import sys
 from pathlib import Path
-from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
 
 from native_release_intent import ALL_COMPONENT_ROLES, ROLE_REPOSITORIES
+from resolve_native_environment_deployment import latest_deployment_status
 
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -27,10 +27,6 @@ def _fail(message: str) -> None:
     raise ValueError(message)
 
 
-def _time(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
-
-
 def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[str, Any]],
                              run: dict[str, Any], jobs: list[dict[str, Any]],
                              manifest_bytes: bytes, expected_sha: str,
@@ -42,7 +38,7 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
         _fail("selected GitHub Deployment does not identify the requested production release")
     if not statuses:
         _fail("selected deployment has no statuses")
-    latest = max(statuses, key=lambda row: _time(row.get("created_at", "")))
+    latest = latest_deployment_status(statuses)
     match = re.fullmatch(r"Kamal success SHA ([0-9a-f]{40}) manifest ([0-9a-f]{64})", latest.get("description", ""))
     environment_url = latest.get("environment_url", "")
     native_manifest_sha = None

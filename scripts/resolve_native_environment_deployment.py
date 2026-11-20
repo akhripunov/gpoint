@@ -15,7 +15,7 @@ SHA40 = re.compile(r"^[0-9a-f]{40}$")
 POSITIVE = re.compile(r"^[1-9][0-9]*$")
 
 
-def _latest_status(statuses: list[dict]) -> dict:
+def latest_deployment_status(statuses: list[dict]) -> dict:
     if not isinstance(statuses, list) or not statuses:
         raise ValueError("native production Deployment has no statuses")
     try:
@@ -70,7 +70,7 @@ def resolve_native_deployment_id(deployments: list[dict], statuses_by_id: dict[i
                 or deployment.get("environment") != "production" or deployment.get("task") != "deploy"
                 or deployment.get("transient_environment") is not False):
             continue
-        latest = _latest_status(statuses_by_id.get(identifier, []))
+        latest = latest_deployment_status(statuses_by_id.get(identifier, []))
         if (latest.get("state") == "in_progress" and latest.get("environment") == "production"
                 and latest.get("log_url") in run_urls):
             matching.append(identifier)
