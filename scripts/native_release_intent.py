@@ -336,7 +336,6 @@ def _non_runtime_documentation_path(path: str) -> bool:
 def _known_non_runtime_path(path: str) -> bool:
     """Recognize only verified release/test metadata outside application images."""
     return (_non_runtime_documentation_path(path)
-            or path.startswith("infra/staging/")
             or path in EROS_MODEL_CONFIG_PATHS
             or path.startswith("config/deploy.layer7-staging.")
             or path in KNOWN_NON_RUNTIME_FILES
@@ -384,6 +383,8 @@ def classify_component_build_plan(repo: Path, candidate: str,
                 prior = subprocess.check_output(["git", "ls-tree", baseline, "--", path], cwd=repo).decode()
                 if not prior.startswith(("100644 blob ", "100755 blob ")):
                     raise ValueError("deleted candidate path was not a prior regular file")
+                if path == "infra/staging/layer7_known_hosts":
+                    continue
                 deleted_components = _component_paths(path)
                 retired_release_script = path.startswith("scripts/")
                 if not deleted_components and (_known_non_runtime_path(path) or retired_release_script):
