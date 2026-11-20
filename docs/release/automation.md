@@ -294,11 +294,11 @@ by it:
 
 | Measure | Main baseline | Current local candidate | Change |
 |---|---:|---:|---:|
-| Main controller + five control adapters (six paths) | 4,562 | 4,240 | −7.1% |
-| Workflow LOC | 2,437 | 2,393 | −1.8% |
-| Referenced helper LOC | 5,439 | 4,807 | −11.6% |
-| Combined workflow + referenced scripts LOC | 7,876 | 7,200 | −8.6% |
-| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,473 | −24.1% |
+| Main controller + five control adapters (six paths) | 4,562 | 4,128 | −9.5% |
+| Workflow LOC | 2,437 | 2,396 | −1.7% |
+| Referenced helper LOC | 5,439 | 4,693 | −13.7% |
+| Combined workflow + referenced scripts LOC | 7,876 | 7,089 | −10.0% |
+| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,362 | −25.0% |
 | Referenced helper files | 21 | 18 | −3 |
 | Required test matrix runs | 4 | 2 | −50% |
 | Ordinary workflow named jobs | 3 | 3 | unchanged |
@@ -327,12 +327,18 @@ half, and `native_change_surface.py` was replaced with declarative filters.
 The current candidate inventory counts source lines in files that remain on
 disk and preserves the baseline selectors and denominator. The deleted
 staging workflow/action and obsolete prepared-run adapters account for most of
-the extended-inventory reduction. The six-path measure is down 7.1%, the
-workflow-plus-helper measure is down 8.6%, and the extended inventory is down
-24.1%; neither mandatory measure approaches the 50% target. This is an
-intermediate audit, not acceptance. No staging evidence is applicable. Exact
-SHA hosted validation, matrix evidence, and substantive active-controller
-reduction remain required.
+the extended-inventory reduction. The six-path measure is down 9.5%, the
+workflow-plus-helper measure is down 10.0%, and the extended inventory is down
+25.0%; the 50% target remains unmet. The ordinary-only Kamal manifest also
+removed an obsolete cutover branch and its tests. Active migration, backup,
+recovery, digest and runtime identity checks remain. No staging evidence is
+applicable. Exact-SHA hosted Tests, Eros/Mini App E2E, all-four-image Buildx and
+GHCR digest read-back passed for the current code candidate. Production
+Deploy, Runtime Verify and smoke remain unrun pending separate OWNER approval
+for an exact SHA. Further reduction must preserve the current protected paths;
+no safe retirement of the remaining active helpers is established by this
+audit.
+
 ## Local test selection under FULL
 
 FULL is a risk level, not a mandate to run every local test. `classify-release-prepush.py` remains the canonical FAST/FULL procedure. Hosted CI uses the pinned `dorny/paths-filter` action in `gpoint-native-release.yml` for declarative five-component and shared-dependency selection. Run the directly affected local checks; GitHub CI remains authoritative for the exact PR SHA. The production planner tracks Core, AGATA, Mini App, Eros Engine and Eros Relay independently. Engine-only changes build the Eros image. Relay-only changes build the shared Core runtime image and deploy only Relay. The first Eros installation still requires both services. Runtime Verify records separate source SHAs and digests for Engine and Relay. Older successful deployments with a single Eros source SHA use that SHA for both because those deployments updated the pair together. An ambiguous or partial runtime still requires the existing authorized recovery path. The planner compares installed component sources with the exact candidate and fails closed on unknown paths. Do not recreate a second component path map for CI.
