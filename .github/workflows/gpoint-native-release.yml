@@ -798,7 +798,7 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$SSH_PRIVATE_KEY" && test -n "$VERIFIED_KNOWN_HOSTS"
-          [[ "$GPOINT_PRODUCTION_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ "$GPOINT_PRODUCTION_HOST" == "95.133.236.59" && "$GPOINT_PRODUCTION_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || { echo 'production target must be the canonical Layer7 VPS' >&2; exit 1; }
           install -d -m 700 "$HOME/.ssh"
           printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
           printf '%s\n' "$VERIFIED_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
