@@ -278,6 +278,47 @@ selective updates preserve its one-poller invariant.
 
 ### ME-62 release-code audit and reduction status
 
+The Native First audit covers the whole executable path rather than only
+counting the main workflow. The ordinary no-migration/no-Eros route currently
+uses the `tests → build → deploy` GitHub job dependencies, one protected
+production concurrency transaction, one selected Buildx image per unique
+artifact, one stock Kamal Apply, post-Apply Docker/runtime identity checks,
+and the required API/Mini App/Bot smoke. The tests matrix has two suites;
+conditional PostgreSQL/Eros/Mini App work is skipped unless its path filter or
+dispatch requires it. The deploy route still reads live DB and installed
+topology facts so that a previously pending migration, a partial prior Apply,
+or a stale baseline cannot be hidden by the current commit's paths.
+
+The table below maps every executable helper directly referenced by the Native
+workflow. “Retain” describes the guarantee the helper currently carries; it is
+not a claim that this implementation is the final design. Later tasks must
+remove a helper once the named native replacement is proven by the listed
+contract tests and exact-SHA hosted CI.
+
+<!-- ME62_HELPER_AUDIT_START -->
+| Referenced helper | Function and Native First replacement to prove | Why any custom part remains / evidence |
+|---|---|---|
+| `scripts/check-kamal-configs.sh` | Validate the pinned production Kamal config; prefer `kamal config` for parsing and validation. | Keep only GPoint's cross-file role/proxy contract if Kamal does not validate it; `tests/test_kamal_release_config.py`, `tests/test_kamal_proxy_routes.py`. |
+| `scripts/docker_dependency_manifests.py` | Stage lockfile-derived dependency manifests for the actual BuildKit context. | Docker/Buildx consumes a context but does not generate the repository-specific manifests; `tests/test_docker_dependency_manifests.py`. |
+| `scripts/eros-native-database.py` | Eros SQLx migration prepare/apply/rollback and isolated backup restore; use stock `pg_dump`, `pg_restore`, PostgreSQL and Eros SQLx migration commands. | Preserve exact history, checksum, identity, restore and partial-apply recovery unless the stock Eros migration command proves all of them; `tests/test_eros_native_database.py` and Docker/PostgreSQL integration. Runs only for Eros changes. |
+| `scripts/eros-production-secrets.py` | Prepare the Eros service's protected environment; evaluate Kamal's native secrets mechanism and GitHub Environment secrets. | Existing helper enforces tenant, database ACL, env-file ownership/mode and read-only prerequisites for the externally sourced Eros image; `tests/test_eros_production_secrets.py`. Runs only for Eros deployment/bootstrap. |
+| `scripts/native_release_intent.py` | Classify event/path intent, live component scope and runtime role identity; replace path subsets with pinned `dorny/paths-filter`, Git ancestry and declarative Actions conditions/matrix. | Retain only unknown-path fail-closed and per-component exact-base joins not expressible by the action; `tests/test_native_release_intent.py`, `tests/test_native_build_scope.py`, `tests/test_release_scope_consistency.py`. |
+| `scripts/prisma_migration_release_plan.py` | Compare applied/pending migrations against a candidate; use `prisma migrate status`/`deploy` for ordinary Prisma semantics. | Keep exact owner-approved migration set, immutable applied checksums and cross-stack compatibility where Prisma's own commands do not enforce them; `tests/test_prisma_migration_release_plan.py`, isolated PostgreSQL tests. |
+| `scripts/resolve_native_build_scope.py` | Resolve component source baselines from GitHub Deployments and manifest evidence; replace with live `kamal app version/containers/images` plus Docker image labels/digests. | Keep only parsing/validation needed because Kamal output is not a stable structured per-role baseline; `tests/test_native_build_scope.py`. This is a primary simplification target. |
+| `scripts/resolve_native_environment_deployment.py` | Link the protected Environment job to its native Deployment record/status; use the Actions Environment/job association and native Deployment status. | Retain only the API lookup if GitHub exposes no stable deployment ID in job context; `tests/test_native_environment_deployment.py`. |
+| `scripts/test-kamal-proxy-integration.sh` | Test Kamal's proxy routing and preserved unrelated services using isolated Docker. | Keep the local integration test until the same proxy/route contract is asserted by stock Kamal configuration validation; never run it against Layer7. |
+| `scripts/verify-eros-runtime-labels.py` | Verify installed Eros image labels against source/upstream identity; prefer `docker image inspect --format` and direct expected-label comparisons. | The Python adapter is removable if shell/Docker checks cover every required label and fail closed; `tests/test_eros_runtime_labels.py`. |
+| `scripts/verify-kamal-migration-parity.py` | Verify Prisma/AGATA/SQLx graph, applied history, approvals and compatibility; use each database stack's native status/history commands. | Keep only cross-stack approval, source ancestry and applied-history invariants not supplied by those commands; `tests/test_kamal_migration_parity.py`, isolated migration suites. This is a primary simplification target. |
+| `scripts/verify-kamal-production-baseline.py` | Enumerate current live service/role topology; prefer stock Kamal app inventory and Docker inspect on its hosts. | Keep only mixed-version, shared database/cache and exact image identity checks absent from Kamal output; `tests/test_kamal_production_baseline.py`. |
+| `scripts/verify-kamal-role.sh` | Check selected Kamal services and retained-role behavior; prefer `kamal app containers/images` and Docker labels. | Keep a thin assertion only if Kamal's role selection cannot establish the one-Bot/one-role invariant; `tests/test_kamal_role.py`. |
+| `scripts/verify-layer7-ollama.py` | Read-only check of the existing Ollama accessory/model state. | This verifies a production dependency outside the image release path; preserve service state and replace only with a documented existing health endpoint/stock Kamal accessory check. `tests/test_layer7_ollama_verifier.py`. |
+| `scripts/verify_native_eros_image.py` | Verify the stock Eros OCI image and its provenance. | Prefer GHCR pull by immutable digest, GitHub artifact-attestation verification, and Docker label/platform inspection; retain only Eros upstream/patch assertions not covered by those outputs. `tests/test_native_image_readback.py`. |
+| `scripts/verify_native_image_attestation.py` | Parse BuildKit SBOM/provenance JSON and validate source/build args. | Replace with signed GitHub artifact attestations and `gh attestation verify` only after an exact-subject/repository/SHA/workflow test proves equivalence; never drop source or digest identity. `tests/test_native_image_attestation.py`. |
+| `scripts/verify_native_image_readback.py` | Validate repository, immutable digest, platform and source labels from Docker inspect. | Prefer a small `docker pull IMAGE@DIGEST` plus `docker image inspect --format` assertion; retain only any compound identity rule not readable from Docker outputs. `tests/test_native_image_readback.py`. |
+| `scripts/verify_native_rollback_evidence.py` | Join the selected historical Deployment, successful Verify run and component manifest. | Prefer GitHub Deployment/Actions records plus stock Kamal's retained old containers; retain proof that target SHA/digest was actually successful and DB-compatible. `tests/test_native_rollback_evidence.py`, rollback fixtures. This is a primary simplification target. |
+| `scripts/write-kamal-production-manifest.py` | Persist per-component installed source/image/role identity for scope and rollback. | Replace with actual Kamal/Docker inventory and native GitHub Deployment metadata if those reconstruct partial/mixed state without a separate release-state file; current manifest remains only until read-back equivalence tests pass. `tests/test_kamal_production_manifest.py`, `tests/test_kamal_ordinary_manifest.py`. This is a primary simplification target. |
+<!-- ME62_HELPER_AUDIT_END -->
+
 | Function | Current code | Native mechanism | Decision |
 |---|---|---|---|
 | Component path filters | `dorny/paths-filter`; retired `native_change_surface.py` (131 LOC at baseline) | Git and the pinned `dorny/paths-filter` action | **REPLACE / DELETE** — declarative filters now supply the component paths. |
@@ -333,6 +374,39 @@ bound for production Apply code. The Native cross-run digest reuse adapter was
 removed; production dispatch now builds the required images in the same run.
 The matrix consolidation cuts redundant runners and PostgreSQL services in
 half, and `native_change_surface.py` was replaced with declarative filters.
+The seven complexity measures from the OWNER specification are kept separate.
+Shared Native adapters are counted once; non-release backup/install utilities
+outside the workflow's call graph are not credited as deletions. The fixed
+baseline and selectors are unchanged.
+
+| Measure | Main baseline | Current candidate |
+|---|---:|---:|
+| Native production workflow LOC | 2,437 | 2,399 |
+| Release-specific referenced-helper LOC | 4,257 | 3,720 |
+| Shared referenced-helper LOC (unique source files) | 1,182 | 854 |
+| Production release controllers | 1 | 1 |
+| Additional Layer7 staging deployment workflows | 1 | 0 |
+| Maximum distinct production images in one full run | 4 | 4 |
+| Custom prepared-run/production-manifest state formats | 2 | 1 |
+| Core-only ordinary Deploy steps (no migration/Eros/rollback) | 17 | 17 |
+
+The three shared files are `native_release_intent.py`,
+`resolve_native_environment_deployment.py`, and
+`verify_native_image_attestation.py`; each has multiple Native helper callers.
+The Core-only path builds one `gpoint-runtime` image once. The four-image value
+is the maximum for a full component run, not four builds on every release. The
+17 Deploy steps include exact-SHA/main recheck, live Kamal/Docker baseline and
+topology, candidate digest/DB compatibility checks, the migration-status
+command (which must remain a no-op with no pending migrations), protected
+Environment linkage, stock Kamal Apply, Runtime Verify/smoke, and timing. Eros,
+rollback, and failure-recovery steps are conditional. Reducing duplicated
+ordinary-path checks without weakening baseline, migration, image, health or
+smoke guarantees remains part of this refactor.
+
+The table is an audit snapshot, not an acceptance shortcut: every new native
+workflow, Buildx definition or helper is included in the same source inventory,
+and moving code between YAML/Python/Bash/HCL/actions does not lower the result.
+
 The current candidate inventory counts source lines in files that remain on
 disk and preserves the baseline selectors and denominator. The Native workflow
 invokes `resolve_native_environment_deployment.py` during Runtime Verify, so
