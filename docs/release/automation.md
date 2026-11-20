@@ -278,7 +278,7 @@ selective updates preserve its one-poller invariant.
 | Function | Current code | Native mechanism | Decision |
 |---|---|---|---|
 | Component path filters | `dorny/paths-filter`; retired `native_change_surface.py` (131 LOC at baseline) | Git and the pinned `dorny/paths-filter` action | **REPLACE / DELETE** — declarative filters now supply the component paths. |
-| Event admission and exact-scope fail-closed rules | `scripts/native_release_intent.py` (573 LOC in this candidate) | GitHub event/dispatch context and workflow conditions | **KEEP, reduce** — policy checks still reject unauthorized events, unsafe paths and migration scope; the retired migration-rehearsal dispatch mode was removed because the separate protected operation is owned by `gpoint-operations.yml`. Further reduction remains required. |
+| Event admission and exact-scope fail-closed rules | `scripts/native_release_intent.py` (574 LOC in this candidate) | GitHub event/dispatch context and workflow conditions | **KEEP, reduce** — policy checks reject unauthorized events, unsafe paths and migration scope; retired migration-rehearsal dispatch handling was removed because the separate protected operation is owned by `gpoint-operations.yml`. Further reduction remains required. |
 | Deleted paths in cumulative component diffs | Retired exact-path deletion allowlist | Git diff status plus the existing component/non-runtime path map | **REPLACE** — deleted runtime paths select their owning component; deleted release scripts and known non-runtime paths do not select an image; unmapped deletions still block. |
 | Installed component source baselines | `scripts/resolve_native_build_scope.py` | GitHub Deployments API, stock Kamal app commands and Docker inspect | **KEEP, reduce** — this adapter resolves installed component identities and exact-SHA evidence used by Build and Deploy. |
 | Build and OCI provenance | Build steps plus `scripts/verify_native_image_readback.py`, `verify_native_image_attestation.py`, `verify_native_eros_image.py` | Docker Buildx, GHCR digest, SBOM and GitHub artifact provenance | **KEEP** — retain only digest/source/platform/provenance checks not supplied by the native outputs. |
@@ -289,6 +289,10 @@ selective updates preserve its one-poller invariant.
 | Standalone release readiness report | Retired `scripts/release-readiness.mjs` (71 LOC at baseline) | Native GitHub Deployment plus Runtime Verify | **DELETED** — no active workflow/package caller; historical audit remains in the archive. |
 | Dormant unified release v1 contract | `scripts/unified_release_v1/` (286 Python LOC plus metadata) | Native V5 workflow and current component adapters | **DELETED** — repository-wide search found no active import, workflow, package or test caller; its README and project metadata point only to retired `gpoint-prepare.yml` / `gpoint-deploy.yml`. |
 | Legacy Eros Pilot Compose deploy adapter | `scripts/eros-pilot-deployment.mjs` and its standalone unit test (150 LOC implementation) | Native Kamal production controller and its exact-SHA Runtime Verify | **DELETED** — repository-wide source/workflow/package audit found no runtime caller; production Eros services deploy through Native Kamal. Production Compose configuration was left intact. |
+| GPoint scheduled backup, install and isolated restore | `gpoint-scheduled-backup.py`, `gpoint-backup-policy.py`, `verify-gpoint-scheduled-backup-restore.sh`, and install scripts (2,169 LOC in this candidate) | systemd timer, PostgreSQL tools, Bunny S3 and isolated restore | **KEEP, out of app-release scope** — these independently protect production data; no replacement or equivalent continuity proof exists, so they are not removed to meet the LOC target. |
+| Database migration and parity | `agata-production-migration.py`, `eros-native-database.py`, Prisma checksum/planning tools, and `verify-kamal-migration-parity.py` (2,071 LOC) | Prisma, SQLx, PostgreSQL and Alembic | **KEEP, reduce only with proof** — the stacks have distinct databases and compatibility/approval rules. The current audit did not establish safe removal of exact-set, checksum, backup, restore or recovery checks. |
+| Image, Kamal and proxy verification | `verify_native_*`, Kamal topology/role checks, `check-kamal-configs.sh`, and `kamal_proxy_routes.py` (574 LOC) | Buildx, GHCR, stock Kamal and Docker inspect | **KEEP, reduce** — custom checks bind immutable digest, source identity, SBOM/provenance, installed role topology and proxy routing where native tools do not provide the combined release contract. |
+| Local pre-push gate and Layer7 Ollama verifier | `classify-release-prepush.py` and `verify-layer7-ollama.py` (235 LOC) | Git and read-only service checks | **KEEP, outside Native Apply** — the former enforces repository release policy; the latter verifies an existing Layer7 service and is outside this task's permission to alter. |
 
 Measured against `3d680fa153fd6aebf786455d6f36d3b1a67cc78f` (current main at task
 start), using the Native workflow plus the unique `scripts/` files referenced
@@ -296,11 +300,11 @@ by it:
 
 | Measure | Main baseline | Current local candidate | Change |
 |---|---:|---:|---:|
-| Main controller + five control adapters (six paths) | 4,562 | 3,920 | −14.1% |
-| Workflow LOC | 2,437 | 2,397 | −1.6% |
-| Referenced helper LOC | 5,439 | 4,578 | −15.8% |
-| Combined workflow + referenced scripts LOC | 7,876 | 6,975 | −11.4% |
-| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,100 | −27.1% |
+| Main controller + five control adapters (six paths) | 4,562 | 3,897 | −14.6% |
+| Workflow LOC | 2,437 | 2,399 | −1.6% |
+| Referenced helper LOC | 5,439 | 4,562 | −16.1% |
+| Combined workflow + referenced scripts LOC | 7,876 | 6,961 | −11.6% |
+| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,086 | −27.2% |
 | Referenced helper files | 21 | 19 | −2 |
 | Required test matrix runs | 4 | 2 | −50% |
 | Ordinary workflow named jobs | 3 | 3 | unchanged |
@@ -337,15 +341,14 @@ infrastructure changes still require the protected dispatch route. Unmapped
 deletions continue to fail closed. Same-repository PR Build jobs request `packages: write` and can publish
 candidate images to GHCR; fork PRs do not run that job. This permission does
 not grant production Deploy access. The deleted
-staging workflow/action and obsolete prepared-run adapters account for most of
-the extended-inventory reduction. The six-path measure is down 14.1%, the
-workflow-plus-helper measure is down 11.4%, and the extended inventory is down
-27.1%; the mandatory 50% target remains unmet. The ordinary-only Kamal manifest also
+staging workflow/action and obsolete prepared-run adapters account for much of
+the extended-inventory reduction. The six-path measure is down 14.6%, the
+workflow-plus-helper measure is down 11.6%, and the extended inventory is down
+27.2%; the mandatory 50% targets remain unmet. The ordinary-only Kamal manifest also
 removed an obsolete cutover branch and its tests. Active migration, backup,
 recovery, digest and runtime identity checks remain. No staging evidence is
-applicable. Exact-SHA hosted Tests, Eros/Mini App E2E, all-four-image Buildx and
-GHCR digest read-back passed for SHA `ab78ffb`; later PR candidates are checked
-separately. Production
+applicable. Exact-SHA hosted Tests, isolated PostgreSQL, Eros/Mini App E2E,
+Buildx and GHCR digest read-back passed for SHA `c514991`; production
 Deploy, Runtime Verify and smoke remain unrun pending separate OWNER approval
 for an exact SHA. Further reduction must preserve the current protected paths;
 no safe retirement of the remaining active helpers is established by this
@@ -353,12 +356,12 @@ audit.
 
 ### ME-62 acceptance scenario matrix
 
-Exact candidate `d1a10c9edc502148a9b98c91971569d078ecad1d`, base
-`3d680fa153fd6aebf786455d6f36d3b1a67cc78f`. Local focused tests passed, and
-exact-head hosted run [44707245719](https://github.com/akhripunov/gpoint/actions/runs/44707245719)
-passed Python, Workspace, isolated PostgreSQL, Eros and Mini App E2E, all four
-Buildx image builds, immutable identity validation and GHCR read-back. The PR
-event correctly skipped production Deploy/Verify. `PASS` below means the stated
+Exact candidate `c514991c84ce60f48b92b82f5b7380fc0b8901c0`, base
+`3d680fa153fd6aebf786455d6f36d3b1a67cc78f`. The exact-head hosted run
+[44711957261](https://github.com/akhripunov/gpoint/actions/runs/44711957261)
+passed Python, Workspace, isolated PostgreSQL, Eros and Mini App E2E, Buildx
+image publication and GHCR digest read-back. The PR event correctly skipped
+production Deploy/Verify. `PASS` below means the stated
 local/hosted test evidence passed; it does not imply production execution.
 
 | # | Input | Expected → actual | Result and evidence |
@@ -367,7 +370,7 @@ local/hosted test evidence passed; it does not imply production execution.
 | 02 | Core-only diff | Core only → Core selected | PASS — `test_build_plan_uses_per_component_sources_and_builds_core_for_prisma_migrations` |
 | 03 | Mini App-only diff | Mini App only → Mini App selected | PASS — `test_component_scope_regressions_keep_eros_independent` and path planner tests |
 | 04 | AGATA-only diff | AGATA only → AGATA selected | PASS — `test_shared_dependency_and_agata_migration_paths_select_their_real_images` |
-| 05 | Eros Engine-only diff | Engine plus required Eros E2E → selected; exact Eros E2E passed | PASS — `test_cumulative_engine_scope_runs_e2e_and_build_requires_exact_pass`; run 44707245719 |
+| 05 | Eros Engine-only diff | Engine plus required Eros E2E → selected; exact Eros E2E passed | PASS — `test_cumulative_engine_scope_runs_e2e_and_build_requires_exact_pass`; run 44711957261 |
 | 06 | Eros Relay-only diff | Relay only; no Core deploy/Engine E2E → separate relay scope | PASS — `test_eros_relay_source_updates_only_relay_with_shared_runtime_image` |
 | 07 | Core and installed Relay share image | One runtime image, independent deploy scope → shared image selected once | PASS — `test_shared_runtime_dockerfile_builds_core_once_for_core_and_installed_relay` |
 | 08 | Shared dependency diff | Every dependent image → dependency planner selects affected images | PASS — `test_shared_dependency_and_agata_migration_paths_select_their_real_images` |
@@ -379,22 +382,22 @@ local/hosted test evidence passed; it does not imply production execution.
 | 14 | Partial component release | Determine actual state and fail closed → per-role runtime identity checks block inconsistency | PASS — `test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails_closed`; production recovery itself NOT VERIFIED |
 | 15 | Infra commit A followed by API commit B | Ordinary push cannot bypass protected infrastructure scope → cumulative infra test blocks | PASS — `test_api_commit_cannot_bypass_approval_for_accumulated_infrastructure` |
 | 16 | Migration-free release | No unnecessary migration/backup gates → pending-migration plan is empty | PASS — migration plan tests and exact candidate CI; production apply NOT VERIFIED |
-| 17 | Safe migration | Apply only exact approved plan → isolated PostgreSQL migration/integration passes | PASS — exact run 44707245719; no production migration performed |
+| 17 | Safe migration | Apply only exact approved plan → isolated PostgreSQL migration/integration passes | PASS — exact run 44711957261; no production migration performed |
 | 18 | Dangerous/unapproved migration | Protected approval required → classifier rejects unsafe migration scope | PASS — `test_agata_migration_and_unknown_schema_paths_remain_blocked_from_prisma_apply` |
 | 19 | Migration failure | Stop Apply; never auto-downgrade DB → failure path blocks, no rollback migration | PASS — migration and deploy boundary tests; production DB unchanged |
-| 20 | Eros Engine change | Run relevant SQLx/E2E → exact hosted Eros E2E passed | PASS — run 44707245719 |
+| 20 | Eros Engine change | Run relevant SQLx/E2E → exact hosted Eros E2E passed | PASS — run 44711957261 |
 | 21 | Ordinary infrastructure-only PR | Skip irrelevant Eros E2E and images → path-selection tests show no app scope | PASS — `test_known_release_infrastructure_candidate_has_no_application_component_scope`; full-build label on this acceptance PR intentionally overrides selective Build |
 | 22 | Concurrent production runs | Serialize without cancelling baseline/Apply → shared non-cancelling lock asserted | PASS — `test_production_mutations_share_one_non_cancelling_lock` |
 | 23 | Image build failure | Deploy forbidden → Deploy requires successful Build | PASS — `test_main_push_runs_exact_candidate_tests_build_kamal_and_verify` and routing matrix |
-| 24 | GHCR publication/read-back failure | Deploy forbidden → PR exact Build and digest read-back passed | PASS — actual GHCR Build/read-back in run 44707245719; failure gate covered by boundary tests |
-| 25 | Wrong digest or provenance | Deploy forbidden → immutable identity/provenance validators reject mismatch | PASS — image validation suite and exact Build read-back in run 44707245719 |
+| 24 | GHCR publication/read-back failure | Deploy forbidden → PR exact Build and digest read-back passed | PASS — actual GHCR Build/read-back in run 44711957261; failure gate covered by boundary tests |
+| 25 | Wrong digest or provenance | Deploy forbidden → immutable identity/provenance validators reject mismatch | PASS — image validation suite and exact Build read-back in run 44711957261 |
 | 26 | Wrong production topology | Deploy forbidden → topology preflight rejects non-Kamal/Compose state | PASS — `test_ordinary_release_rejects_compose_topology_before_deploy`; live production topology NOT VERIFIED |
 | 27 | Incompatible rollback target | Reject target → exact previous deployment evidence is required | PASS — rollback evidence suite; no production rollback performed |
 | 28 | Compatible production rollback | Kamal rollback plus smoke → not executed | NOT VERIFIED — requires separate OWNER authorization for exact SHA |
 | 29 | Single Telegram Bot polling role | One active role → config/verification enforces one running Bot | PASS — `test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails_closed`; live process count NOT VERIFIED |
-| 30 | Production secrets on PR | No production secrets in PR job → Tests job has read-only token permissions; Build uses GHCR write only | PASS — workflow permission tests and run 44707245719; no production secret exposure |
+| 30 | Production secrets on PR | No production secrets in PR job → Tests job has read-only token permissions; Build uses GHCR write only | PASS — workflow permission tests and run 44711957261; no production secret exposure |
 | 31 | Fork PR | No GHCR publish or production Deploy → Build condition excludes fork | PASS — `test_pr_candidate_runs_build_without_production_deploy`; no fork run was created |
-| 32 | Same-repository PR | Test Build allowed; Deploy forbidden → Build/GHCR read-back passed, Deploy skipped | PASS — run 44707245719 |
+| 32 | Same-repository PR | Test Build allowed; Deploy forbidden → Build/GHCR read-back passed, Deploy skipped | PASS — run 44711957261 |
 | 33 | Protected infrastructure dispatch | OWNER/ref/exact SHA and Environment protection required → classifier and workflow gates assert these conditions | PASS — Native intent and boundary tests; live GitHub protection settings NOT VERIFIED |
 | 34 | Current Layer7 | Production target only, never staging → workflow has only `production` Environment | PASS — `test_layer7_is_production_and_retired_staging_paths_cannot_deploy`; live VPS identity NOT re-read in this task |
 | 35 | Retired staging paths | No active calls → workflow/configs absent; remaining path strings are fail-closed compatibility tests/classifiers only | PASS — `test_layer7_is_not_configured_as_a_staging_release_target` and repository source audit |
