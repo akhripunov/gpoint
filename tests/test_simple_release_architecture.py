@@ -28,6 +28,9 @@ def test_pr_candidate_runs_build_without_production_deploy():
     deploy = workflow["jobs"]["deploy"]
 
     assert "github.event_name == 'pull_request'" in build["if"]
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in build["if"]
+    assert "github.event.pull_request.author_association" in build["if"]
+    assert 'fromJSON(\'["OWNER","MEMBER","COLLABORATOR"]\')' in build["if"]
     assert build["permissions"]["packages"] == "write"
     build_scope = next(step for step in build["steps"] if step.get("id") == "build_scope")
     assert build_scope["env"]["FULL_BUILD_VALIDATION"] == "${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'me-62-full-build') }}"

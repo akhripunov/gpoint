@@ -15,11 +15,13 @@
 > digest текущего run через stock Kamal 2, а GitHub Deployment становится
 > успешным только после Runtime Verify и smoke.
 >
-> Same-repository PR может собрать только выбранные компоненты и проверить
-> GHCR readback без production secrets и без доступа к Deploy. Полная
-> четырёхобразная проверка PR запускается только для явно отмеченного
-> `me-62-full-build` acceptance PR. Fork PR остаётся test-only. Documentation-only
-> изменения пропускают image Build. Неизвестный baseline или scope блокирует Apply.
+> Same-repository PR от `OWNER`, `MEMBER` или `COLLABORATOR` может собрать
+> только выбранные компоненты и проверить GHCR readback без production secrets
+> и без доступа к Deploy. Полная четырёхобразная проверка PR запускается
+> только для явно отмеченного
+> `me-62-full-build` acceptance PR. Fork PR не получает GHCR publication.
+> Documentation-only изменения пропускают image Build. Неизвестный baseline
+> или scope блокирует Apply.
 
 ### Резервное копирование (не является релизным job)
 

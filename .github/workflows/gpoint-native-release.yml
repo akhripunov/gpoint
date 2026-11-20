@@ -456,7 +456,8 @@ jobs:
     if: >-
       !cancelled() && needs.tests.result == 'success' &&
       ((github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository) ||
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)) ||
        (github.event_name != 'pull_request' && needs.tests.outputs.mode == 'DEPLOY'))
     runs-on: ubuntu-latest
     timeout-minutes: 45

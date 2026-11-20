@@ -317,7 +317,7 @@ PRODUCTION_KAMAL_CONFIGS = frozenset({
 
 
 def is_infrastructure_change(changed_paths: set[str] | frozenset[str]) -> bool:
-    return any(path in PRODUCTION_KAMAL_CONFIGS
+    return any(path in PRODUCTION_KAMAL_CONFIGS | {".dockerignore"}
                or any(path.startswith(prefix) for prefix in INFRASTRUCTURE_PREFIXES)
                for path in changed_paths)
 
@@ -347,6 +347,8 @@ def _path_kind(path: str) -> str:
         return "schema"
     if any(part in TEST_DIRECTORY_NAMES for part in parts):
         return "test"
+    if normalized == ".dockerignore":
+        return "ops"
     if normalized.startswith("packages/gpoint-codex-mcp/"):
         return "ops"
     if normalized in APP_ROOT_FILES:
@@ -506,6 +508,8 @@ def _component_paths(path: str) -> set[str]:
         return {"EROS"}
     if path in {"infra/production/Gpoint.Dockerfile", "infra/production/nginx-miniapp.conf"}:
         return {"CORE", "MINIAPP"} if path.endswith("Gpoint.Dockerfile") else {"MINIAPP"}
+    if path == ".dockerignore":
+        return {"CORE", "MINIAPP"}
     if path in APP_ROOT_FILES or path in {"pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json"}:
         return {"CORE", "MINIAPP"}
     if path.startswith("apps/"):

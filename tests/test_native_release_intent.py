@@ -808,6 +808,16 @@ def test_known_release_infrastructure_candidate_has_no_application_component_sco
     }
 
 
+def test_dockerignore_change_selects_build_images_and_requires_protected_dispatch():
+    assert MODULE._path_kind(".dockerignore") == "ops"
+    assert MODULE._component_paths(".dockerignore") == {"CORE", "MINIAPP"}
+    paths = {".dockerignore"}
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths=paths,
+    ) == "DEPLOY"
+    assert not MODULE.push_deploy_authorized(mode="DEPLOY", changed_paths=paths)
+
+
 @pytest.mark.parametrize("marker", [
     "GPOINT-ARTIFACT-PREPARE", "GPOINT-LAYER7-API", "GPOINT-LAYER7-EROS",
 ])
