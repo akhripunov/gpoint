@@ -349,29 +349,18 @@ def test_non_main_and_non_push_events_cannot_deploy():
     ) == "NO_DEPLOY"
 
 
-def test_rehearsal_dispatch_is_main_exact_sha_owner_and_never_deploys():
-    assert MODULE.classify_dispatch(
-        ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
-        actor="akhripunov", repository_owner="akhripunov",
-        migration_rehearsal=True, approve_production=False,
-    ) == ("REHEARSAL", False)
-
-
-def test_invalid_rehearsal_dispatch_fails_closed():
-    invalid = (
-        {"ref": "refs/heads/feature", "candidate_sha": "a" * 40, "github_sha": "a" * 40,
-         "actor": "akhripunov", "repository_owner": "akhripunov"},
-        {"ref": "refs/heads/main", "candidate_sha": "b" * 40, "github_sha": "a" * 40,
-         "actor": "akhripunov", "repository_owner": "akhripunov"},
-        {"ref": "refs/heads/main", "candidate_sha": "a" * 40, "github_sha": "a" * 40,
-         "actor": "other", "repository_owner": "akhripunov"},
-        {"ref": "refs/heads/main", "candidate_sha": "a" * 40, "github_sha": "a" * 40,
-         "actor": "akhripunov", "repository_owner": "akhripunov", "approve_production": True},
+def test_native_release_cli_does_not_accept_the_retired_migration_rehearsal_mode():
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/native_release_intent.py"),
+         "--event", "workflow_dispatch", "--ref", "refs/heads/main",
+         "--sha", "a" * 40, "--candidate-sha", "a" * 40,
+         "--actor", "akhripuniov", "--triggering-actor", "akhripuniov",
+         "--repository-owner", "akhripuniov", "--migration-rehearsal"],
+        capture_output=True, text=True,
     )
-    for event in invalid:
-        event.setdefault("migration_rehearsal", True)
-        event.setdefault("approve_production", False)
-        assert MODULE.classify_dispatch(**event) == ("INVALID_REHEARSAL", False)
+
+    assert result.returncode != 0
+    assert "unrecognized arguments" in result.stderr
 
 
 def test_ordinary_main_push_and_exact_sha_dispatch_remain_enabled():
@@ -381,7 +370,7 @@ def test_ordinary_main_push_and_exact_sha_dispatch_remain_enabled():
     assert MODULE.classify_dispatch(
         ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
         actor="akhripunov", repository_owner="akhripunov",
-        migration_rehearsal=False, approve_production=True,
+        approve_production=True,
     ) == ("DEPLOY", True)
 
 
@@ -390,20 +379,20 @@ def test_manual_production_dispatch_requires_exact_owner_approval_before_build()
         assert MODULE.classify_dispatch(
             ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
             actor=actor, repository_owner="akhripunov",
-            migration_rehearsal=False, approve_production=approved,
+            approve_production=approved,
         ) == ("INVALID_DEPLOY", False)
 
 
 def test_eros_image_rollback_is_opt_in_only_with_the_protected_rollback_operation():
     valid = MODULE.classify_dispatch(
         ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
-        actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
+        actor="akhripunov", repository_owner="akhripunov",
         approve_production=True, rollback=True, rollback_eros=True,
     )
     assert valid == ("ROLLBACK", True)
     invalid = MODULE.classify_dispatch(
         ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
-        actor="akhripunov", repository_owner="akhripunov", migration_rehearsal=False,
+        actor="akhripunov", repository_owner="akhripunov",
         approve_production=True, rollback=False, rollback_eros=True,
     )
     assert invalid == ("INVALID_ROLLBACK", False)
@@ -1036,7 +1025,6 @@ def test_rollback_dispatch_requires_main_exact_owner_explicit_approval_and_no_ot
     args = dict(
         ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
         actor="akhripunov", repository_owner="akhripunov",
-        migration_rehearsal=False,
         rollback=True, approve_production=True,
     )
     assert MODULE.classify_dispatch(**args) == ("ROLLBACK", True)
@@ -1045,7 +1033,6 @@ def test_rollback_dispatch_requires_main_exact_owner_explicit_approval_and_no_ot
         {"candidate_sha": "b" * 40},
         {"actor": "other"},
         {"approve_production": False},
-        {"migration_rehearsal": True},
     ):
         invalid = dict(args)
         invalid.update(changes)

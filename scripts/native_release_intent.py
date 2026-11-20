@@ -201,26 +201,19 @@ def classify_push(*, event_name: str, ref: str,
 
 
 def classify_dispatch(*, ref: str, candidate_sha: str, github_sha: str, actor: str,
-                      repository_owner: str, migration_rehearsal: bool,
-                      approve_production: bool,
+                      repository_owner: str, approve_production: bool,
                       rollback: bool = False,
                       rollback_eros: bool = False) -> tuple[str, bool]:
     if rollback_eros and not rollback:
         return "INVALID_ROLLBACK", False
     exact = bool(re.fullmatch(r"[0-9a-f]{40}", candidate_sha)) and candidate_sha == github_sha
     owner = bool(repository_owner) and actor.lower() == repository_owner.lower()
-    if rollback and migration_rehearsal:
-        return "INVALID_ROLLBACK", False
     if rollback:
         if ref == "refs/heads/main" and exact and owner and approve_production:
             # A rollback runs inside the protected Deploy job as a mode, so the
             # release pipeline must admit it exactly like a forward deploy.
             return "ROLLBACK", True
         return "INVALID_ROLLBACK", False
-    if migration_rehearsal:
-        if (ref == "refs/heads/main" and exact and owner and not approve_production):
-            return "REHEARSAL", False
-        return "INVALID_REHEARSAL", False
     if ref == "refs/heads/main" and exact and owner and approve_production:
         return "DEPLOY", True
     if ref == "refs/heads/main":
@@ -522,7 +515,6 @@ def main() -> int:
     parser.add_argument("--actor", default="")
     parser.add_argument("--triggering-actor", default="")
     parser.add_argument("--repository-owner", default="")
-    parser.add_argument("--migration-rehearsal", action="store_true")
     parser.add_argument("--rollback", action="store_true")
     parser.add_argument("--rollback-eros", action="store_true")
     parser.add_argument("--approve-production", action="store_true")
@@ -559,7 +551,6 @@ def main() -> int:
             mode, deploy = classify_dispatch(
                 ref=args.ref, candidate_sha=args.candidate_sha, github_sha=args.sha,
                 actor=args.actor, repository_owner=args.repository_owner,
-                migration_rehearsal=args.migration_rehearsal,
                 approve_production=args.approve_production,
                 rollback=args.rollback,
                 rollback_eros=args.rollback_eros,

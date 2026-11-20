@@ -278,7 +278,7 @@ selective updates preserve its one-poller invariant.
 | Function | Current code | Native mechanism | Decision |
 |---|---|---|---|
 | Component path filters | `dorny/paths-filter`; retired `native_change_surface.py` (131 LOC at baseline) | Git and the pinned `dorny/paths-filter` action | **REPLACE / DELETE** — declarative filters now supply the component paths. |
-| Event admission and exact-scope fail-closed rules | `scripts/native_release_intent.py` (583 LOC in this candidate) | GitHub event/dispatch context and workflow conditions | **KEEP, reduce** — policy checks still reject unauthorized events, unsafe paths and migration scope; further reduction remains required. |
+| Event admission and exact-scope fail-closed rules | `scripts/native_release_intent.py` (573 LOC in this candidate) | GitHub event/dispatch context and workflow conditions | **KEEP, reduce** — policy checks still reject unauthorized events, unsafe paths and migration scope; the retired migration-rehearsal dispatch mode was removed because the separate protected operation is owned by `gpoint-operations.yml`. Further reduction remains required. |
 | Deleted paths in cumulative component diffs | Retired exact-path deletion allowlist | Git diff status plus the existing component/non-runtime path map | **REPLACE** — deleted runtime paths select their owning component; deleted release scripts and known non-runtime paths do not select an image; unmapped deletions still block. |
 | Installed component source baselines | `scripts/resolve_native_build_scope.py` | GitHub Deployments API, stock Kamal app commands and Docker inspect | **KEEP, reduce** — this adapter resolves installed component identities and exact-SHA evidence used by Build and Deploy. |
 | Build and OCI provenance | Build steps plus `scripts/verify_native_image_readback.py`, `verify_native_image_attestation.py`, `verify_native_eros_image.py` | Docker Buildx, GHCR digest, SBOM and GitHub artifact provenance | **KEEP** — retain only digest/source/platform/provenance checks not supplied by the native outputs. |
@@ -295,11 +295,11 @@ by it:
 
 | Measure | Main baseline | Current local candidate | Change |
 |---|---:|---:|---:|
-| Main controller + five control adapters (six paths) | 4,562 | 3,921 | −14.0% |
+| Main controller + five control adapters (six paths) | 4,562 | 3,920 | −14.1% |
 | Workflow LOC | 2,437 | 2,397 | −1.6% |
-| Referenced helper LOC | 5,439 | 4,587 | −15.7% |
-| Combined workflow + referenced scripts LOC | 7,876 | 6,984 | −11.3% |
-| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,259 | −25.8% |
+| Referenced helper LOC | 5,439 | 4,578 | −15.8% |
+| Combined workflow + referenced scripts LOC | 7,876 | 6,975 | −11.4% |
+| Extended release/deploy/migration/backup inventory LOC | 12,486 | 9,250 | −25.9% |
 | Referenced helper files | 21 | 19 | −2 |
 | Required test matrix runs | 4 | 2 | −50% |
 | Ordinary workflow named jobs | 3 | 3 | unchanged |
@@ -337,9 +337,9 @@ deletions continue to fail closed. Same-repository PR Build jobs request `packag
 candidate images to GHCR; fork PRs do not run that job. This permission does
 not grant production Deploy access. The deleted
 staging workflow/action and obsolete prepared-run adapters account for most of
-the extended-inventory reduction. The six-path measure is down 14.0%, the
-workflow-plus-helper measure is down 11.3%, and the extended inventory is down
-25.8%; the mandatory 50% target remains unmet. The ordinary-only Kamal manifest also
+the extended-inventory reduction. The six-path measure is down 14.1%, the
+workflow-plus-helper measure is down 11.4%, and the extended inventory is down
+25.9%; the mandatory 50% target remains unmet. The ordinary-only Kamal manifest also
 removed an obsolete cutover branch and its tests. Active migration, backup,
 recovery, digest and runtime identity checks remain. No staging evidence is
 applicable. Exact-SHA hosted Tests, Eros/Mini App E2E, all-four-image Buildx and
