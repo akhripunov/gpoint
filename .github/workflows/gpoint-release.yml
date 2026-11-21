@@ -920,12 +920,10 @@ jobs:
         run: |
           set -euo pipefail
           outcome="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" --jq '
-            [.jobs[] | select(.name == "Tests (workspace)")][0] as $workspace |
-            if $workspace == null then "missing_workspace_job"
-            elif $workspace.conclusion != "success" then "workspace_" + ($workspace.conclusion // "incomplete")
+            .jobs[] | select(.name == "Tests (workspace)") |
+            if .conclusion != "success" then "workspace_" + (.conclusion // "incomplete")
             else
-              [$workspace.steps[] | select(.name == "Run stock Eros SQLx and synthetic conversation E2E")][0] as $e2e |
-              if $e2e == null then "missing_e2e_step" else ($e2e.conclusion // "incomplete") end
+              ([.steps[] | select(.name == "Run stock Eros SQLx and synthetic conversation E2E")][0].conclusion // "missing_e2e_step")
             end')"
           [[ "$outcome" =~ ^(success|skipped|failure|cancelled|missing_workspace_job|missing_e2e_step|workspace_[a-z]+|incomplete)$ ]]
           echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
