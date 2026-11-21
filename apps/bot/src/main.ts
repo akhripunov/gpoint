@@ -1,5 +1,6 @@
 import { Bot, InlineKeyboard } from 'grammy';
 import { forwardCodexStart } from './codex-start.js';
+import { startBotReadinessServer } from './bot-readiness.js';
 import { telegramInternalUrl } from './telegram-api-url.js';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -26,6 +27,8 @@ if (!token) {
   process.exitCode = 1;
 } else {
   const bot = new Bot(token);
+  let pollingStarted = false;
+  startBotReadinessServer(() => pollingStarted && bot.isRunning());
   const launchUrl = miniAppLaunchUrl(publicAppUrl);
   const openKeyboard = new InlineKeyboard().webApp('Open GPoint', launchUrl);
 
@@ -110,5 +113,8 @@ if (!token) {
     }).catch(() => undefined);
     console.info('[GPoint] my_chat_member forwarded', { updateId: ctx.update.update_id, apiStatus: response?.status ?? 'NETWORK_ERROR' });
   });
-  bot.start({ allowed_updates: ['message', 'channel_post', 'edited_channel_post', 'my_chat_member'] });
+  bot.start({
+    allowed_updates: ['message', 'channel_post', 'edited_channel_post', 'my_chat_member'],
+    onStart: () => { pollingStarted = true; },
+  });
 }

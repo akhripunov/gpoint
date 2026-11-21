@@ -1521,7 +1521,8 @@ jobs:
           fi
           curl --retry 12 --retry-connrefused --retry-delay 5 --fail --silent --show-error https://gpoint.one/api/health/live | grep -F '"status":"ok"' >/dev/null
           for path in / /creators; do
-            curl --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" | grep -F '<div id="root">' >/dev/null
+            curl --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" \
+              | grep -F '<title>GPoint</title>' >/dev/null
           done
           media_body="$RUNNER_TEMP/gpoint-media-route-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
           media_status="$(curl --retry 6 --retry-connrefused --retry-delay 2 --silent --show-error \
@@ -1649,7 +1650,8 @@ jobs:
           docker exec "gpoint-core-api-$core_version" node -e "fetch('http://127.0.0.1:3000/health/live').then(async r => { if (!r.ok || (await r.json()).status !== 'ok') process.exit(1) }).catch(() => process.exit(1))"
           docker top "gpoint-core-worker-$core_version" -eo pid,args | grep -F "apps/worker/dist/main.js"
           if grep -q '^gpoint-core-bot|' <<< "$runtime_rows"; then
-            docker top "gpoint-core-bot-$core_version" -eo pid,args | grep -F "apps/bot/dist/main.js"
+            docker exec "gpoint-core-bot-$core_version" node -e 'fetch("http://127.0.0.1:9091/health/ready").then(async r=>{const b=await r.json();if(!r.ok||b.status!=="ready")process.exit(1)}).catch(()=>process.exit(1))'
+            echo GPOINT_BOT_READY=PASS
           fi
           docker exec "gpoint-miniapp-web-$miniapp_version" wget --spider --quiet http://127.0.0.1/
           if grep -q '^gpoint-eros-pilot-engine|' <<< "$runtime_rows"; then
@@ -2164,7 +2166,10 @@ jobs:
         run: |
           set -euo pipefail
           curl --retry 8 --retry-connrefused --retry-delay 3 --fail --silent --show-error https://gpoint.one/api/health/live | grep -F '"status":"ok"' >/dev/null
-          for path in / /creators; do curl --retry 5 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" | grep -F '<div id="root">' >/dev/null; done
+          for path in / /creators; do
+            curl --retry 5 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" \
+              | grep -F '<title>GPoint</title>' >/dev/null
+          done
           media_body="$RUNNER_TEMP/gpoint-rollback/media-route.json"
           media_status="$(curl --retry 5 --retry-connrefused --retry-delay 2 --silent --show-error --output "$media_body" --write-out '%{http_code}' https://gpoint.one/media/assets/kamal-route-verification-missing)"
           test "$media_status" = 404 && grep -Fq '"message":"media not found"' "$media_body"
@@ -2202,7 +2207,7 @@ jobs:
           docker top "gpoint-core-worker-$core_version" -eo pid,args | grep -F "apps/worker/dist/main.js"
           if [[ "$bot_enabled" == true ]]; then
             test "$(docker exec "gpoint-core-bot-$core_version" node -p 'process.env.RELEASE_SHA || ""')" = "$core_sha"
-            docker top "gpoint-core-bot-$core_version" -eo pid,args | grep -F "apps/bot/dist/main.js"
+            docker exec "gpoint-core-bot-$core_version" node -e 'fetch("http://127.0.0.1:9091/health/ready").then(async r=>{const b=await r.json();if(!r.ok||b.status!=="ready")process.exit(1)}).catch(()=>process.exit(1))'
           fi
           docker exec "gpoint-miniapp-web-$miniapp_version" wget --spider --quiet http://127.0.0.1/
           docker exec "gpoint-core-api-$core_version" node -e 'const fs=require("node:fs");const p="/data/media/.gpoint-rollback-"+require("node:crypto").randomUUID();let created=false;try{fs.writeFileSync(p,"ok",{flag:"wx"});created=true;if(fs.readFileSync(p,"utf8")!=="ok")process.exit(1)}finally{if(created)fs.unlinkSync(p)}'

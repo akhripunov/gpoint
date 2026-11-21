@@ -258,9 +258,27 @@ def test_runtime_verify_rechecks_public_routes_and_five_target_roles_after_deplo
         "verify-layer7-ollama.py",
     ):
         assert expected in verify
+    assert "'<title>GPoint</title>'" in verify
+    assert 'docker exec "gpoint-core-bot-$core_version" node -e' in verify
+    assert "http://127.0.0.1:9091/health/ready" in verify
+    assert "GPOINT_BOT_READY=PASS" in verify
+    assert "if grep -q '^gpoint-core-bot|' <<< \"$runtime_rows\"; then" in verify
+    assert "apps/bot/dist/main.js" not in verify
     helper = (ROOT / "scripts/verify-layer7-ollama.py").read_text(encoding="utf-8")
     assert 'BASE_URL = "http://ollama:11434"' in helper
     assert 'const base = "http://ollama:11434"' in helper
+
+
+def test_runtime_smokes_validate_the_public_miniapp_on_ordinary_and_rollback_paths():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    verify = next(step["run"] for step in workflow["jobs"]["deploy"]["steps"]
+                  if step.get("name") == "Verify public routes and exact running services")
+    rollback = next(step["run"] for step in workflow["jobs"]["deploy"]["steps"]
+                    if step.get("name") == "Verify rollback Runtime and preserve databases before SUCCESS")
+    for script in (verify, rollback):
+        assert 'for path in / /creators; do' in script
+        assert 'curl --retry' in script and '--fail --silent --show-error "https://gpoint.one$path"' in script
+        assert "<title>GPoint</title>" in script
 
 
 def test_verify_only_component_scope_runs_runtime_verification_without_kamal_replacements():

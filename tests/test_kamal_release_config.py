@@ -1138,12 +1138,11 @@ def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
 def test_consumer_process_checks_do_not_require_ps_inside_slim_images():
     workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-release.yml').read_text())
     deploy = "\n".join(step.get("run", "") for step in workflow["jobs"]["deploy"]["steps"])
-    rollback_workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
-    rollback = "\n".join(step.get("run", "") for step in rollback_workflow["jobs"]["deploy"]["steps"])
-    for role in ['worker', 'bot']:
-        assertion = f'docker top "gpoint-core-{role}-$core_version" -eo pid,args | grep -F "apps/{role}/dist/main.js"'
-        # The job now carries the ordinary and the rollback branch: one each.
-        assert deploy.count(assertion) == 2
+    worker_assertion = 'docker top "gpoint-core-worker-$core_version" -eo pid,args | grep -F "apps/worker/dist/main.js"'
+    assert deploy.count(worker_assertion) == 2
+    bot_readiness = 'docker exec "gpoint-core-bot-$core_version" node -e \'fetch("http://127.0.0.1:9091/health/ready")'
+    assert deploy.count(bot_readiness) == 2
+    assert 'docker top "gpoint-core-bot-$core_version"' not in deploy
     assert "sh -ec 'ps aux" not in workflow
 
 
