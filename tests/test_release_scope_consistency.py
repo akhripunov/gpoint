@@ -55,40 +55,14 @@ def test_unknown_roots_stay_fail_closed():
     assert intent._known_non_runtime_path("somewhere/else.txt") is False
 
 
-def test_accumulated_candidate_always_requires_candidate_images():
-    """Regression for run 43148553035.
-
-    Production (7d7d614b) is behind `main` by application code. A build plan that
-    reports "no images" can never satisfy Deploy's fresh live scope, so Build must
-    derive its plan from the production -> candidate diff and never from the push
-    diff. Any runtime change on that accumulated diff must select its component.
-    """
-    try:
-        subprocess.check_output(
-            ["git", "-C", str(ROOT), "cat-file", "-e", f"{PRODUCTION_BASELINE}^{{commit}}"],
-            stderr=subprocess.DEVNULL)
-    except subprocess.CalledProcessError:
-        pytest.skip("production baseline is not in this checkout")
-    head = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
-    baseline_sources = dict.fromkeys(intent.COMPONENT_ROLES, PRODUCTION_BASELINE)
-
-    plan = intent.classify_component_build_plan(ROOT, head, baseline_sources)
-
-    assert plan["build_components"], (
-        "production is behind the candidate by runtime code; an empty build plan "
-        "would fail Deploy with a missing prebuilt candidate image")
-    assert "CORE" in plan["build_components"]
-    assert plan["deploy_scope"] != "NONE"
-
-
 def _git(repo, *args):
     return subprocess.check_output(
         ["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid", *args],
         cwd=repo, text=True).strip()
 
 
-def _scope_repo(tmp_path):
+def _scope_repo(tmp_path, changed_paths=("apps/api/src/main.ts", "apps/miniapp/src/main.tsx",
+                                         "services/agata/app.py", "services/eros-engine/app.py")):
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q")
@@ -97,8 +71,7 @@ def _scope_repo(tmp_path):
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "baseline")
     baseline = _git(repo, "rev-parse", "HEAD")
-    for path in ("apps/api/src/main.ts", "apps/miniapp/src/main.tsx",
-                 "services/agata/app.py", "services/eros-engine/app.py"):
+    for path in changed_paths:
         target = repo / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("changed\n")
@@ -127,31 +100,30 @@ def _scope_repo(tmp_path):
     return repo, baseline, candidate, inventory
 
 
-def test_build_plan_and_live_scope_agree_on_the_same_production_baseline(tmp_path):
-    """The regression behind run 43148553035: Build and Deploy must agree.
+def test_accumulated_miniapp_change_selects_only_miniapp_deploy(tmp_path):
+    repo, baseline, candidate, inventory = _scope_repo(
+        tmp_path, changed_paths=("apps/miniapp/src/main.tsx",))
 
-    Build derives its plan from the production component baseline, Deploy from
-    the fresh live inventory. For the same sources both must select the same
-    components, and every component Deploy will update must already be built.
-    """
-    repo, baseline, candidate, inventory = _scope_repo(tmp_path)
-    sources = dict.fromkeys(intent.COMPONENT_ROLES, baseline)
-
-    plan = intent.classify_component_build_plan(repo, candidate, sources)
     scope = intent.classify_component_scope(repo, candidate, inventory)
 
-    assert scope["scope"] == plan["deploy_scope"]
-    live_components = set(scope["scope"].split("+")) - {"NONE"}
-    assert {intent.COMPONENT_IMAGES[component] for component in live_components} <= set(plan["build_components"]), (
-        "Deploy would require an image Build never produced")
+    assert scope["scope"] == "MINIAPP"
 
 
-def test_bootstrap_plan_covers_any_live_scope(tmp_path):
-    repo, baseline, candidate, inventory = _scope_repo(tmp_path)
-    sources = dict.fromkeys(intent.COMPONENT_ROLES, baseline)
+def test_shared_dependency_selects_each_owning_component(tmp_path):
+    repo, _baseline, candidate, inventory = _scope_repo(
+        tmp_path, changed_paths=("packages/contracts/src/index.ts",))
+
     scope = intent.classify_component_scope(repo, candidate, inventory)
-    live_components = set(scope["scope"].split("+")) - {"NONE"}
 
-    bootstrap = set(intent.classify_component_build_plan(repo, candidate, sources)["build_components"])
-    # A bootstrap build is the whole image set, so any live scope is covered.
-    assert {intent.COMPONENT_IMAGES[component] for component in live_components} <= bootstrap
+    assert scope["scope"] == "CORE+MINIAPP"
+
+
+def test_missing_live_component_is_forced_into_deploy_scope(tmp_path):
+    repo, _baseline, candidate, inventory = _scope_repo(
+        tmp_path, changed_paths=("README.md",))
+    inventory["roles"].pop("gpoint-eros-pilot-engine")
+
+    scope = intent.classify_component_scope(repo, candidate, inventory)
+
+    assert scope["scope"] == "EROS"
+    assert scope["reason"] == "missing_runtime_roles"

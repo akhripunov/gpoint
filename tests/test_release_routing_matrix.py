@@ -30,7 +30,6 @@ REPLACEMENTS = (
     (r"needs\.build\.result", "build_result"),
     (r"needs\.tests\.outputs\.mode", "tests_mode"),
     (r"needs\.tests\.outputs\.deploy", "tests_deploy"),
-    (r"needs\.build\.outputs\.deploy_scope", "deploy_scope"),
     (r"inputs\.mode", "inputs_mode"),
     (r"steps\.[A-Za-z0-9_]+\.outputs\.[A-Za-z0-9_]+ == '[^']*'", "True"),
     (r"steps\.[A-Za-z0-9_]+\.outcome == 'failure'", "False"),
@@ -43,7 +42,7 @@ REPLACEMENTS = (
 def evaluate(expression: str, **values) -> bool:
     defaults = {
         "tests_mode": "DEPLOY", "tests_deploy": "true", "tests_result": "success",
-        "build_result": "success", "deploy_scope": "CORE", "event": "push",
+        "build_result": "success", "event": "push",
         "ref": "refs/heads/main", "actor": "akhripunov", "owner": "akhripunov",
         "inputs_mode": "deploy",
     }
@@ -58,20 +57,18 @@ def evaluate(expression: str, **values) -> bool:
 
 
 def should_deploy(*, event, ref, actor, owner, mode, tests_result, build_result,
-                  tests_mode, deploy_scope, tests_deploy) -> bool:
+                  tests_mode, tests_deploy) -> bool:
     """Independent reading of the release rules, used to check the workflow."""
     if tests_result != "success" or tests_deploy != "true":
         return False
     if event == "push":
-        return (ref == "refs/heads/main" and build_result == "success"
-                and deploy_scope != "NONE")
+        return ref == "refs/heads/main" and build_result == "success"
     if event != "workflow_dispatch":
         return False
     if ref != "refs/heads/main" or actor != owner:
         return False
     if mode == "deploy":
-        return (tests_mode == "DEPLOY" and build_result == "success"
-                and deploy_scope != "NONE")
+        return tests_mode == "DEPLOY" and build_result == "success"
     if mode == "rollback":
         return tests_mode == "ROLLBACK" and build_result in {"success", "skipped"}
     return False
@@ -85,30 +82,34 @@ CASES = list(itertools.product(
     ("success", "failure", "cancelled", "skipped"),
     ("success", "failure", "skipped", "cancelled"),
     ("DEPLOY", "ROLLBACK", "BLOCK"),
-    ("NONE", "CORE+MINIAPP"),
     ("true", "false"),
 ))
 
 
 @pytest.mark.parametrize("event,ref,owner_actor,mode,tests_result,build_result,"
-                         "tests_mode,deploy_scope,tests_deploy", CASES)
+                         "tests_mode,tests_deploy", CASES)
 def test_deploy_admission_matches_the_release_rules(event, ref, owner_actor, mode,
                                                     tests_result, build_result,
-                                                    tests_mode, deploy_scope, tests_deploy):
+                                                    tests_mode, tests_deploy):
     actual = evaluate(
         DEPLOY["if"], event=event, ref=ref, actor="akhripunov" if owner_actor else "collaborator",
         owner="akhripunov", inputs_mode=mode, tests_result=tests_result,
-        build_result=build_result, tests_mode=tests_mode, tests_deploy=tests_deploy,
-        deploy_scope=deploy_scope)
+        build_result=build_result, tests_mode=tests_mode, tests_deploy=tests_deploy)
     expected = should_deploy(
         event=event, ref=ref, actor="akhripunov" if owner_actor else "collaborator",
         owner="akhripunov", mode=mode, tests_result=tests_result,
-        build_result=build_result, tests_mode=tests_mode, deploy_scope=deploy_scope,
-        tests_deploy=tests_deploy)
+        build_result=build_result, tests_mode=tests_mode, tests_deploy=tests_deploy)
     assert actual is expected, (
         f"deploy admission differs for event={event} ref={ref} owner={owner_actor} "
         f"mode={mode} tests={tests_result} build={build_result} "
-        f"tests_mode={tests_mode} scope={deploy_scope}")
+        f"tests_mode={tests_mode}")
+
+
+def test_noop_product_release_still_enters_runtime_verification():
+    condition = DEPLOY["if"]
+    assert "needs.build.outputs.deploy_scope" not in condition
+    assert "needs.build.result == 'success'" in condition
+    assert "needs.tests.outputs.deploy == 'true'" in condition
 
 
 def test_rollback_skips_build_but_still_reaches_deploy():

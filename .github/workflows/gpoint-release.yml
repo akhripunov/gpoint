@@ -1,4 +1,4 @@
-name: GPoint Native Release
+name: GPoint Release Pipeline
 
 on:
   push:
@@ -414,8 +414,6 @@ jobs:
       miniapp_digest: ${{ steps.miniapp.outputs.digest }}
       eros_digest: ${{ steps.eros.outputs.digest }}
       image_version: ${{ steps.image_version.outputs.image_version }}
-      build_components: ${{ steps.build_scope.outputs.build_components }}
-      deploy_scope: ${{ steps.build_scope.outputs.deploy_scope }}
       app_image_bytes: ${{ steps.image_readback.outputs.app_image_bytes }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -429,18 +427,6 @@ jobs:
           upstream="$(cat services/eros-engine/upstream.sha)"
           [[ "$upstream" =~ ^[0-9a-f]{40}$ ]]
           echo "EROS_UPSTREAM_SHA=$upstream" >> "$GITHUB_ENV"
-      - name: Select exact component build scope
-        id: build_scope
-        run: |
-          set -euo pipefail
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          # Build every independently versioned image. Production Deploy will
-          # select only components that differ from the verified live roles.
-          components = ["CORE", "MINIAPP", "EROS"]
-          print("build_components=" + json.dumps(components, separators=(",", ":")))
-          print("deploy_scope=LIVE")
-          PY
       - name: Select exact immutable image version
         id: image_version
         env:
@@ -455,20 +441,16 @@ jobs:
           image_version="${CANDIDATE_SHA}-${CURRENT_RUN_ID}-${CURRENT_RUN_ATTEMPT}"
           printf 'image_version=%s\n' "$image_version" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-        if: steps.build_scope.outputs.build_components != '[]'
         with:
           platforms: linux/amd64
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
-        if: steps.build_scope.outputs.build_components != '[]'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Create dependency-manifest build context
-        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'CORE') || contains(fromJSON(steps.build_scope.outputs.build_components), 'MINIAPP')
         run: python3 scripts/docker_dependency_manifests.py "$RUNNER_TEMP/dependency-manifests"
       - name: Build and publish immutable runtime image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'CORE')
         id: app
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -491,7 +473,6 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Build and publish immutable Mini App image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'MINIAPP')
         id: miniapp
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -514,7 +495,6 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Build and publish stock Eros image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'EROS')
         id: eros
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -539,43 +519,37 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Validate immutable image identity and expose digests
-        if: steps.build_scope.outputs.build_components != '[]'
         env:
           CANDIDATE_SHA: ${{ github.sha }}
           APP_DIGEST: ${{ steps.app.outputs.digest }}
           MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}
           EROS_DIGEST: ${{ steps.eros.outputs.digest }}
-          BUILD_COMPONENTS: ${{ steps.build_scope.outputs.build_components }}
         run: |
           python3 - <<'PY'
           import os, re
           sha = os.environ['CANDIDATE_SHA']
           if not re.fullmatch(r'[0-9a-f]{40}', sha):
               raise SystemExit('candidate SHA is not exact')
-          components = set(__import__('json').loads(os.environ['BUILD_COMPONENTS']))
           for component, name in {'CORE': 'APP_DIGEST', 'MINIAPP': 'MINIAPP_DIGEST', 'EROS': 'EROS_DIGEST'}.items():
-              if component in components and not re.fullmatch(r'sha256:[0-9a-f]{64}', os.environ[name]):
+              if not re.fullmatch(r'sha256:[0-9a-f]{64}', os.environ[name]):
                   raise SystemExit(f'{name} is not an immutable OCI digest')
           for component, name in {'CORE': 'APP_DIGEST', 'MINIAPP': 'MINIAPP_DIGEST', 'EROS': 'EROS_DIGEST'}.items():
-              if component in components:
-                  image = "ghcr.io/akhripunov/" + ("gpoint-runtime" if component == "CORE" else "gpoint-miniapp" if component == "MINIAPP" else "gpoint-eros") + "@" + os.environ[name]
-                  line = f"GPOINT_IMAGE_DIGEST {component} {image}"
-                  print(line)
-                  print(f"{component}_IMAGE={image}", file=open(os.environ['GITHUB_STEP_SUMMARY'], 'a'))
+              image = "ghcr.io/akhripunov/" + ("gpoint-runtime" if component == "CORE" else "gpoint-miniapp" if component == "MINIAPP" else "gpoint-eros") + "@" + os.environ[name]
+              line = f"GPOINT_IMAGE_DIGEST {component} {image}"
+              print(line)
+              print(f"{component}_IMAGE={image}", file=open(os.environ['GITHUB_STEP_SUMMARY'], 'a'))
           PY
       - name: Read back exact published images and verify candidate identity
         id: image_readback
-        if: steps.build_scope.outputs.build_components != '[]'
         env:
           CANDIDATE_SHA: ${{ github.sha }}
           IMAGE_VERSION: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           APP_DIGEST: ${{ steps.app.outputs.digest }}
           MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}
           EROS_DIGEST: ${{ steps.eros.outputs.digest }}
-          BUILD_COMPONENTS: ${{ steps.build_scope.outputs.build_components }}
         run: |
           set -euo pipefail
-          for role in $(python3 -c 'import json,sys; print(" ".join({"CORE":"app","MINIAPP":"miniapp","EROS":"eros"}[x] for x in json.loads(sys.argv[1])) )' "$BUILD_COMPONENTS"); do
+          for role in app miniapp eros; do
             case "$role" in
               app) image=ghcr.io/akhripunov/gpoint-runtime; digest="$APP_DIGEST"; expected_service=gpoint-core ;;
               miniapp) image=ghcr.io/akhripunov/gpoint-miniapp; digest="$MINIAPP_DIGEST"; expected_service=gpoint-miniapp ;;
@@ -602,14 +576,9 @@ jobs:
                 "$CANDIDATE_SHA" https://github.com/akhripunov/gpoint.git
             fi
           done
-          for role in $(python3 -c 'import json,sys; print(" ".join({"CORE":"app"}[x] for x in json.loads(sys.argv[1]) if x == "CORE"))' "$BUILD_COMPONENTS"); do
-            case "$role" in
-              app) image=ghcr.io/akhripunov/gpoint-runtime; digest="$APP_DIGEST" ;;
-            esac
-            image_bytes="$(docker image inspect "$image@$digest" --format '{{.Size}}')"
-            [[ "$image_bytes" =~ ^[0-9]+$ ]]
-            echo "${role}_image_bytes=$image_bytes" >> "$GITHUB_OUTPUT"
-          done
+          image_bytes="$(docker image inspect "ghcr.io/akhripunov/gpoint-runtime@$APP_DIGEST" --format '{{.Size}}')"
+          [[ "$image_bytes" =~ ^[0-9]+$ ]]
+          echo "app_image_bytes=$image_bytes" >> "$GITHUB_OUTPUT"
 
   deploy:
     name: Kamal production Deploy and Verify
@@ -619,13 +588,12 @@ jobs:
       (
         (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
          needs.tests.result == 'success' && needs.tests.outputs.deploy == 'true' &&
-         needs.build.result == 'success' && needs.build.outputs.deploy_scope != 'NONE') ||
+         needs.build.result == 'success') ||
         (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
          github.actor == github.repository_owner && needs.tests.result == 'success' &&
          (
            (inputs.mode == 'deploy' && needs.tests.outputs.mode == 'DEPLOY' &&
-            needs.tests.outputs.deploy == 'true' && needs.build.result == 'success' &&
-            needs.build.outputs.deploy_scope != 'NONE') ||
+            needs.tests.outputs.deploy == 'true' && needs.build.result == 'success') ||
            (inputs.mode == 'rollback' && needs.tests.outputs.mode == 'ROLLBACK' &&
             needs.tests.outputs.deploy == 'true' &&
             (needs.build.result == 'success' || needs.build.result == 'skipped'))
@@ -952,7 +920,6 @@ jobs:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
           EROS_DIGEST: ${{ needs.build.outputs.eros_digest }}
-          BUILD_COMPONENTS: ${{ needs.build.outputs.build_components }}
           EVENT_NAME: ${{ github.event_name }}
           INFRASTRUCTURE_BASELINE_SHA: ${{ steps.infrastructure_baseline.outputs.sha }}
         run: |
@@ -961,7 +928,7 @@ jobs:
           import base64, json, os, re, sys
           from pathlib import Path
           sys.path.insert(0, str(Path.cwd() / "scripts"))
-          from native_release_intent import (ALL_COMPONENT_ROLES, COMPONENT_IMAGES, ROLE_REPOSITORIES,
+          from native_release_intent import (ALL_COMPONENT_ROLES, ROLE_REPOSITORIES,
                                              classify_component_scope, expected_runtime_inventory_b64,
                                              changed_paths,
                                              is_infrastructure_change)
@@ -969,10 +936,7 @@ jobs:
           candidate = os.environ["CANDIDATE_SHA"]
           baseline = json.loads(os.environ["BASELINE_ROLE_INVENTORY"])
           scope = classify_component_scope(Path.cwd(), candidate, baseline)
-          builds = set(json.loads(os.environ["BUILD_COMPONENTS"]))
           scope_components = set(scope["scope"].split("+")) - {"NONE"}
-          if not {COMPONENT_IMAGES[component] for component in scope_components}.issubset(builds):
-              raise SystemExit("fresh live component scope is missing a prebuilt candidate image")
           if os.environ["EVENT_NAME"] == "push":
               infrastructure_baseline = os.environ["INFRASTRUCTURE_BASELINE_SHA"]
               if not re.fullmatch(r"[0-9a-f]{40}", infrastructure_baseline):
@@ -986,7 +950,7 @@ jobs:
           for component, roles in ALL_COMPONENT_ROLES.items():
               role = roles[0]
               if component in scope_components:
-                  digest = os.environ[image_inputs[COMPONENT_IMAGES[component]]]
+                  digest = os.environ[image_inputs[component]]
               elif role not in baseline["roles"]:
                   effective[outputs[component]] = ""
                   continue
@@ -1009,26 +973,24 @@ jobs:
           print("expected_role_identities_b64=" + expected)
           expected_roles = json.loads(base64.b64decode(expected))["roles"]
           print("deploy_bot=" + str("gpoint-core-bot" in expected_roles).lower())
-          print("migration_app_digest=" + (os.environ["APP_DIGEST"] if "CORE" in builds else effective["app_digest"]))
+          print("migration_app_digest=" + os.environ["APP_DIGEST"])
           core_api = json.loads(base64.b64decode(expected))["roles"]["gpoint-core-api"]
           print("core_api_version=" + core_api["version"])
           print("core_api_source_sha=" + core_api["sourceSha"])
           for output, digest in effective.items():
               print(output + "=" + digest)
-          print("build_components=" + json.dumps(sorted(builds), separators=(",", ":")))
           PY
       - name: Verify immutable candidate images selected for the live scope
-        if: ((steps.component_plan.outputs.build_components != '[]') && inputs.mode != 'rollback')
+        if: inputs.mode != 'rollback'
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
           EROS_DIGEST: ${{ needs.build.outputs.eros_digest }}
-          BUILD_COMPONENTS: ${{ steps.component_plan.outputs.build_components }}
         run: |
           set -euo pipefail
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          for item in $(python3 -c 'import json,sys; names={"CORE":"app","MINIAPP":"miniapp","EROS":"eros"}; print(" ".join(names[x] for x in json.loads(sys.argv[1])))' "$BUILD_COMPONENTS"); do
+          for item in app miniapp eros; do
             case "$item" in
               app) repository=ghcr.io/akhripunov/gpoint-runtime; digest="$APP_DIGEST" ;;
               miniapp) repository=ghcr.io/akhripunov/gpoint-miniapp; digest="$MINIAPP_DIGEST" ;;
@@ -1111,7 +1073,6 @@ jobs:
         env:
           LIVE_MIGRATIONS: ${{ steps.migration_baseline.outputs.prisma_migrations }}
           LIVE_CHECKSUMS: ${{ steps.migration_baseline.outputs.prisma_checksums }}
-          BUILD_COMPONENTS: ${{ needs.build.outputs.build_components }}
           BASELINE_SOURCE_SHA: ${{ steps.topology.outputs.GPOINT_BASELINE_ROLE_SOURCE_SHA }}
           CANDIDATE_SHA: ${{ github.sha }}
         run: |
@@ -1129,10 +1090,6 @@ jobs:
           pending_checksums="$(sed -n 's/^pending_checksums=//p' <<< "$plan")"
           source_head="$(sed -n 's/^source_head=//p' <<< "$plan")"
           [[ "$apply" == true || "$apply" == false ]]
-          if [[ "$BUILD_COMPONENTS" == "[]" && "$apply" == true ]]; then
-            echo 'release with pending Prisma migrations has no prebuilt candidate Core image; refusing database mutation' >&2
-            exit 1
-          fi
           [[ "$source_head" =~ ^[0-9]{14}_[a-z0-9_]+$ ]]
           if [[ "$apply" == true ]]; then
             test -n "$pending" && test -n "$pending_checksums"

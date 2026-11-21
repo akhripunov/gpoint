@@ -87,14 +87,20 @@ def test_pr_candidate_runs_build_without_production_deploy():
     build = workflow["jobs"]["build"]
     deploy = workflow["jobs"]["deploy"]
 
+    assert workflow["name"] == "GPoint Release Pipeline"
+
     assert "github.event_name == 'pull_request'" in build["if"]
     assert "github.event.pull_request.head.repo.full_name == github.repository" in build["if"]
     assert "github.event.pull_request.author_association" in build["if"]
     assert 'fromJSON(\'["OWNER","MEMBER","COLLABORATOR"]\')' in build["if"]
     assert build["permissions"]["packages"] == "write"
-    build_scope = next(step for step in build["steps"] if step.get("id") == "build_scope")
-    assert 'components = ["CORE", "MINIAPP", "EROS"]' in build_scope["run"]
-    assert "steps.filter.outputs" not in build_scope["run"]
+    assert "build_components" not in build["outputs"]
+    assert "deploy_scope" not in build["outputs"]
+    assert not any(step.get("id") == "build_scope" for step in build["steps"])
+    images = [step for step in build["steps"]
+              if step.get("uses", "").startswith("docker/build-push-action@")]
+    assert {step.get("id") for step in images} == {"app", "miniapp", "eros"}
+    assert all("if" not in step for step in images)
     tests = workflow["jobs"]["tests"]
     eros_e2e = next(step for step in tests["steps"] if step.get("id") == "eros_e2e")
     assert "steps.eros_scope.outputs.required == 'true'" in eros_e2e["if"]
@@ -111,6 +117,7 @@ def test_pr_candidate_runs_build_without_production_deploy():
     assert not any(step.get("name") == "Require exact-candidate Eros test evidence" for step in build["steps"])
     assert "github.event_name == 'pull_request'" not in deploy["if"]
     assert "needs.tests.outputs.mode == 'DEPLOY'" in deploy["if"]
+    assert "needs.build.outputs.deploy_scope" not in deploy["if"]
 
 
 def test_every_workflow_helper_has_a_replacement_and_retention_audit():

@@ -77,8 +77,7 @@ def test_active_architecture_has_five_roles_and_three_images():
         "gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot",
         "gpoint-miniapp-web", "gpoint-eros-pilot-engine",
     }
-    assert set(MODULE.COMPONENT_IMAGES) == {"CORE", "MINIAPP", "EROS"}
-    assert set(MODULE.COMPONENT_IMAGES.values()) == {"CORE", "MINIAPP", "EROS"}
+    assert set(MODULE.ALL_COMPONENT_ROLES) == {"CORE", "MINIAPP", "EROS"}
 
 
 @pytest.mark.parametrize("path,component", [
@@ -117,17 +116,11 @@ def test_retired_agata_and_relay_paths_do_not_select_an_image(path):
     ("services/eros-engine/eros-pilot-embedding-relay.mjs", "NONE"),
     ("config/deploy.ollama.yml", "NONE"),
 ])
-def test_component_build_scope_uses_exact_component_diff(tmp_path, path, expected):
+def test_live_deploy_scope_uses_exact_component_diff(tmp_path, path, expected):
     repo, baseline = component_repo(tmp_path)
     candidate = commit_change(repo, path, "changed\n")
-    plan = MODULE.classify_component_build_plan(
-        repo, candidate, {"CORE": baseline, "MINIAPP": baseline, "EROS": baseline},
-    )
-    assert plan["deploy_scope"] == expected
-    if expected == "NONE":
-        assert plan["build_components"] == []
-    else:
-        assert plan["build_components"] == [expected]
+    scope = MODULE.classify_component_scope(repo, candidate, make_inventory(baseline))
+    assert scope["scope"] == expected
 
 
 def test_runtime_inventory_pins_updated_images_and_preserves_untouched_baselines():
@@ -187,10 +180,6 @@ def test_historical_layer7_mixed_core_baseline_forces_full_core_and_keeps_bot_di
     })
     inventory["roles"].pop("gpoint-core-bot")
     inventory["missing_roles"] = ["gpoint-core-bot"]
-    monkeypatch.setattr(MODULE, "classify_component_build_plan", lambda *_args, **_kwargs: {
-        "deploy_scope": "NONE", "reason": "no_runtime_changes",
-    })
-
     scope = MODULE.classify_component_scope(repo, candidate, inventory)
 
     assert scope["scope"] == "CORE"
@@ -278,8 +267,7 @@ def test_eros_e2e_accumulates_after_failed_release_and_fails_safe_on_unknown_bas
     assert MODULE.eros_e2e_required(repo, "f" * 40, next_push)
 
 
-def test_bootstrap_builds_the_three_active_application_images_only():
-    assert MODULE.COMPONENT_IMAGES == {"CORE": "CORE", "MINIAPP": "MINIAPP", "EROS": "EROS"}
+def test_live_deploy_components_are_independently_scoped():
     assert set(MODULE.ALL_COMPONENT_ROLES) == {"CORE", "MINIAPP", "EROS"}
     assert not any("AGATA" in role or "RELAY" in role for role in MODULE.ROLE_REPOSITORIES)
 

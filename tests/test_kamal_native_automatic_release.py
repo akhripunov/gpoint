@@ -92,33 +92,33 @@ def test_eros_builds_share_layers_without_publishing_the_test_image():
     assert release_inputs["provenance"] == "mode=max"
 
 
-def test_build_never_uses_github_deployment_history_as_runtime_baseline():
-    """Production image scope is conservative; Kamal's live inventory scopes Apply."""
+def test_build_unconditionally_publishes_all_three_images_and_live_inventory_scopes_apply():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     build = workflow["jobs"]["build"]
     steps = build["steps"]
-    resolver = next(step for step in steps if step.get("id") == "build_scope")
-    run = resolver["run"]
-    assert "--push-before" not in run
-    assert "VERIFY_ONLY" not in run
-    assert '["CORE", "MINIAPP", "EROS"]' in run
-    assert "resolve_native_build_scope.py" not in run
-    assert "EVENT_BEFORE" not in resolver.get("env", {})
+    assert "build_components" not in build["outputs"]
+    assert "deploy_scope" not in build["outputs"]
+    assert not any(step.get("id") == "build_scope" for step in steps)
     for step in steps:
         if step.get("uses", "").startswith(("docker/setup-buildx-action@", "docker/login-action@")):
-            assert "build_components != '[]'" in step["if"]
+            assert "if" not in step
+    image_steps = [step for step in steps
+                   if step.get("uses", "").startswith("docker/build-push-action@")]
+    assert {step.get("id") for step in image_steps} == {"app", "miniapp", "eros"}
+    assert all("if" not in step for step in image_steps)
 
     deploy_steps = workflow["jobs"]["deploy"]["steps"]
     component_plan = next(step for step in deploy_steps if step.get("id") == "component_plan")
     plan_run = component_plan["run"]
     assert "VERIFY_ONLY" not in plan_run
-    assert 'raise SystemExit("fresh live component scope is missing a prebuilt candidate image")' in plan_run
     assert "classify_component_scope" in plan_run
+    assert "COMPONENT_IMAGES" not in plan_run
+    assert "BUILD_COMPONENTS" not in plan_run
 
     migration_plan = next(step for step in deploy_steps if step.get("id") == "migration_plan")
-    assert "BUILD_COMPONENTS" in migration_plan["env"]
+    assert "BUILD_COMPONENTS" not in migration_plan["env"]
     assert "VERIFY_ONLY" not in migration_plan["run"]
-    assert 'no prebuilt candidate Core image' in migration_plan["run"]
+    assert 'no prebuilt candidate Core image' not in migration_plan["run"]
 
 
 def test_merge_bot_can_deploy_exact_current_main_sha_automatically(tmp_path):
@@ -645,12 +645,11 @@ def test_production_deploy_scope_is_resolved_only_from_live_inventory():
     """Even an apparently no-op push reads installed roles before deciding Apply."""
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     condition = workflow["jobs"]["deploy"]["if"]
-    assert "needs.build.outputs.deploy_scope != 'NONE'" in condition
-    build_scope = next(
-        step for step in workflow["jobs"]["build"]["steps"]
-        if step.get("id") == "build_scope")
-    assert "print(\"deploy_scope=LIVE\")" in build_scope["run"]
-    assert "resolve_native_build_scope.py" not in build_scope["run"]
+    assert "needs.build.outputs.deploy_scope" not in condition
+    assert "needs.tests.outputs.deploy == 'true'" in condition
+    assert "needs.build.result == 'success'" in condition
+    assert not any(step.get("id") == "build_scope"
+                   for step in workflow["jobs"]["build"]["steps"])
     component_plan = next(step for step in workflow["jobs"]["deploy"]["steps"]
                           if step.get("id") == "component_plan")
     assert "classify_component_scope" in component_plan["run"]

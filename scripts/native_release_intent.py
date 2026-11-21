@@ -87,7 +87,6 @@ COMPONENT_ROLES = {
 EROS_ROLES = ("gpoint-eros-pilot-engine",)
 EROS_COMPONENT_ROLES = {"EROS": EROS_ROLES}
 ALL_COMPONENT_ROLES = {**COMPONENT_ROLES, **EROS_COMPONENT_ROLES}
-COMPONENT_IMAGES = {component: component for component in ALL_COMPONENT_ROLES}
 ROLE_REPOSITORIES = {
     "gpoint-core-api": "ghcr.io/akhripunov/gpoint-runtime",
     "gpoint-core-worker": "ghcr.io/akhripunov/gpoint-runtime",
@@ -421,9 +420,9 @@ def _safe_component_path(path: str) -> bool:
             and all(part not in ("", ".", "..") for part in path.split("/")))
 
 
-def classify_component_build_plan(repo: Path, candidate: str,
-                                  component_sources: dict[str, str]) -> dict[str, object]:
-    """Classify runtime updates and image-only Prisma migration build impact."""
+def classify_component_changes(repo: Path, candidate: str,
+                              component_sources: dict[str, str]) -> dict[str, object]:
+    """Classify cumulative runtime changes against installed component sources."""
     if not EXACT_SHA.fullmatch(candidate or ""):
         raise ValueError("candidate SHA is invalid")
     if (not isinstance(component_sources, dict)
@@ -436,8 +435,6 @@ def classify_component_build_plan(repo: Path, candidate: str,
     if not eros_installed:
         component_sources = {**component_sources, **dict.fromkeys(EROS_COMPONENT_ROLES, component_sources["CORE"])}
     paths_by_baseline: dict[str, set[str]] = {}
-    core_migration_paths: set[str] = set()
-    core_source = component_sources["CORE"]
     for baseline in component_sources.values():
         if baseline == candidate or baseline in paths_by_baseline:
             continue
@@ -471,8 +468,6 @@ def classify_component_build_plan(repo: Path, candidate: str,
             if not tree.startswith(("100644 blob ", "100755 blob ")):
                 raise ValueError("candidate path is not a regular file and needs explicit scope approval")
             changed_components = _component_paths(path)
-            if baseline == core_source and PRISMA_MIGRATION.fullmatch(path):
-                core_migration_paths.add(path)
             if not changed_components:
                 if _known_non_runtime_path(path):
                     continue
@@ -490,13 +485,8 @@ def classify_component_build_plan(repo: Path, candidate: str,
     # paths still fail closed above.
     if not eros_installed and components.intersection(EROS_COMPONENT_ROLES):
         components.update(EROS_COMPONENT_ROLES)
-    runtime_scope = "+".join(sorted(components)) if components else "NONE"
-    build_components = {COMPONENT_IMAGES[component] for component in components}
-    if core_migration_paths:
-        build_components.add("CORE")
     return {
-        "deploy_scope": runtime_scope,
-        "build_components": sorted(build_components),
+        "scope": "+".join(sorted(components)) if components else "NONE",
         "reason": "exact_component_diff" if components else "no_runtime_changes",
     }
 
@@ -514,8 +504,8 @@ def installed_component_sources(inventory: dict) -> dict[str, str]:
 def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dict[str, str | bool]:
     """Classify the exact candidate diff; never broaden an ambiguous scope."""
     component_sources = installed_component_sources(inventory)
-    plan = classify_component_build_plan(repo, candidate, component_sources)
-    components = set(str(plan["deploy_scope"]).split("+")) - {"NONE"}
+    plan = classify_component_changes(repo, candidate, component_sources)
+    components = set(str(plan["scope"]).split("+")) - {"NONE"}
     mixed = mixed_component_baselines(inventory)
     if "CORE" in mixed:
         core_source = component_sources["CORE"]
@@ -535,7 +525,7 @@ def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dic
     for component, roles in ALL_COMPONENT_ROLES.items():
         if missing_required.intersection(roles):
             components.add(component)
-    planned_components = set(str(plan["deploy_scope"]).split("+")) - {"NONE"}
+    planned_components = set(str(plan["scope"]).split("+")) - {"NONE"}
     forced = components != planned_components
     scope_name = "+".join(sorted(components)) if components else "NONE"
     result = {

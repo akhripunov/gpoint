@@ -220,11 +220,11 @@ edit/check/commit, существенного ожидания и каждого
 `LOCAL_PENDING_RELEASE`; поля push/Actions/Runtime Verify отметить `NOT_RUN`.
 
 
-## Current GPoint Native Release (ME-62 candidate)
+## Current GPoint Release Pipeline (ME-62 candidate)
 
-`.github/workflows/gpoint-release.yml` remains the single production
-controller. Its ordinary path is `Tests → Build/GHCR → protected Deploy →
-Runtime Verify`. A permitted push to `main` starts the path automatically. PRs
+`.github/workflows/gpoint-release.yml` is the single production controller.
+Its ordinary path is `Tests → Build/GHCR → protected Deploy → Runtime Verify`.
+A permitted push to `main` starts the path automatically. PRs
 run the same required tests and do not receive production secrets or Deploy
 access. Eligible same-repository PR Build jobs receive `packages: write` only to
 publish candidate images for immutable GHCR read-back. Fork PRs never enter
@@ -247,9 +247,11 @@ There are three independently scoped logical components and three unique images:
 | Mini App | Web | `gpoint-miniapp` |
 | Eros Engine | Pilot Engine | `gpoint-eros` |
 
-Buildx publishes all three images from the exact candidate SHA with immutable
-digests, SBOM and provenance. Deploy verifies the selected image read-back and
-uses those digests without rebuilding. A Native production dispatch cannot reuse
+Buildx unconditionally publishes all three images from the exact candidate SHA
+with immutable digests, SBOM and provenance. Live Kamal/Docker inventory alone
+selects which component roles Deploy updates; no build-scope planner or GitHub
+Deployment history participates in Build. Deploy verifies the selected image
+read-back and uses those digests without rebuilding. A production dispatch cannot reuse
 an image from another run. The Eros image build fetches the pinned upstream
 commit from `etherfunlab/eros-engine`; BuildKit layer cache reduces repeat work,
 but GitHub/upstream availability remains a required CI dependency. Its failure

@@ -171,24 +171,21 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             self.assertNotIn("matrix.suite == 'release-tooling'", condition)
             self.assertNotIn("matrix.suite == 'eros'", condition)
 
-    def test_runtime_image_build_scope_does_not_depend_on_github_deployment_history(self):
+    def test_release_builds_all_images_without_a_build_scope_planner(self):
         tests = self.workflow["jobs"]["tests"]
         self.assertNotIn("infrastructure_baseline", [step.get("id") for step in tests["steps"]])
         self.assertNotIn("dispatch_build_scope", [step.get("id") for step in tests["steps"]])
         build = self.workflow["jobs"]["build"]
-        scope = next(step for step in build["steps"] if step.get("id") == "build_scope")
-        self.assertNotIn("resolve_native_build_scope.py", scope["run"])
-        self.assertIn('["CORE", "MINIAPP", "EROS"]', scope["run"])
-        self.assertNotIn("PR_CORE", str(scope.get("env", {})))
-        self.assertNotIn("steps.filter.outputs", scope["run"])
-        self.assertIn("CORE", scope["run"])
-        self.assertIn("MINIAPP", scope["run"])
-        self.assertIn("EROS", scope["run"])
+        self.assertNotIn("build_scope", [step.get("id") for step in build["steps"]])
+        self.assertNotIn("build_components", build["outputs"])
+        self.assertNotIn("deploy_scope", build["outputs"])
         image_steps = [step for step in build["steps"]
                        if step.get("uses", "").startswith("docker/build-push-action@")]
         self.assertEqual({step.get("id") for step in image_steps}, {"app", "miniapp", "eros"})
-        for component in ("CORE", "MINIAPP", "EROS"):
-            self.assertTrue(any(component in step["if"] for step in image_steps))
+        self.assertTrue(all("if" not in step for step in image_steps))
+        self.assertEqual(build["outputs"]["app_digest"], "${{ steps.app.outputs.digest }}")
+        self.assertEqual(build["outputs"]["miniapp_digest"], "${{ steps.miniapp.outputs.digest }}")
+        self.assertEqual(build["outputs"]["eros_digest"], "${{ steps.eros.outputs.digest }}")
         live_inventory = next(step for step in self.workflow["jobs"]["deploy"]["steps"]
                               if step.get("id") == "kamal_inventory")
         self.assertIn("verify-kamal-production-baseline.py", live_inventory["run"])
@@ -333,17 +330,11 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertNotIn("environment", build)
         self.assertEqual(build["needs"], ["tests"])
         steps = build["steps"]
-        resolver = next(i for i, step in enumerate(steps)
-                        if step.get("id") == "build_scope")
-        for component, step_id in (("CORE", "app"), ("MINIAPP", "miniapp")):
+        for step_id in ("app", "miniapp", "eros"):
             image = next(i for i, step in enumerate(steps) if step.get("id") == step_id)
-            self.assertGreater(image, resolver)
-            self.assertIn(component, steps[image]["if"])
-        resolver_run = steps[resolver]["run"]
-        self.assertNotIn("resolve_native_build_scope.py", resolver_run)
+            self.assertNotIn("if", steps[image])
         self.assertNotIn("deployments", build["permissions"])
         self.assertNotIn("actions", build["permissions"])
-        self.assertIn("LIVE", resolver_run)
         workflow_runs = "\n".join(
             step.get("run", "")
             for job in self.workflow["jobs"].values()
