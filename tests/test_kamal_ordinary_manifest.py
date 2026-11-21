@@ -70,7 +70,7 @@ else: raise SystemExit(2)
     systemctl.chmod(0o755)
 
 
-def expected_roles_b64(scope="FULL"):
+def expected_roles_b64(scope="FULL", *, include_bot=True):
     roles = {
         "gpoint-core-api": ("CORE", "ghcr.io/akhripunov/gpoint-runtime", APP),
         "gpoint-core-worker": ("CORE", "ghcr.io/akhripunov/gpoint-runtime", APP),
@@ -89,6 +89,8 @@ def expected_roles_b64(scope="FULL"):
     component_digests = {"CORE": "4", "MINIAPP": "7", "EROS": "a"}
     role_rows = {}
     for role, (component, repository, digest) in roles.items():
+        if role == "gpoint-core-bot" and not include_bot:
+            continue
         role_rows[role] = ({"version": VERSION, "sourceSha": SHA,
                             "repositoryDigest": repository + "@" + digest,
                             "baselineImageId": None}
@@ -187,6 +189,19 @@ def test_ordinary_manifest_accepts_documentation_only_no_runtime_scope(tmp_path)
     manifest = json.loads(output.read_bytes())
     assert manifest["deploymentScope"] == {"classification": "NONE", "updatedComponents": []}
     assert {service["revision"] for service in manifest["runtimeServices"]} == {"b" * 40}
+
+
+def test_ordinary_manifest_keeps_disabled_core_bot_absent_during_full_core_rollout(tmp_path):
+    plan = expected_roles_b64("CORE", include_bot=False)
+    result, output = run_ordinary(tmp_path, role_plan_b64=plan)
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads(output.read_bytes())
+    services = {service["name"].split("-")[2]: service for service in manifest["runtimeServices"]}
+    assert not any(service["name"].startswith("gpoint-core-bot-") for service in manifest["runtimeServices"])
+    core = [service for service in manifest["runtimeServices"] if service["name"].startswith(("gpoint-core-api-", "gpoint-core-worker-"))]
+    assert len(core) == 2
+    assert {service["revision"] for service in core} == {SHA}
+    assert {service["repositoryDigest"] for service in core} == {f"ghcr.io/akhripunov/gpoint-runtime@{APP}"}
 
 
 def test_ordinary_manifest_refuses_active_caddy_without_writing_output(tmp_path):

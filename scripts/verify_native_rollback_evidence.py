@@ -137,9 +137,11 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
         if role in by_name:
             _fail("manifest contains a duplicate GPoint Kamal role")
         by_name[role] = (item, role_version)
-    expected_roles = set(ROLE_IMAGES)
-    if set(by_name) != expected_roles:
+    known_roles = set(ROLE_IMAGES)
+    required_roles = known_roles - {"gpoint-core-bot"}
+    if not required_roles.issubset(by_name) or set(by_name) - known_roles:
         _fail("manifest does not contain a complete GPoint Kamal role inventory")
+    expected_roles = set(by_name)
     component_versions = {}
     component_sources = {}
     component_digests = {}
@@ -181,7 +183,8 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
     return {"target_sha": expected_sha, "version": version, "manifest_sha256": manifest_sha,
             "digests": digests, "run_id": int(run_match.group(2)),
             "run_attempt": int(attempt.get("runAttempt", 0)), "images": images,
-            "component_versions": component_versions, "component_sources": component_sources}
+            "component_versions": component_versions, "component_sources": component_sources,
+            "core_bot_enabled": "gpoint-core-bot" in by_name}
 
 
 def main() -> int:
@@ -210,6 +213,7 @@ def main() -> int:
     for component, version in evidence["component_versions"].items():
         print(f"{component}_version={version}")
         print(f"{component}_source_sha={evidence['component_sources'][component]}")
+    print(f"core_bot_enabled={str(evidence['core_bot_enabled']).lower()}")
     return 0
 
 

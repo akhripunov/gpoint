@@ -150,19 +150,82 @@ def test_runtime_inventory_pins_updated_images_and_preserves_untouched_baselines
         assert row["baselineImageId"] == inventory["roles"][role]["image_id"]
 
 
-def test_missing_core_bot_forces_core_scope_without_inventing_a_bot_baseline(tmp_path):
+def test_missing_core_bot_stays_disabled_without_forcing_a_release(tmp_path):
     repo, source = component_repo(tmp_path)
     candidate = commit_change(repo, "README.md", "docs only\n")
     inventory = make_inventory(source)
     inventory["roles"].pop("gpoint-core-bot")
     inventory["missing_roles"] = ["gpoint-core-bot"]
     scope = MODULE.classify_component_scope(repo, candidate, inventory)
-    assert scope["scope"] == "CORE"
+    assert scope["scope"] == "NONE"
     expected = MODULE.expected_runtime_inventory(
         scope["scope"], inventory, candidate, candidate + "-2-1",
         "sha256:" + "a" * 64, "sha256:" + "b" * 64,
     )
-    assert expected["roles"]["gpoint-core-bot"]["sourceSha"] == candidate
+    assert "gpoint-core-bot" not in expected["roles"]
+
+
+def test_historical_layer7_mixed_core_baseline_forces_full_core_and_keeps_bot_disabled(tmp_path, monkeypatch):
+    api_sha = "3d680fa153fd6aebf786455d6f36d3b1a67cc78f"
+    worker_sha = "145111f17b8f2cb94bfa5d1c266fabc5eb0e0952"
+    repo, _ = component_repo(tmp_path)
+    candidate = commit_change(repo, "README.md", "docs only\n")
+    inventory = make_inventory(api_sha)
+    api = inventory["roles"]["gpoint-core-api"]
+    api.update({
+        "name": f"gpoint-core-api-{api_sha}-43930964514-1",
+        "version": f"{api_sha}-43930964514-1",
+        "image_id": "sha256:8de41d23ec5f5e9592d8e7a4c377a72347d01266f97822486d4e40d0fbbb0a82",
+        "repo_digest": "ghcr.io/akhripunov/gpoint-runtime@sha256:8de41d23ec5f5e9592d8e7a4c377a72347d01266f97822486d4e40d0fbbb0a82",
+    })
+    worker = inventory["roles"]["gpoint-core-worker"]
+    worker.update({
+        "name": f"gpoint-core-worker-{worker_sha}-43494016382-1",
+        "version": f"{worker_sha}-43494016382-1",
+        "source_sha": worker_sha,
+        "image_id": "sha256:107c041c8e9022c5998bbf4f749e6a62428bb30de358f67c7ab0032cbb974340",
+        "repo_digest": "ghcr.io/akhripunov/gpoint-runtime@sha256:107c041c8e9022c5998bbf4f749e6a62428bb30de358f67c7ab0032cbb974340",
+    })
+    inventory["roles"].pop("gpoint-core-bot")
+    inventory["missing_roles"] = ["gpoint-core-bot"]
+    monkeypatch.setattr(MODULE, "classify_component_build_plan", lambda *_args, **_kwargs: {
+        "deploy_scope": "NONE", "reason": "no_runtime_changes",
+    })
+
+    scope = MODULE.classify_component_scope(repo, candidate, inventory)
+
+    assert scope["scope"] == "CORE"
+    assert scope["reason"] == "mixed_component_baseline"
+    planned = MODULE.expected_runtime_inventory(
+        scope["scope"], inventory, candidate, candidate + "-101-1",
+        "sha256:" + "a" * 64, "sha256:" + "b" * 64,
+    )
+    assert set(planned["roles"]).isdisjoint({"gpoint-core-bot"})
+    assert planned["roles"]["gpoint-core-api"]["sourceSha"] == candidate
+    assert planned["roles"]["gpoint-core-worker"]["sourceSha"] == candidate
+    assert planned["roles"]["gpoint-core-api"]["repositoryDigest"] == planned["roles"]["gpoint-core-worker"]["repositoryDigest"]
+
+
+def test_mixed_core_baseline_cannot_be_carried_through_a_selective_scope(tmp_path):
+    source = "a" * 40
+    candidate = "b" * 40
+    inventory = make_inventory(source)
+    inventory["roles"]["gpoint-core-worker"]["source_sha"] = "c" * 40
+    inventory["roles"]["gpoint-core-worker"]["version"] = "c" * 40 + "-8-1"
+    inventory["roles"]["gpoint-core-worker"]["name"] = "gpoint-core-worker-" + "c" * 40 + "-8-1"
+
+    with pytest.raises(ValueError, match="mixed CORE baseline requires a full Core rollout"):
+        MODULE.expected_runtime_inventory(
+            "MINIAPP", inventory, candidate, candidate + "-102-1",
+            "sha256:" + "a" * 64, "sha256:" + "b" * 64,
+        )
+
+
+def test_baseline_rejects_role_version_not_bound_to_its_source_sha():
+    inventory = make_inventory("a" * 40)
+    inventory["roles"]["gpoint-core-worker"]["source_sha"] = "b" * 40
+    with pytest.raises(ValueError, match="invalid runtime identity"):
+        MODULE.mixed_component_baselines(inventory)
 
 
 def test_infrastructure_requires_protected_dispatch_and_exact_owner_sha():
