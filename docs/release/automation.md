@@ -259,6 +259,14 @@ with the `me-62-full-build` label. This opt-in is scoped to that acceptance run;
 ordinary infrastructure-only PRs do not trigger an Eros Engine E2E or publish
 unneeded images.
 
+### GSales release scope
+
+GSales не входит в активную архитектуру релизов GPoint и отсутствует на Layer7.
+Native workflow не запускает `tests/test_gsales_*` и не выполняет обязательные
+проверки GSales runtime. Проверки общей PostgreSQL-интеграции, безопасности
+GPoint и изоляции tenant остаются активными. Исторические тесты, исходный код,
+документация и данные GSales сохраняются.
+
 `dorny/paths-filter` supplies declarative path classification for five
 components. The build-scope adapter compares each path set with its recorded
 installed component source SHA; an unrecognized path, unavailable/invalid
@@ -953,7 +961,11 @@ publication, exact tag SHA, asset ID, uploaded state и GitHub SHA256. Пере�
 Время и квоты hosted Actions для CI продолжают действовать; плата не включается.
 
 
-## Server deployment и Mac Worker dependency — разные результаты
+## Исторический Mac Worker и GSales lane contract
+
+Исторический контракт GSales Worker ниже не является release gate. Он сохранён
+для истории; текущая Native First архитектура не требует GSales runtime,
+GSALES lane probes или GSales DB/Core RLS checks.
 
 OWNER contract от 2026-10-05: технический исход server apply не зависит от
 временной операционной доступности локального Mac. Это правило применяется

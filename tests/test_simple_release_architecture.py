@@ -189,3 +189,14 @@ def test_release_architecture_invariants_match_documented_state():
 
     assert (ROOT / "scripts/write-kamal-production-manifest.py").is_file()
     assert not (ROOT / "scripts/verify_native_prepared_run.py").exists()
+
+
+def test_retired_gsales_is_not_an_active_release_gate():
+    workflow = _workflow_source()
+    documentation = (ROOT / "docs/release/automation.md").read_text()
+
+    assert "tests/test_gsales_" not in workflow
+    assert "services/gsales/tests/" not in workflow
+    assert "tests/integration/gpoint-chat-schema-docker.py" in workflow
+    assert "GSales не входит в активную архитектуру релизов GPoint" in documentation
+    assert "Исторический контракт GSales Worker ниже не является release gate" in documentation
