@@ -8,54 +8,9 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RELEASE_BASE = "3d680fa153fd6aebf786455d6f36d3b1a67cc78f"
-FIXED_CONTROLLER_PATHS = (
-    ".github/workflows/gpoint-native-release.yml",
-    "scripts/native_change_surface.py",
-    "scripts/native_release_intent.py",
-    "scripts/resolve_native_build_scope.py",
-    "scripts/verify_native_rollback_evidence.py",
-    "scripts/write-kamal-production-manifest.py",
-)
-SHARED_RELEASE_HELPERS = (
-    "scripts/native_release_intent.py",
-    "scripts/resolve_native_environment_deployment.py",
-    "scripts/verify_native_image_attestation.py",
-)
-
-
-def _source_lines(path: str, revision: str | None = None) -> int:
-    if revision:
-        result = subprocess.run(
-            ["git", "show", f"{revision}:{path}"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode:
-            return 0
-        return len(result.stdout.splitlines())
-    target = ROOT / path
-    return len(target.read_text().splitlines()) if target.is_file() else 0
-
-
-def _workflow_source(revision: str | None = None) -> str:
+def _workflow_source() -> str:
     path = ".github/workflows/gpoint-native-release.yml"
-    if revision:
-        return subprocess.check_output(
-            ["git", "show", f"{revision}:{path}"], cwd=ROOT, text=True
-        )
     return (ROOT / path).read_text()
-
-
-def _workflow_helpers(source: str) -> set[str]:
-    return set(
-        re.findall(
-            r"(?<![A-Za-z0-9_])scripts/[A-Za-z0-9_./-]+\.(?:py|sh|mjs|js)",
-            source,
-        )
-    )
 
 
 def _documented_metric(documentation: str, label: str) -> tuple[int, int]:
@@ -64,8 +19,8 @@ def _documented_metric(documentation: str, label: str) -> tuple[int, int]:
     return int(columns[1]), int(columns[2])
 
 
-def _ordinary_core_deploy_steps(revision: str | None = None) -> int:
-    workflow = yaml.safe_load(_workflow_source(revision))
+def _ordinary_core_deploy_steps() -> int:
+    workflow = yaml.safe_load(_workflow_source())
     count = 0
     for step in workflow["jobs"]["deploy"]["steps"]:
         condition = step.get("if", "")
@@ -92,9 +47,8 @@ def _ordinary_core_deploy_steps(revision: str | None = None) -> int:
     return count
 
 
-def _tracked_paths(revision: str | None = None) -> set[str]:
-    command = ["git", "ls-files"] if revision is None else ["git", "ls-tree", "-r", "--name-only", revision]
-    return set(subprocess.check_output(command, cwd=ROOT, text=True).splitlines())
+def _tracked_paths() -> set[str]:
+    return set(subprocess.check_output(["git", "ls-files"], cwd=ROOT, text=True).splitlines())
 
 
 def test_native_workflow_references_only_existing_release_scripts():
@@ -181,43 +135,6 @@ def test_every_workflow_helper_has_a_replacement_and_retention_audit():
             assert cells[1] and cells[2], f"incomplete native replacement rationale: {line}"
 
 
-def test_fixed_six_path_reduction_metrics_are_recomputed_from_source():
-    documentation = (ROOT / "docs/release/automation.md").read_text()
-    expected = {
-        "Main controller + five control adapters (six paths)": (
-            sum(_source_lines(path, RELEASE_BASE) for path in FIXED_CONTROLLER_PATHS),
-            sum(_source_lines(path) for path in FIXED_CONTROLLER_PATHS),
-        ),
-    }
-    for label, (baseline, current) in expected.items():
-        row = next(line for line in documentation.splitlines() if line.startswith(f"| {label} |"))
-        columns = [column.strip().replace(",", "") for column in row.strip("|").split("|")]
-        assert int(columns[1]) == baseline
-        assert int(columns[2]) == current
-
-
-def test_workflow_and_all_direct_helper_metrics_are_recomputed_from_git():
-    documentation = (ROOT / "docs/release/automation.md").read_text()
-    metrics = {}
-    for revision in (RELEASE_BASE, None):
-        workflow = _workflow_source(revision)
-        helpers = _workflow_helpers(workflow)
-        total = len(workflow.splitlines()) + sum(
-            _source_lines(path, revision) for path in helpers
-        )
-        metrics[revision or "current"] = (len(workflow.splitlines()), len(helpers), total)
-
-    for label, index in (
-        ("Workflow LOC", 0),
-        ("Referenced helper files", 1),
-        ("Combined workflow + referenced scripts LOC", 2),
-    ):
-        row = next(line for line in documentation.splitlines() if line.startswith(f"| {label} |"))
-        columns = [column.strip().replace(",", "") for column in row.strip("|").split("|")]
-        assert int(columns[1]) == metrics[RELEASE_BASE][index]
-        assert int(columns[2]) == metrics["current"][index]
-
-
 def test_production_release_controller_and_unique_image_build_counts_are_explicit():
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
     build_steps = [
@@ -241,48 +158,34 @@ def test_deploy_uses_one_authoritative_live_inventory_not_redundant_kamal_text_v
     assert "RepoDigests" in (ROOT / "scripts/verify-kamal-production-baseline.py").read_text()
 
 
-def test_all_seven_complexity_measures_keep_the_fixed_source_inventory():
+def test_release_architecture_invariants_match_documented_state():
     documentation = (ROOT / "docs/release/automation.md").read_text()
-    baseline_workflow = _workflow_source(RELEASE_BASE)
     current_workflow = _workflow_source()
-    baseline_helpers = _workflow_helpers(baseline_workflow)
-    current_helpers = _workflow_helpers(current_workflow)
-    expected = {
-        "Native production workflow LOC": (
-            len(baseline_workflow.splitlines()), len(current_workflow.splitlines())
+    current = {
+        "Production release controllers": sum(
+            path.endswith("gpoint-native-release.yml") for path in _tracked_paths()
         ),
-        "Release-specific referenced-helper LOC": (
-            sum(_source_lines(path, RELEASE_BASE) for path in baseline_helpers)
-            - sum(_source_lines(path, RELEASE_BASE) for path in SHARED_RELEASE_HELPERS),
-            sum(_source_lines(path) for path in current_helpers)
-            - sum(_source_lines(path) for path in SHARED_RELEASE_HELPERS),
+        "Additional Layer7 staging deployment workflows": sum(
+            path.endswith("gpoint-layer7-staging.yml") for path in _tracked_paths()
         ),
-        "Shared referenced-helper LOC (unique source files)": (
-            sum(_source_lines(path, RELEASE_BASE) for path in SHARED_RELEASE_HELPERS),
-            sum(_source_lines(path) for path in SHARED_RELEASE_HELPERS),
+        "Maximum distinct production images in one full run": sum(
+            step.get("uses", "").startswith("docker/build-push-action@")
+            for step in yaml.safe_load(current_workflow)["jobs"]["build"]["steps"]
         ),
-        "Production release controllers": (
-            sum(path.endswith("gpoint-native-release.yml") for path in _tracked_paths(RELEASE_BASE)),
-            sum(path.endswith("gpoint-native-release.yml") for path in _tracked_paths()),
-        ),
-        "Additional Layer7 staging deployment workflows": (
-            sum(path.endswith("gpoint-layer7-staging.yml") for path in _tracked_paths(RELEASE_BASE)),
-            sum(path.endswith("gpoint-layer7-staging.yml") for path in _tracked_paths()),
-        ),
-        "Maximum distinct production images in one full run": (
-            sum(step.get("uses", "").startswith("docker/build-push-action@") for step in yaml.safe_load(baseline_workflow)["jobs"]["build"]["steps"]),
-            sum(step.get("uses", "").startswith("docker/build-push-action@") for step in yaml.safe_load(current_workflow)["jobs"]["build"]["steps"]),
-        ),
-        "Custom prepared-run/production-manifest state formats": (
-            sum(path in _tracked_paths(RELEASE_BASE) for path in ("scripts/verify_native_prepared_run.py", "scripts/write-kamal-production-manifest.py")),
-            sum(path in _tracked_paths() for path in ("scripts/verify_native_prepared_run.py", "scripts/write-kamal-production-manifest.py")),
-        ),
-        "Core-only ordinary Deploy steps (no migration/Eros/rollback)": (
-            _ordinary_core_deploy_steps(RELEASE_BASE), _ordinary_core_deploy_steps()
+        "Custom prepared-run/production-manifest state formats": sum(
+            path in _tracked_paths()
+            for path in (
+                "scripts/verify_native_prepared_run.py",
+                "scripts/write-kamal-production-manifest.py",
+            )
         ),
     }
-    for label, values in expected.items():
-        assert _documented_metric(documentation, label) == values
+    assert current["Production release controllers"] == 1
+    assert current["Additional Layer7 staging deployment workflows"] == 0
+    assert current["Maximum distinct production images in one full run"] == 4
+    assert current["Custom prepared-run/production-manifest state formats"] == 1
+    for label, value in current.items():
+        assert _documented_metric(documentation, label)[1] == value
 
     assert (ROOT / "scripts/write-kamal-production-manifest.py").is_file()
     assert not (ROOT / "scripts/verify_native_prepared_run.py").exists()

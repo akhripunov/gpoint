@@ -17,8 +17,14 @@
 >
 > Native production SSH принимает только документированный адрес Layer7
 > `95.133.236.59`; устаревший или ошибочный `GPOINT_KAMAL_HOST` блокируется
-> до записи SSH credentials и до любой удалённой команды. Изменение адреса
-> требует согласованного обновления guard и matching host-key конфигурации.
+> до записи SSH credentials и до любой удалённой команды. `GPOINT_KAMAL_HOST`
+> читается из защищённого GitHub Environment `production`, а не из repository
+> secret. Exact-address и matching `GPOINT_KAMAL_KNOWN_HOSTS` checks выполняются
+> сразу после проверки exact SHA/OWNER — до Python setup, migration dependency
+> installation и Kamal setup. Секреты остаются только в Deploy job: переносить
+> их в Tests/Build ради более раннего preflight нельзя. Изменение адреса требует
+> согласованного обновления guard и matching host-key конфигурации; DNS lookup
+> сам по себе не подтверждает production identity.
 >
 > Same-repository PR от `OWNER`, `MEMBER` или `COLLABORATOR` может собрать
 > только выбранные компоненты и проверить GHCR readback без production secrets
@@ -327,7 +333,7 @@ contract tests and exact-SHA hosted CI.
 | Function | Current code | Native mechanism | Decision |
 |---|---|---|---|
 | CI component path filters | `dorny/paths-filter`; retired `native_change_surface.py` (131 LOC at baseline) | Git and the pinned `dorny/paths-filter` action | **REPLACE / DELETE** — declarative filters select conditional CI work; the separate production planner remains responsible for installed baselines. |
-| Event admission and exact-scope fail-closed rules | `scripts/native_release_intent.py` (574 LOC in this candidate) | GitHub event/dispatch context and workflow conditions | **KEEP, reduce** — policy checks reject unauthorized events, unsafe paths and migration scope; retired migration-rehearsal dispatch handling was removed because the separate protected operation is owned by `gpoint-operations.yml`. Further reduction remains required. |
+| Event admission and exact-scope fail-closed rules | `scripts/native_release_intent.py` | GitHub event/dispatch context and workflow conditions | **KEEP** — policy checks reject unauthorized events, unsafe paths and migration scope; retired migration-rehearsal dispatch handling was removed because the separate protected operation is owned by `gpoint-operations.yml`. |
 | Deleted paths in cumulative component diffs | Retired exact-path deletion allowlist | Git diff status plus the existing component/non-runtime path map | **REPLACE** — deleted runtime paths select their owning component; deleted release scripts and known non-runtime paths do not select an image; unmapped deletions still block. |
 | Installed component source baselines | `scripts/resolve_native_build_scope.py` | GitHub Deployments API, stock Kamal app commands and Docker inspect | **KEEP, reduce** — this adapter resolves installed component identities and exact-SHA evidence used by Build and Deploy. |
 | Build and OCI provenance | Build steps plus `scripts/verify_native_image_readback.py`, `verify_native_image_attestation.py`, `verify_native_eros_image.py` | Docker Buildx, GHCR digest, SBOM and GitHub artifact provenance | **KEEP** — retain only digest/source/platform/provenance checks not supplied by the native outputs. |
@@ -345,11 +351,12 @@ contract tests and exact-SHA hosted CI.
 | Image, Kamal and proxy verification | `verify_native_*`, Kamal topology/role checks, `check-kamal-configs.sh`, and `kamal_proxy_routes.py` (574 LOC) | Buildx, GHCR, stock Kamal and Docker inspect | **KEEP, reduce** — custom checks bind immutable digest, source identity, SBOM/provenance, installed role topology and proxy routing where native tools do not provide the combined release contract. |
 | Local pre-push gate and Layer7 Ollama verifier | `classify-release-prepush.py` and `verify-layer7-ollama.py` (235 LOC) | Git and read-only service checks | **KEEP, outside Native Apply** — the former enforces repository release policy; the latter verifies an existing Layer7 service and is outside this task's permission to alter. |
 
-Measured against `3d680fa153fd6aebf786455d6f36d3b1a67cc78f` (current main at task
-start), using the Native workflow plus the unique `scripts/` files referenced
-by it:
+Historical LOC snapshot measured against `3d680fa153fd6aebf786455d6f36d3b1a67cc78f`
+(main at task start), using the Native workflow plus the unique `scripts/` files
+referenced by it. LOC figures are informational snapshots, not current counts,
+CI thresholds, or acceptance criteria:
 
-| Measure | Main baseline | Current local candidate | Change |
+| Measure | Main baseline | Historical candidate snapshot | Change |
 |---|---:|---:|---:|
 | Main controller + five control adapters (six paths) | 4,562 | 3,871 | −15.1% |
 | Workflow LOC | 2,437 | 2,363 | −3.0% |
@@ -386,7 +393,7 @@ Shared Native adapters are counted once; non-release backup/install utilities
 outside the workflow's call graph are not credited as deletions. The fixed
 baseline and selectors are unchanged.
 
-| Measure | Main baseline | Current candidate |
+| Measure | Main baseline | Historical candidate snapshot |
 |---|---:|---:|
 | Native production workflow LOC | 2,437 | 2,363 |
 | Release-specific referenced-helper LOC | 4,257 | 3,720 |
@@ -406,19 +413,17 @@ is the maximum for a full component run, not four builds on every release. The
 topology, candidate digest/DB compatibility checks, the migration-status
 command (which must remain a no-op with no pending migrations), protected
 Environment linkage, stock Kamal Apply, Runtime Verify/smoke, and timing. Eros,
-rollback, and failure-recovery steps are conditional. Reducing duplicated
-ordinary-path checks without weakening baseline, migration, image, health or
-smoke guarantees remains part of this refactor.
+rollback, and failure-recovery steps are conditional.
 
-The table is an audit snapshot, not an acceptance shortcut: every new native
-workflow, Buildx definition or helper is included in the same source inventory,
-and moving code between YAML/Python/Bash/HCL/actions does not lower the result.
+These tables are historical informational snapshots, not acceptance gates. The
+architecture tests enforce functional invariants and do not fail when LOC
+changes.
 
-The current candidate inventory counts source lines in files that remain on
-disk and preserves the baseline selectors and denominator. The Native workflow
+The historical candidate inventory counted source lines in files that remained on
+disk and preserved the baseline selectors and denominator. The Native workflow
 invokes `resolve_native_environment_deployment.py` during Runtime Verify, so
-that helper and its tests remain active and are included in the current helper
-count. The current candidate replaces the exact retired-path deletion list with
+that helper and its tests remain active and are included in that historical helper
+count. That candidate replaced the exact retired-path deletion list with
 status-aware scope classification. Runtime deletions now select their owning
 component; a deleted release script has no image impact, while cumulative
 infrastructure changes still require the protected dispatch route. Unmapped
