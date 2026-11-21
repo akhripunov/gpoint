@@ -162,6 +162,7 @@ jobs:
           docker run --rm --pull=never --platform linux/amd64 \
             --volume "$GITHUB_WORKSPACE:/workdir" \
             --volume "$HOME/.ssh:/root/.ssh:ro" \
+            --volume "$HOME/.ssh:$HOME/.ssh:ro" \
             --workdir /workdir \
             --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA \
             --env GPOINT_PRODUCTION_HOST --env GPOINT_SSH_KEY --env GPOINT_KNOWN_HOSTS_FILE \
@@ -183,6 +184,7 @@ jobs:
           docker run --rm --pull=never --platform linux/amd64 \
             --volume "$GITHUB_WORKSPACE:/workdir" \
             --volume "$HOME/.ssh:/root/.ssh:ro" \
+            --volume "$HOME/.ssh:$HOME/.ssh:ro" \
             --workdir /workdir \
             --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA \
             --env GPOINT_PRODUCTION_HOST --env GPOINT_SSH_KEY --env GPOINT_KNOWN_HOSTS_FILE \
