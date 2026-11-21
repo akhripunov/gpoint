@@ -10,9 +10,19 @@ import subprocess
 import sys
 from pathlib import Path
 
-from alembic.script import ScriptDirectory
-from alembic.script.revision import RevisionError
-from alembic.util.exc import CommandError
+try:
+    from alembic.script import ScriptDirectory
+    from alembic.script.revision import RevisionError
+    from alembic.util.exc import CommandError
+except ImportError:
+    # Static Prisma scans do not need AGATA's archived Alembic environment.
+    ScriptDirectory = None
+
+    class RevisionError(Exception):
+        pass
+
+    class CommandError(Exception):
+        pass
 
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 APPROVED_ALLOWLIST_SCHEMA = "gpoint-prisma-production-apply/v1"
@@ -172,6 +182,8 @@ def prisma_names(directory):
 
 
 def alembic_revisions(directory):
+    if ScriptDirectory is None:
+        raise ImportError("Alembic is required only for legacy AGATA ledger verification")
     version_directory = Path(directory).resolve(strict=True)
     source_root = version_directory.parent.parent
     if str(source_root) not in sys.path:

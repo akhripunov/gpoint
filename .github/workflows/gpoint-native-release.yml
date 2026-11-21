@@ -342,7 +342,7 @@ jobs:
           cache-dependency-path: services/gsales/pyproject.toml
       - name: Install Python test dependencies
         if: matrix.suite == 'python'
-        run: unset DATABASE_URL SHADOW_DATABASE_URL; python -m pip install './services/gsales[test]' pyyaml
+        run: unset DATABASE_URL SHADOW_DATABASE_URL; python -m pip install './services/gsales[test]' 'alembic==1.16.5' pyyaml
       - name: Test Native image read-back validation
         if: matrix.suite == 'python'
         run: |
@@ -1944,8 +1944,6 @@ jobs:
             "core|ghcr.io/akhripunov/gpoint-runtime|$CORE_DIGEST|$CORE_SOURCE_SHA"
             "miniapp|ghcr.io/akhripunov/gpoint-miniapp|$MINIAPP_DIGEST|$MINIAPP_SOURCE_SHA"
           )
-          if [[ "${{ inputs.rollback_eros }}" == true ]]; then
-          fi
           for item in "${targets[@]}"; do
             IFS='|' read -r role repository digest source_sha <<< "$item"
             docker pull --platform linux/amd64 "$repository@$digest"
