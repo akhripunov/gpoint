@@ -730,3 +730,45 @@ docker() {
     assert apply["env"]["ROLLBACK_WORKER_RUNNING"] == "${{ steps.baseline.outputs.ROLLBACK_WORKER_RUNNING }}"
     assert 'if [[ "$ROLLBACK_WORKER_RUNNING" == true ]]; then' in apply["run"]
     assert 'verify_role gpoint-core-worker "$CORE_VERSION" "$CORE_SOURCE_SHA"' in apply["run"]
+
+
+def test_eros_inventory_accepts_kamal_version_without_container_name(tmp_path):
+    import json
+
+    steps = _ROLLBACK["jobs"]["deploy"]["steps"]
+    inventory = next(step for step in steps if step.get("id") == "kamal_inventory")
+    topology = next(step for step in steps if step.get("id") == "topology")
+    version = "a" * 40 + "-93-1"
+    roles = {"gpoint-eros-pilot-engine": {"version": version}}
+    role_inventory = json.dumps({"roles": roles, "missing_roles": [], "mixed_components": []})
+    output = tmp_path / "output"
+    env = {
+        **os.environ,
+        "GITHUB_WORKSPACE": str(ROOT),
+        "GITHUB_OUTPUT": str(output),
+        "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
+        "GPOINT_PRODUCTION_HOST": "example.invalid",
+        "KAMAL_IMAGE": "unused",
+        "TEST_ROLE_INVENTORY": role_inventory,
+        "TEST_VERSION": version,
+    }
+    fake_commands = '''
+ssh() { printf '%s\\n' "$TEST_ROLE_INVENTORY"; }
+docker() { printf 'example.invalid: %s\\n' "$TEST_VERSION"; }
+'''
+    result = subprocess.run(["bash", "-c", fake_commands + inventory["run"]],
+                            env=env, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert f"eros_version={version}" in output.read_text().splitlines()
+
+    check = topology["run"].split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+    env.update(KAMAL_CORE_VERSION="ABSENT", KAMAL_MINIAPP_VERSION="ABSENT",
+               KAMAL_EROS_VERSION=version)
+    result = subprocess.run(["python3", "-c", check, role_inventory],
+                            env=env, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    env["KAMAL_EROS_VERSION"] = "b" * 40 + "-93-1"
+    result = subprocess.run(["python3", "-c", check, role_inventory],
+                            env=env, text=True, capture_output=True)
+    assert result.returncode != 0
+    assert "gpoint-eros-pilot-engine" in result.stderr

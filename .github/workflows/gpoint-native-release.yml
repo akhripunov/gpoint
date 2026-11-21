@@ -829,7 +829,7 @@ jobs:
               raise SystemExit("live Kamal role inventory is malformed")
           PY
           printf 'GPOINT_LIVE_ROLE_INVENTORY=%s\n' "$role_inventory" >> "$GITHUB_OUTPUT"
-          for config in config/deploy.yml config/deploy.miniapp.yml; do
+          for config in config/deploy.yml config/deploy.miniapp.yml config/deploy.eros.yml; do
             case "$config" in
               config/deploy.yml)
                 version_output=core_version
@@ -838,6 +838,10 @@ jobs:
               config/deploy.miniapp.yml)
                 version_output=miniapp_version
                 expected_role=gpoint-miniapp-web
+                ;;
+              config/deploy.eros.yml)
+                version_output=eros_version
+                expected_role=gpoint-eros-pilot-engine
                 ;;
             esac
             if ! python3 -c 'import json,sys; raise SystemExit(0 if sys.argv[2] in json.loads(sys.argv[1])["roles"] else 1)' \
@@ -870,12 +874,11 @@ jobs:
               echo "Kamal app version command failed for $config (exit=$version_status): $safe_error" >&2
               exit "$version_status"
             fi
-            mapfile -t versions < <(grep -Eo '[0-9a-f]{40}-[0-9]+-[0-9]+' <<< "$version_text" | sort -u)
-            if [[ "${#versions[@]}" != 1 ]]; then
-              echo "Kamal inventory could not resolve one exact current version for $config (matches=${#versions[@]})." >&2
+            version="$( { grep -Eo '[0-9a-f]{40}-[0-9]+-[0-9]+' <<< "$version_text" || test "$?" -eq 1; } | sort -u)"
+            if ! [[ "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]; then
+              echo "Kamal inventory could not resolve one exact current version for $config." >&2
               exit 1
             fi
-            version="${versions[0]}"
             printf '%s=%s\n' "$version_output" "$version" >> "$GITHUB_OUTPUT"
             printf '### Kamal inventory: %s\n\nCurrent version: **%s**\n\n' \
               "$config" "$version" >> "$GITHUB_STEP_SUMMARY"
@@ -886,6 +889,7 @@ jobs:
         env:
           KAMAL_CORE_VERSION: ${{ steps.kamal_inventory.outputs.core_version }}
           KAMAL_MINIAPP_VERSION: ${{ steps.kamal_inventory.outputs.miniapp_version }}
+          KAMAL_EROS_VERSION: ${{ steps.kamal_inventory.outputs.eros_version }}
           LIVE_ROLE_INVENTORY: ${{ steps.kamal_inventory.outputs.GPOINT_LIVE_ROLE_INVENTORY }}
         run: |
           set -euo pipefail
@@ -896,15 +900,16 @@ jobs:
           for role, expected in {
               "gpoint-core-api": os.environ["KAMAL_CORE_VERSION"],
               "gpoint-miniapp-web": os.environ["KAMAL_MINIAPP_VERSION"],
+              "gpoint-eros-pilot-engine": os.environ["KAMAL_EROS_VERSION"],
           }.items():
               if role not in roles:
                   if expected != "ABSENT":
-                      raise SystemExit("Kamal version exists for a role missing from the verified live inventory")
+                      raise SystemExit(f"Kamal version exists for {role}, absent from the verified live inventory")
                   continue
               if not re.fullmatch(r"[0-9a-f]{40}-[0-9]+-[0-9]+", expected):
-                  raise SystemExit("Kamal-reported runtime version is malformed")
+                  raise SystemExit(f"Kamal-reported runtime version is malformed for {role}")
               if roles[role]["version"] != expected:
-                  raise SystemExit("Kamal CLI version differs from verified running role inventory")
+                  raise SystemExit(f"Kamal CLI version differs from verified running role inventory for {role}")
           PY
           baseline_values="$(python3 - "$role_inventory" <<'PY'
           import json, re, sys
@@ -922,22 +927,6 @@ jobs:
           IFS=$'\t' read -r baseline_version baseline_source_sha eros_version eros_source_sha eros_installed <<< "$baseline_values"
           test -n "$baseline_version" && test -n "$baseline_source_sha"
           [[ "$eros_installed" == true || "$eros_installed" == false ]]
-          if [[ "$eros_installed" == true ]]; then
-            [[ "$eros_version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
-            for pair in "config/deploy.eros.yml|gpoint-eros-pilot-engine"; do
-              IFS='|' read -r config expected <<< "$pair"
-              if ! python3 -c 'import json,sys; raise SystemExit(0 if sys.argv[2] in json.loads(sys.argv[1])["roles"] else 1)' \
-                "$role_inventory" "$expected"; then
-                continue
-              fi
-              output="$(docker run --rm --pull=never --platform linux/amd64 --volume "$GITHUB_WORKSPACE:/workdir" --volume "$HOME/.ssh:/root/.ssh:ro" --workdir /workdir --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA --env GPOINT_PRODUCTION_HOST --env GPOINT_SSH_KEY --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 app version --config-file "$config")"
-              role_version="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["roles"][sys.argv[2]]["version"])' "$role_inventory" "$expected")"
-              [[ "$role_version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
-              grep -F "$expected-$role_version" <<< "$output" >/dev/null
-            done
-          else
-            test "$eros_version" = ABSENT
-          fi
           facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$baseline_version" "$baseline_source_sha" <<'REMOTE'
           set -euo pipefail
           baseline_version="$1"
