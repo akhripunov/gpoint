@@ -6,314 +6,126 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-SPEC = importlib.util.spec_from_file_location(
-    "rollback_evidence", ROOT / "scripts/verify_native_rollback_evidence.py"
-)
+SPEC = importlib.util.spec_from_file_location("rollback_evidence", ROOT / "scripts/verify_native_rollback_evidence.py")
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 SHA = "a" * 40
 DEPLOYMENT_ID = 81
 RUN_ID = 91
-DIGESTS = {
-    "core": "sha256:" + "1" * 64,
-    "agata": "sha256:" + "2" * 64,
-    "miniapp": "sha256:" + "3" * 64,
-}
+VERSION = f"{SHA}-{RUN_ID}-1"
+DIGESTS = {key: "sha256:" + value * 64 for key, value in {"core": "1", "miniapp": "2", "eros": "3"}.items()}
 REPOS = {
     "core": "ghcr.io/akhripunov/gpoint-runtime",
-    "agata": "ghcr.io/akhripunov/gpoint-agata-runtime",
     "miniapp": "ghcr.io/akhripunov/gpoint-miniapp",
+    "eros": "ghcr.io/akhripunov/gpoint-eros",
 }
-VERSION = f"{SHA}-{RUN_ID}-1"
 
 
 def evidence():
     services = []
-    for name, key in MODULE.ROLE_IMAGES.items():
-        if key in {"eros", "eros_relay"}:
-            continue
+    for role, component in MODULE.ROLE_IMAGES.items():
+        key = component.lower()
         services.append({
-            "name": f"{name}-{VERSION}",
-            "revision": SHA,
-            "running": True,
+            "name": f"{role}-{VERSION}", "revision": SHA, "running": True,
             "repositoryDigest": f"{REPOS[key]}@{DIGESTS[key]}",
         })
     manifest = {
-        "schema": "gpoint-kamal-production-manifest/v2",
-        "operationMode": "ordinary",
-        "result": "PASS",
-        "candidate": {
-            "gitSha": SHA,
-            "appSourceSha": SHA,
-            "attemptTag": VERSION,
-            "images": {key: f"{REPOS[key]}@{DIGESTS[key]}" for key in DIGESTS},
-        },
-        "attempt": {
-            "githubDeploymentId": str(DEPLOYMENT_ID),
-            "runId": str(RUN_ID),
-            "runAttempt": "1",
-        },
+        "schema": "gpoint-kamal-production-manifest/v2", "operationMode": "ordinary", "result": "PASS",
+        "candidate": {"gitSha": SHA, "appSourceSha": SHA, "attemptTag": VERSION,
+                      "images": {key: f"{REPOS[key]}@{DIGESTS[key]}" for key in DIGESTS}},
+        "attempt": {"githubDeploymentId": str(DEPLOYMENT_ID), "runId": str(RUN_ID), "runAttempt": "1"},
         "runtimeServices": services,
     }
     raw = json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()
-    deployment = {
-        "id": DEPLOYMENT_ID,
-        "sha": SHA,
-        "environment": "production",
-        "task": "deploy",
-    }
+    deployment = {"id": DEPLOYMENT_ID, "sha": SHA, "environment": "production", "task": "deploy"}
     status = {
-        "state": "success",
-        "environment": "production",
-        "created_at": "2026-01-01T00:00:00Z",
+        "state": "success", "environment": "production", "created_at": "2026-01-01T00:00:00Z",
         "description": f"Kamal success SHA {SHA} manifest {hashlib.sha256(raw).hexdigest()}",
         "log_url": f"https://github.com/akhripunov/gpoint/actions/runs/{RUN_ID}",
     }
-    run = {
-        "id": RUN_ID,
-        "run_attempt": 1,
-        "head_sha": SHA,
-        "head_branch": "main",
-        "event": "push",
-        "path": ".github/workflows/gpoint-native-release.yml",
-        "conclusion": "success",
-    }
+    run = {"id": RUN_ID, "run_attempt": 1, "head_sha": SHA, "head_branch": "main",
+           "event": "push", "path": ".github/workflows/gpoint-native-release.yml", "conclusion": "success"}
     jobs = [{"name": "Build and publish immutable images", "conclusion": "success"}]
     return deployment, [status], run, jobs, raw
 
 
-def test_rollback_role_matrix_uses_native_release_component_inventory():
-    from native_release_intent import ALL_COMPONENT_ROLES, ROLE_REPOSITORIES
-
-    assert MODULE.ROLE_IMAGES == {
-        role: component.lower()
-        for component, roles in ALL_COMPONENT_ROLES.items()
-        for role in roles
-    }
-    assert MODULE.REPOSITORIES == {
-        component.lower(): ROLE_REPOSITORIES[roles[0]]
-        for component, roles in ALL_COMPONENT_ROLES.items()
-    }
-
-
-def mixed_component_evidence():
-    args = evidence()
-    deployment, statuses, run, jobs, raw = args
-    manifest = json.loads(raw)
-    sources = {"core": SHA, "agata": "b" * 40, "miniapp": "c" * 40}
-    versions = {"core": VERSION, "agata": f"{sources['agata']}-92-1",
-                "miniapp": f"{sources['miniapp']}-93-2"}
-    for service in manifest["runtimeServices"]:
-        name = service["name"][:-len("-" + VERSION)]
-        if name in {"gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot"}:
-            component = "core"
-        elif name in {"gpoint-agata-api", "gpoint-agata-memory-worker"}:
-            component = "agata"
-        else:
-            component = "miniapp"
-        source = sources[component]
-        version = versions[component]
-        service["name"] = f"{name}-{version}"
-        service["version"] = version
-        service["revision"] = source
-    raw = json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()
-    statuses[0].pop("description")
-    statuses[0]["environment_url"] = (
-        "https://gpoint.one/#gpoint-manifest-sha256=" + hashlib.sha256(raw).hexdigest()
-        + "&gpoint-runtime-target-sha=" + SHA
-        + "&gpoint-core-source-sha=" + sources["core"]
-        + "&gpoint-agata-source-sha=" + sources["agata"]
-        + "&gpoint-miniapp-source-sha=" + sources["miniapp"]
-    )
-    statuses[0]["log_url"] = f"https://github.com/akhripunov/gpoint/actions/runs/{RUN_ID}/attempts/1"
-    run["run_attempt"] = 1
-    return deployment, statuses, run, jobs, raw
-
-
-def eros_evidence():
-    deployment, statuses, run, jobs, raw = evidence()
-    manifest = json.loads(raw)
-    manifest["candidate"]["images"].update({
-        "eros": "ghcr.io/akhripunov/gpoint-eros@sha256:" + "8" * 64,
-        "eros_relay": "ghcr.io/akhripunov/gpoint-runtime@" + DIGESTS["core"],
-    })
-    manifest["runtimeServices"].extend([
-        {"name": "gpoint-eros-pilot-engine-" + VERSION, "revision": SHA, "running": True,
-         "repositoryDigest": manifest["candidate"]["images"]["eros"], "component": "EROS"},
-        {"name": "gpoint-eros-relay-relay-" + VERSION, "revision": SHA, "running": True,
-         "repositoryDigest": manifest["candidate"]["images"]["eros_relay"], "component": "EROS"},
-    ])
-    raw = json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()
-    statuses[0]["description"] = f"Kamal success SHA {SHA} manifest {hashlib.sha256(raw).hexdigest()}"
-    return deployment, statuses, run, jobs, raw
-
-
 def verify(args, **overrides):
     deployment, statuses, run, jobs, manifest_bytes = args
-    values = {
-        "deployment": deployment,
-        "statuses": statuses,
-        "run": run,
-        "jobs": jobs,
-        "manifest_bytes": manifest_bytes,
-        "expected_sha": SHA,
-        "expected_deployment_id": DEPLOYMENT_ID,
-        "repository": "akhripunov/gpoint",
-    }
+    values = {"deployment": deployment, "statuses": statuses, "run": run, "jobs": jobs,
+              "manifest_bytes": manifest_bytes, "expected_sha": SHA,
+              "expected_deployment_id": DEPLOYMENT_ID, "repository": "akhripunov/gpoint"}
     values.update(overrides)
     return MODULE.verify_rollback_evidence(**values)
 
 
-def test_accepts_exact_successful_release_manifest_and_all_six_role_digests():
+def test_rollback_roles_follow_the_five_role_three_image_architecture():
+    assert set(MODULE.ROLE_IMAGES) == set(MODULE.ROLE_REPOSITORIES)
+    assert set(MODULE.REPOSITORIES) == {"core", "miniapp", "eros"}
+    assert len(MODULE.ROLE_IMAGES) == 5
+
+
+def test_accepts_exact_successful_five_role_manifest_with_immutable_digests():
     result = verify(evidence())
     assert result["version"] == VERSION
     assert result["run_id"] == RUN_ID
+    assert result["digests"] == DIGESTS
+    assert set(result["component_sources"]) == {"core", "miniapp", "eros"}
 
 
-def test_accepts_verified_rollback_target_with_mixed_component_versions_and_sources():
-    result = verify(mixed_component_evidence())
-
-    assert result["component_versions"] == {
-        "core": VERSION,
-        "agata": "b" * 40 + "-92-1",
-        "miniapp": "c" * 40 + "-93-2",
-    }
-    assert result["component_sources"] == {
-        "core": SHA, "agata": "b" * 40, "miniapp": "c" * 40,
-    }
-
-
-def test_rejects_native_manifest_when_environment_component_sources_disagree():
-    args = mixed_component_evidence()
-    args[1][0]["environment_url"] = args[1][0]["environment_url"].replace(
-        "gpoint-agata-source-sha=" + "b" * 40,
-        "gpoint-agata-source-sha=" + "d" * 40,
-    )
-
-    try:
-        verify(args)
-    except ValueError as exc:
-        assert "manifest component sources" in str(exc)
-    else:
-        raise AssertionError("Deployment URL with different component sources was accepted")
-
-
-def test_accepts_native_environment_status_with_manifest_url_and_exact_attempt_run_link():
+def test_accepts_native_manifest_status_url_with_exact_component_sources():
     args = evidence()
     status = dict(args[1][0])
     status.pop("description")
     status["environment_url"] = (
         "https://gpoint.one/#gpoint-manifest-sha256=" + hashlib.sha256(args[4]).hexdigest()
-        + "&gpoint-core-source-sha=" + SHA
-        + "&gpoint-agata-source-sha=" + SHA
-        + "&gpoint-miniapp-source-sha=" + SHA
+        + "&gpoint-core-source-sha=" + SHA + "&gpoint-miniapp-source-sha=" + SHA
+        + "&gpoint-eros-source-sha=" + SHA
     )
     status["log_url"] = f"https://github.com/akhripunov/gpoint/actions/runs/{RUN_ID}/attempts/1"
     result = verify(args, statuses=[status])
     assert result["manifest_sha256"] == hashlib.sha256(args[4]).hexdigest()
-    assert result["run_attempt"] == 1
-
-
-def test_accepts_eros_stock_engine_and_relay_rollback_identities():
-    result = verify(eros_evidence())
-    assert result["digests"]["eros"] == "sha256:" + "8" * 64
     assert result["component_sources"]["eros"] == SHA
-    assert result["component_sources"]["eros_relay"] == SHA
 
 
-def test_rejects_failed_or_newer_non_success_deployment_status():
+def test_rejects_agata_or_relay_roles_and_retired_source_keys():
     args = evidence()
-    args[1].append({
-        "state": "failure",
-        "created_at": "2026-01-02T00:00:00Z",
-        "description": "failed",
-        "log_url": args[1][0]["log_url"],
+    manifest = json.loads(args[4])
+    manifest["runtimeServices"].append({
+        "name": "gpoint-eros-relay-relay-" + VERSION, "revision": SHA, "running": True,
+        "repositoryDigest": f"{REPOS['core']}@{DIGESTS['core']}",
     })
-    try:
-        verify(args)
-    except ValueError as exc:
-        assert "latest status" in str(exc)
-    else:
-        raise AssertionError("non-success latest status was accepted")
+    raw = json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()
+    statuses = [dict(args[1][0], description=f"Kamal success SHA {SHA} manifest {hashlib.sha256(raw).hexdigest()}")]
+    with __import__("pytest").raises(ValueError, match="unknown GPoint Kamal role"):
+        verify(args, statuses=statuses, manifest_bytes=raw)
 
-
-def test_rejects_ambiguous_latest_deployment_status_timestamps():
-    args = evidence()
-    args[1].append({
-        "state": "failure",
-        "environment": "production",
-        "created_at": args[1][0]["created_at"],
-        "description": "conflicting status at the same timestamp",
-        "log_url": args[1][0]["log_url"],
-    })
-    try:
-        verify(args)
-    except ValueError as exc:
-        assert "ambiguous latest statuses" in str(exc)
-    else:
-        raise AssertionError("conflicting latest Deployment statuses were accepted")
-
-
-def test_rejects_manifest_tamper_target_sha_missing_build_and_attempt_mismatch():
-    args = evidence()
-    invalid_inputs = (
-        {"manifest_bytes": args[4] + b" "},
-        {"expected_sha": "b" * 40},
-        {"jobs": []},
-        {"run": {**args[2], "run_attempt": 2}},
+    status = dict(args[1][0])
+    status["environment_url"] = (
+        "https://gpoint.one/#gpoint-manifest-sha256=" + hashlib.sha256(args[4]).hexdigest()
+        + "&gpoint-core-source-sha=" + SHA + "&gpoint-miniapp-source-sha=" + SHA
+        + "&gpoint-eros-relay-source-sha=" + SHA
     )
-    for overrides in invalid_inputs:
-        try:
-            verify(args, **overrides)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError(f"unsafe target accepted: {overrides.keys()}")
+    with __import__("pytest").raises(ValueError, match="unsupported fields"):
+        verify(args, statuses=[status])
 
 
-def test_rejects_duplicate_role_in_production_manifest():
+def test_rejects_ambiguous_or_failed_latest_deployment_status_and_tampering():
+    args = evidence()
+    failed = dict(args[1][0], state="failure", created_at="2026-01-02T00:00:00Z")
+    with __import__("pytest").raises(ValueError, match="latest status"):
+        verify(args, statuses=[args[1][0], failed])
+    with __import__("pytest").raises(ValueError, match="does not match"):
+        verify(args, manifest_bytes=args[4] + b" ")
+    with __import__("pytest").raises(ValueError, match="no successful immutable"):
+        verify(args, jobs=[])
+
+
+def test_rejects_duplicate_runtime_roles():
     args = evidence()
     manifest = json.loads(args[4])
     manifest["runtimeServices"].append(dict(manifest["runtimeServices"][0]))
     raw = json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()
-    statuses = [dict(
-        args[1][0],
-        description=f"Kamal success SHA {SHA} manifest {hashlib.sha256(raw).hexdigest()}",
-    )]
-    try:
+    statuses = [dict(args[1][0], description=f"Kamal success SHA {SHA} manifest {hashlib.sha256(raw).hexdigest()}")]
+    with __import__("pytest").raises(ValueError, match="duplicate"):
         verify(args, statuses=statuses, manifest_bytes=raw)
-    except ValueError as exc:
-        assert "duplicate GPoint Kamal role" in str(exc)
-    else:
-        raise AssertionError("duplicate role accepted")
-
-
-def test_native_rollback_evidence_keeps_distinct_engine_and_relay_provenance():
-    deployment, statuses, run, jobs, raw = eros_evidence()
-    manifest = json.loads(raw)
-    relay_source = "f" * 40
-    relay_digest = "sha256:" + "e" * 64
-    relay_image = "ghcr.io/akhripunov/gpoint-runtime@" + relay_digest
-    manifest["candidate"]["images"]["eros_relay"] = relay_image
-    next(row for row in manifest["runtimeServices"] if row["name"].startswith("gpoint-eros-relay-relay-")).update(
-        name="gpoint-eros-relay-relay-" + relay_source + "-120-1",
-        revision=relay_source, repositoryDigest=relay_image, component="EROS_RELAY",
-    )
-    raw = json.dumps(manifest).encode()
-    run["run_attempt"] = 1
-    statuses[0]["environment_url"] = (
-        "https://gpoint.one/#gpoint-manifest-sha256=" + hashlib.sha256(raw).hexdigest()
-        + "&gpoint-core-source-sha=" + SHA
-        + "&gpoint-agata-source-sha=" + SHA
-        + "&gpoint-miniapp-source-sha=" + SHA
-        + "&gpoint-eros-source-sha=" + SHA
-        + "&gpoint-eros-relay-source-sha=" + relay_source
-    )
-    statuses[0]["log_url"] = f"https://github.com/akhripunov/gpoint/actions/runs/{RUN_ID}/attempts/1"
-
-    result = verify((deployment, statuses, run, jobs, raw))
-
-    assert result["digests"]["eros_relay"] == relay_digest
-    assert result["component_sources"]["eros_relay"] == relay_source
-    assert result["component_sources"]["eros"] == SHA

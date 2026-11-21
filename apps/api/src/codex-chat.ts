@@ -1,8 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { BadRequestException, Body, Controller, Headers, HttpException, Param, Post, Req, UnauthorizedException } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
-import { createAgataIntegration } from './agata-integration.js';
+import { ErosAdapterError, createErosEngineClient, erosIdentityFor, isGpointOwnedChatIdentity, isGpointOwnedErosMode } from './eros-adapter.js';
 import { hashCodexCredential, isCodexOwnerAllowed, isCodexRefreshOwnerCurrent, parseCodexOwnerUserIds, parseCodexTrustedProxyIps, resolveCodexDeviceStartRateKey, resolveCodexMessageSession, validateTelegramCodexApproval, validTelegramWebhookSecret, CODEX_ACCESS_TTL_MS, CODEX_DEVICE_TTL_MS, CODEX_REFRESH_TTL_MS } from './codex-chat-auth.js';
+import { isGpointChatPermitted, loadGpointChatState } from './gpoint-chat-store.js';
 import { FixedWindowRateLimiter } from './rate-limit.js';
 
 const prisma = new PrismaClient();
@@ -13,6 +14,70 @@ const challenge = () => randomBytes(32).toString('base64url');
 function bearer(body: unknown, field: 'deviceCode' | 'refreshToken') {
   if (!body || typeof body !== 'object' || typeof (body as Record<string, unknown>)[field] !== 'string' || ((body as Record<string, string>)[field]).length < 32 || ((body as Record<string, string>)[field]).length > 256) throw new BadRequestException({ code: 'invalid_codex_authorization' });
   return (body as Record<string, string>)[field];
+}
+
+type CodexErosMappingStore = Pick<PrismaClient, 'erosRelationshipMapping'>;
+
+export async function hasExistingErosCodexConversation(
+  userId: string,
+  creatorId: string,
+  db: CodexErosMappingStore,
+  eros: NonNullable<ReturnType<typeof createErosEngineClient>>,
+): Promise<boolean> {
+  const mapping = await db.erosRelationshipMapping.findUnique({
+    where: { userId_creatorId: { userId, creatorId } },
+    select: { instanceId: true },
+  });
+  if (!mapping) return false;
+  const identity = erosIdentityFor({ userId, creatorId });
+  const sessions = await eros.sessions(identity.userId);
+  const matching = sessions
+    .filter((session) => session.channel === 'text' && session.instanceId === mapping.instanceId)
+    .sort((a, b) => Date.parse(b.lastActiveAt) - Date.parse(a.lastActiveAt));
+  for (const session of matching) {
+    const history = await eros.history(identity.userId, session.sessionId, 1);
+    if (history.messages.length > 0) return true;
+  }
+  return false;
+}
+
+export async function approveCodexDeviceWithTelegram(
+  headers: Record<string, string | undefined>,
+  body: { payload?: unknown; chat?: { id?: number | string; type?: string }; from?: { id?: number | string } },
+  db: PrismaClient = prisma,
+) {
+  const expected = process.env.TELEGRAM_WEBHOOK_SECRET;
+  if (!validTelegramWebhookSecret(headers['x-telegram-webhook-secret'], expected)) throw new UnauthorizedException();
+  const proof = validateTelegramCodexApproval(body);
+  if (!proof) throw new UnauthorizedException();
+  const { payload, telegramUserId: senderId } = proof;
+  if (!approvalLimiter.allow(`codex-telegram-approve:${senderId}`)) throw new HttpException({ code: 'RATE_LIMITED' }, 429);
+  const user = await db.user.findUnique({ where: { telegramUserId: BigInt(senderId) }, select: { id: true } });
+  if (!user || !isCodexOwnerAllowed(user.id, ownerIds())) throw new UnauthorizedException();
+  const authorization = await db.codexDeviceAuthorization.findFirst({ where: { telegramChallengeHash: hashCodexCredential(payload), expiresAt: { gt: new Date() }, userId: null, consumedAt: null }, select: { id: true, creatorId: true } });
+  if (!authorization?.creatorId) throw new UnauthorizedException();
+  const creator = await db.creator.findFirst({ where: { id: authorization.creatorId, profile: { status: 'APPROVED' }, owners: { some: { userId: user.id } } }, select: { id: true } });
+  if (!creator) throw new UnauthorizedException();
+  if (!isGpointOwnedErosMode() || !isGpointOwnedChatIdentity(user.id, creator.id)) throw new UnauthorizedException();
+  if (!isGpointChatPermitted(await loadGpointChatState(db, user.id))) throw new UnauthorizedException();
+  const eros = createErosEngineClient();
+  if (!eros) throw new HttpException({ code: 'EROS_UNAVAILABLE' }, 503);
+  let hasHistory: boolean;
+  try {
+    hasHistory = await hasExistingErosCodexConversation(user.id, creator.id, db, eros);
+  } catch (error) {
+    if (error instanceof ErosAdapterError) throw new HttpException({ code: 'EROS_UNAVAILABLE' }, 503);
+    throw error;
+  }
+  if (!hasHistory) throw new UnauthorizedException();
+
+  const now = new Date();
+  const updated = await db.codexDeviceAuthorization.updateMany({
+    where: { id: authorization.id, telegramChallengeHash: hashCodexCredential(payload), expiresAt: { gt: now }, userId: null, consumedAt: null },
+    data: { userId: user.id },
+  });
+  if (!updated.count) throw new UnauthorizedException();
+  return { approved: true };
 }
 
 @Controller('auth/codex')
@@ -43,29 +108,7 @@ export class CodexChatController {
   }
 
   @Post('telegram/codex-approve') async telegramApprove(@Headers() headers: Record<string, string | undefined>, @Body() body: { payload?: unknown; chat?: { id?: number | string; type?: string }; from?: { id?: number | string } }) {
-    const expected = process.env.TELEGRAM_WEBHOOK_SECRET;
-    if (!validTelegramWebhookSecret(headers['x-telegram-webhook-secret'], expected)) throw new UnauthorizedException();
-    const proof = validateTelegramCodexApproval(body);
-    if (!proof) throw new UnauthorizedException();
-    const { payload, telegramUserId: senderId } = proof;
-    if (!approvalLimiter.allow(`codex-telegram-approve:${senderId}`)) throw new HttpException({ code: 'RATE_LIMITED' }, 429);
-    const user = await prisma.user.findUnique({ where: { telegramUserId: BigInt(senderId) }, select: { id: true } });
-    if (!user || !isCodexOwnerAllowed(user.id, ownerIds())) throw new UnauthorizedException();
-    const authorization = await prisma.codexDeviceAuthorization.findFirst({ where: { telegramChallengeHash: hashCodexCredential(payload), expiresAt: { gt: new Date() }, userId: null, consumedAt: null }, select: { id: true, creatorId: true } });
-    if (!authorization?.creatorId) throw new UnauthorizedException();
-    const agata = createAgataIntegration();
-    if (!agata) throw new HttpException({ code: 'MESSAGES_UNAVAILABLE' }, 503);
-    const creator = await prisma.creator.findFirst({ where: { id: authorization.creatorId, profile: { status: 'APPROVED' }, owners: { some: { userId: user.id } } }, select: { id: true } });
-    if (!creator) throw new UnauthorizedException();
-    const history = await agata.listMessages(user.id, creator.id, { limit: 1 });
-    if (!history.items.length) throw new UnauthorizedException();
-    const now = new Date();
-    const updated = await prisma.codexDeviceAuthorization.updateMany({
-      where: { id: authorization.id, telegramChallengeHash: hashCodexCredential(payload), expiresAt: { gt: now }, userId: null, consumedAt: null },
-      data: { userId: user.id },
-    });
-    if (!updated.count) throw new UnauthorizedException();
-    return { approved: true };
+    return approveCodexDeviceWithTelegram(headers, body);
   }
 
   @Post('device/exchange') async exchange(@Body() body: unknown) {

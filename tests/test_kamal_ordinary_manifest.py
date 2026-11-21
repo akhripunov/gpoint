@@ -10,7 +10,6 @@ ROOT = Path(__file__).resolve().parents[1]
 WRITER = ROOT / "scripts/write-kamal-production-manifest.py"
 SHA = "a" * 40
 APP = "sha256:" + "1" * 64
-AGATA = "sha256:" + "2" * 64
 MINIAPP = "sha256:" + "3" * 64
 VERSION = f"{SHA}-42-2"
 DB_ID = "d" * 64
@@ -34,7 +33,7 @@ if args[0] == "inspect" and name == "kamal-proxy":
 elif args[0] == "inspect" and name in ("shared_postgres_1", "shared_redis_1"):
  ident="{DB_ID}" if name == "shared_postgres_1" else "{REDIS_ID}"
  print(json.dumps([{{"Id":ident,"State":{{"Running":True}}}}]))
-elif args[0] == "inspect" and name.startswith(("gsales-", "legacy-")):
+elif args[0] == "inspect" and name.startswith("legacy-"):
  service=name.split("-", 1)[1]
  running=(name.startswith("legacy-") and __import__("os").environ.get("ACTIVE_COMPOSE_SERVICE") == service)
  print(json.dumps([{{"Id":name,"State":{{"Running":running}}}}]))
@@ -58,7 +57,7 @@ elif args[0:2] == ["ps", "-aq"]:
      or args[4] != "--filter" or not args[5].startswith("label=com.docker.compose.service=")):
   raise SystemExit("invalid Docker filter argument contract")
  service=args[-1].split("=")[-1]
- prefix="legacy-" if service in ("api", "worker", "bot", "agata-api", "agata-memory-worker") else "gsales-"
+ prefix="legacy-"
  print(prefix+service)
 else: raise SystemExit(2)
 ''')
@@ -76,22 +75,18 @@ def expected_roles_b64(scope="FULL"):
         "gpoint-core-api": ("CORE", "ghcr.io/akhripunov/gpoint-runtime", APP),
         "gpoint-core-worker": ("CORE", "ghcr.io/akhripunov/gpoint-runtime", APP),
         "gpoint-core-bot": ("CORE", "ghcr.io/akhripunov/gpoint-runtime", APP),
-        "gpoint-agata-api": ("AGATA", "ghcr.io/akhripunov/gpoint-agata-runtime", AGATA),
-        "gpoint-agata-memory-worker": ("AGATA", "ghcr.io/akhripunov/gpoint-agata-runtime", AGATA),
         "gpoint-miniapp-web": ("MINIAPP", "ghcr.io/akhripunov/gpoint-miniapp", MINIAPP),
+        "gpoint-eros-pilot-engine": ("EROS", "ghcr.io/akhripunov/gpoint-eros", "sha256:" + "a" * 64),
     }
-    components = {"CORE": ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot"),
-                  "AGATA": ("gpoint-agata-api", "gpoint-agata-memory-worker"),
-                  "MINIAPP": ("gpoint-miniapp-web",)}
-    if {"EROS", "EROS_RELAY"}.intersection(scope.split("+")):
-        roles.update({
-            "gpoint-eros-pilot-engine": ("EROS", "ghcr.io/akhripunov/gpoint-eros", "sha256:" + "a" * 64),
-            "gpoint-eros-relay-relay": ("EROS_RELAY", "ghcr.io/akhripunov/gpoint-runtime", "sha256:" + "e" * 64),
-        })
-        components["EROS"] = ("gpoint-eros-pilot-engine",)
-        components["EROS_RELAY"] = ("gpoint-eros-relay-relay",)
+    components = {
+        "CORE": ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot"),
+        "MINIAPP": ("gpoint-miniapp-web",),
+        "EROS": ("gpoint-eros-pilot-engine",),
+    }
     updated = set(components) if scope == "FULL" else set(scope.split("+")) - {"NONE"}
     baseline = "b" * 40
+    component_ids = {"CORE": "5", "MINIAPP": "9", "EROS": "a"}
+    component_digests = {"CORE": "4", "MINIAPP": "7", "EROS": "a"}
     role_rows = {}
     for role, (component, repository, digest) in roles.items():
         role_rows[role] = ({"version": VERSION, "sourceSha": SHA,
@@ -99,8 +94,8 @@ def expected_roles_b64(scope="FULL"):
                             "baselineImageId": None}
                            if component in updated else
                            {"version": baseline + "-40-1", "sourceSha": baseline,
-                            "repositoryDigest": repository + "@sha256:" + ("4" if component == "CORE" else "6" if component == "AGATA" else "7" if component == "MINIAPP" else "a" if role == "gpoint-eros-pilot-engine" else "4") * 64,
-                            "baselineImageId": "sha256:" + ("5" if component == "CORE" else "8" if component == "AGATA" else "9" if component == "MINIAPP" else "a" if component == "EROS" else "b") * 64})
+                            "repositoryDigest": repository + "@sha256:" + component_digests[component] * 64,
+                            "baselineImageId": "sha256:" + component_ids[component] * 64})
     value = {
         "schema": 1, "candidateSha": SHA, "scope": scope,
         "updatedComponents": sorted(updated), "roles": role_rows,
@@ -112,16 +107,16 @@ def ordinary_args(output: Path):
     return [
         "--mode", "ordinary", "--output", str(output), "--sha", SHA,
         "--app-source-sha", SHA, "--version", VERSION,
-        "--app-digest", APP, "--agata-digest", AGATA, "--miniapp-digest", MINIAPP,
+        "--app-digest", APP, "--miniapp-digest", MINIAPP,
+        "--eros-digest", "sha256:" + "a" * 64,
         "--run-id", "42", "--attempt", "2", "--deployment-id", "987",
         "--db-container-id", DB_ID, "--redis-container-id", REDIS_ID,
-        "--prisma-head", "20261022110000_eros_gpoint_message_state", "--agata-head", "agata0012",
+        "--prisma-head", "20261022110000_eros_gpoint_message_state",
         "--prisma-migrations", "20261015130000_baseline,20261022110000_eros_gpoint_message_state",
         "--prisma-checksums", "20261015130000_baseline=" + "1" * 64 + ",20261022110000_eros_gpoint_message_state=" + "2" * 64,
         "--baseline-prisma-head", "20261022110000_eros_gpoint_message_state",
         "--baseline-prisma-migrations", "20261015130000_baseline,20261022110000_eros_gpoint_message_state",
         "--baseline-prisma-checksums", "20261015130000_baseline=" + "1" * 64 + ",20261022110000_eros_gpoint_message_state=" + "2" * 64,
-        "--baseline-agata-head", "agata0012",
         "--pending-prisma-migrations", "",
         "--pending-prisma-checksums", "",
         "--expected-role-identities-b64", expected_roles_b64(),
@@ -138,9 +133,9 @@ def run_ordinary(tmp_path: Path, *, active_caddy=False, role_plan_b64=None):
     if role_plan_b64:
         args[args.index("--expected-role-identities-b64") + 1] = role_plan_b64
         roles = json.loads(base64.b64decode(role_plan_b64))["roles"]
-        if "gpoint-eros-pilot-engine" in roles:
-            args.extend(["--eros-digest", "sha256:" + "a" * 64, "--eros-relay-digest",
-                         roles["gpoint-eros-relay-relay"]["repositoryDigest"].split("@")[1]])
+        if "gpoint-eros-pilot-engine" not in roles:
+            args.remove("--eros-digest")
+            args.remove("sha256:" + "a" * 64)
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
            "EXPECTED_ROLE_PLAN_B64": args[args.index("--expected-role-identities-b64") + 1]}
     result = subprocess.run([sys.executable, str(WRITER), *args],
@@ -156,16 +151,16 @@ def test_ordinary_manifest_binds_services_database_proxy_tls_and_routes(tmp_path
     assert manifest["operationMode"] == "ordinary"
     assert manifest["candidate"]["gitSha"] == SHA
     assert manifest["candidate"]["appSourceSha"] == SHA
-    assert len(manifest["runtimeServices"]) == 6
+    assert len(manifest["runtimeServices"]) == 5
     assert {service["revision"] for service in manifest["runtimeServices"]} == {SHA}
     assert manifest["preservation"]["postgresContainerId"] == DB_ID
     assert manifest["preservation"]["redisContainerId"] == REDIS_ID
     assert manifest["preservation"]["caddy"] == "INACTIVE"
     assert manifest["preservation"]["legacyCompose"] == "STOPPED"
-    assert len(manifest["preservation"]["legacyComposeContainers"]) == 5
+    assert len(manifest["preservation"]["legacyComposeContainers"]) == 3
     assert manifest["publicIngress"] == {"proxy": "kamal-proxy", "httpPort": 80, "httpsPort": 443,
                                          "tls": "PASS", "routes": "PASS"}
-    assert manifest["preservation"]["gsales"] == "STOPPED"
+    assert "gsales" not in json.dumps(manifest).lower()
     assert manifest["migrationHeads"]["prismaHead"] == "20261022110000_eros_gpoint_message_state"
     assert len(manifest["migrationHeads"]["prismaAppliedChecksums"]) == 2
     assert manifest["migrationHeads"]["liveBaselineUnchanged"] is True
@@ -175,8 +170,8 @@ def test_ordinary_manifest_binds_services_database_proxy_tls_and_routes(tmp_path
 
 
 def test_ordinary_manifest_accepts_canonical_joined_component_scopes(tmp_path):
-    for index, scope in enumerate(("AGATA+CORE", "AGATA+MINIAPP", "CORE+MINIAPP",
-                                   "AGATA+CORE+MINIAPP")):
+    for index, scope in enumerate(("CORE+EROS", "EROS+MINIAPP", "CORE+MINIAPP",
+                                   "CORE+EROS+MINIAPP")):
         result, output = run_ordinary(tmp_path / str(index), role_plan_b64=expected_roles_b64(scope))
         assert result.returncode == 0, result.stderr
         manifest = json.loads(output.read_bytes())
@@ -221,12 +216,12 @@ def test_ordinary_manifest_refuses_database_migration_baseline_drift(tmp_path):
     setup_host_stubs(bin_dir)
     output = tmp_path / "ordinary-manifest.json"
     args = ordinary_args(output)
-    index = args.index("--baseline-agata-head") + 1
-    args[index] = "agata0011"
+    index = args.index("--baseline-prisma-head") + 1
+    args[index] = "20261015130000_codex_telegram_challenge"
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
     result = subprocess.run([sys.executable, str(WRITER), *args], capture_output=True, text=True, env=env)
     assert result.returncode != 0
-    assert "AGATA head changed" in result.stderr
+    assert "Prisma baseline inventory is malformed" in result.stderr
     assert not output.exists()
 
 
@@ -294,17 +289,16 @@ def test_ordinary_manifest_verifies_untouched_component_identity_in_selective_re
     assert services["gpoint-miniapp-web"]["version"] == VERSION
 
 
-def test_ordinary_manifest_records_independent_eros_engine_and_relay_artifacts(tmp_path):
-    result, output = run_ordinary(tmp_path, role_plan_b64=expected_roles_b64("EROS_RELAY"))
+def test_ordinary_manifest_records_the_independent_eros_engine_artifact(tmp_path):
+    result, output = run_ordinary(tmp_path, role_plan_b64=expected_roles_b64("EROS"))
 
     assert result.returncode == 0, result.stderr
     manifest = json.loads(output.read_text(encoding="utf-8"))
     assert manifest["candidate"]["images"]["eros"] == "ghcr.io/akhripunov/gpoint-eros@sha256:" + "a" * 64
     services = {row["name"].split("-" + row["version"], 1)[0]: row for row in manifest["runtimeServices"]}
-    assert len(manifest["runtimeServices"]) == 8
+    assert len(manifest["runtimeServices"]) == 5
     assert services["gpoint-eros-pilot-engine"]["repositoryDigest"] == manifest["candidate"]["images"]["eros"]
-    assert services["gpoint-eros-relay-relay"]["repositoryDigest"] == "ghcr.io/akhripunov/gpoint-runtime@sha256:" + "e" * 64
-    assert manifest["candidate"]["images"]["eros_relay"] == services["gpoint-eros-relay-relay"]["repositoryDigest"]
-    assert services["gpoint-eros-relay-relay"]["revision"] == SHA
-    assert services["gpoint-eros-pilot-engine"]["revision"] == "b" * 40
+    assert "gpoint-eros-relay-relay" not in services
+    assert "eros_relay" not in manifest["candidate"]["images"]
+    assert services["gpoint-eros-pilot-engine"]["revision"] == SHA
     assert services["gpoint-core-api"]["revision"] == "b" * 40

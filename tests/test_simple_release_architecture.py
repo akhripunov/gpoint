@@ -94,7 +94,7 @@ def test_pr_candidate_runs_build_without_production_deploy():
     assert build["permissions"]["packages"] == "write"
     build_scope = next(step for step in build["steps"] if step.get("id") == "build_scope")
     assert build_scope["env"]["FULL_BUILD_VALIDATION"] == "${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'me-62-full-build') }}"
-    assert 'value["build_components"] = ["AGATA", "CORE", "EROS", "MINIAPP"]' in build_scope["run"]
+    assert 'value["build_components"] = ["CORE", "EROS", "MINIAPP"]' in build_scope["run"]
     tests = workflow["jobs"]["tests"]
     eros_e2e = next(step for step in tests["steps"] if step.get("id") == "eros_e2e")
     assert "github.event_name == 'pull_request'" in eros_e2e["if"]
@@ -141,7 +141,7 @@ def test_production_release_controller_and_unique_image_build_counts_are_explici
         step for step in workflow["jobs"]["build"]["steps"]
         if step.get("uses", "").startswith("docker/build-push-action@")
     ]
-    assert len(build_steps) == 4
+    assert len(build_steps) == 3
     assert len([job for job in workflow["jobs"].values() if job.get("environment", {}).get("name") == "production"]) == 1
 
 
@@ -154,7 +154,7 @@ def test_deploy_uses_one_authoritative_live_inventory_not_redundant_kamal_text_v
     assert "kamal app version" in inventory["run"]
     assert "kamal app details" not in inventory["run"]
     assert "kamal app containers" not in inventory["run"]
-    assert "verify-kamal-production-baseline.py" in topology["run"]
+    assert "verify-kamal-production-baseline.py" in inventory["run"]
     assert "RepoDigests" in (ROOT / "scripts/verify-kamal-production-baseline.py").read_text()
 
 
@@ -182,10 +182,21 @@ def test_release_architecture_invariants_match_documented_state():
     }
     assert current["Production release controllers"] == 1
     assert current["Additional Layer7 staging deployment workflows"] == 0
-    assert current["Maximum distinct production images in one full run"] == 4
+    assert current["Maximum distinct production images in one full run"] == 3
     assert current["Custom prepared-run/production-manifest state formats"] == 1
     for label, value in current.items():
         assert _documented_metric(documentation, label)[1] == value
 
     assert (ROOT / "scripts/write-kamal-production-manifest.py").is_file()
     assert not (ROOT / "scripts/verify_native_prepared_run.py").exists()
+
+
+def test_retired_gsales_is_not_an_active_release_gate():
+    workflow = _workflow_source()
+    documentation = (ROOT / "docs/release/automation.md").read_text()
+
+    assert "tests/test_gsales_" not in workflow
+    assert "services/gsales/tests/" not in workflow
+    assert "tests/integration/gpoint-chat-schema-docker.py" in workflow
+    assert "GSales не входит в активную архитектуру релизов GPoint" in documentation
+    assert "Исторический контракт GSales Worker ниже не является release gate" in documentation

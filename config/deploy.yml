@@ -10,11 +10,10 @@ servers:
     env:
       clear:
         RELEASE_SHA: <%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>
-        AGATA_SERVICE_URL: http://agata-api:8000
     options:
       env-file:
         - /opt/gpoint/env/production.env
-      volume: /opt/gpoint/media:/data/media
+      volume: /opt/gpoint/layer7-staging/media:/data/media
     proxy:
       path_prefixes:
         - /api

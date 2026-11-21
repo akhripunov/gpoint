@@ -259,6 +259,14 @@ with the `me-62-full-build` label. This opt-in is scoped to that acceptance run;
 ordinary infrastructure-only PRs do not trigger an Eros Engine E2E or publish
 unneeded images.
 
+### GSales release scope
+
+GSales не входит в активную архитектуру релизов GPoint и отсутствует на Layer7.
+Native workflow не запускает `tests/test_gsales_*` и не выполняет обязательные
+проверки GSales runtime. Проверки общей PostgreSQL-интеграции, безопасности
+GPoint и изоляции tenant остаются активными. Исторические тесты, исходный код,
+документация и данные GSales сохраняются.
+
 `dorny/paths-filter` supplies declarative path classification for five
 components. The build-scope adapter compares each path set with its recorded
 installed component source SHA; an unrecognized path, unavailable/invalid
@@ -400,7 +408,7 @@ baseline and selectors are unchanged.
 | Shared referenced-helper LOC (unique source files) | 1,182 | 852 |
 | Production release controllers | 1 | 1 |
 | Additional Layer7 staging deployment workflows | 1 | 0 |
-| Maximum distinct production images in one full run | 4 | 4 |
+| Maximum distinct production images in one full run | 3 | 3 |
 | Custom prepared-run/production-manifest state formats | 2 | 1 |
 | Core-only ordinary Deploy steps (no migration/Eros/rollback) | 17 | 17 |
 
@@ -501,7 +509,7 @@ or hosted tests as production acceptance.
 
 ## Local test selection under FULL
 
-FULL is a risk level, not a mandate to run every local test. `classify-release-prepush.py` remains the canonical FAST/FULL procedure. Hosted CI uses the pinned `dorny/paths-filter` action in `gpoint-native-release.yml` for declarative five-component and shared-dependency selection. Run the directly affected local checks; GitHub CI remains authoritative for the exact PR SHA. The production planner tracks Core, AGATA, Mini App, Eros Engine and Eros Relay independently. Engine-only changes build the Eros image. Relay-only changes build the shared Core runtime image and deploy only Relay. The first Eros installation still requires both services. Runtime Verify records separate source SHAs and digests for Engine and Relay. Older successful deployments with a single Eros source SHA use that SHA for both because those deployments updated the pair together. An ambiguous or partial runtime still requires the existing authorized recovery path. The planner compares installed component sources with the exact candidate and fails closed on unknown paths. Do not recreate a second component path map for CI.
+FULL is a risk level, not a mandate to run every local test. `classify-release-prepush.py` remains the canonical FAST/FULL procedure. Hosted CI uses the pinned `dorny/paths-filter` action in `gpoint-native-release.yml` and the existing Component Planner for Core, Mini App and Eros Engine. These produce three application images and five runtime roles. PostgreSQL, Redis, Ollama and Kamal Proxy are infrastructure and do not select application images. AGATA and Eros Relay are retired from active builds, deploy, migration gates and runtime manifests; historical data and running services remain untouched until separately authorized. The planner compares installed component sources with the exact candidate and fails closed on unknown paths. Do not recreate a second component path map for CI.
 
 `dorny/paths-filter` accepts one exact commit SHA as `base`. The workflow sets PR `base` to `pull_request.base.sha` and `token: ''`, so the pinned action uses the checked-out full Git history instead of the pull-request-files API; push filtering uses the event's exact `before` SHA. This also lets the Tests job drop `pull-requests: read`. A single action invocation cannot compare each production component against its own independently installed SHA. A matrix would still need a custom collector to combine per-component results, reject unmapped/deleted inputs, and distinguish image-only migration builds from runtime deployments. Therefore the action remains a CI selector; the smaller exact-SHA production planner stays until an equivalent native interface exists. Rename detection remains disabled in the planner so Git reports a move as delete plus add and the existing ownership and migration guards can inspect both paths. See the [`dorny/paths-filter` input and output contract](https://github.com/dorny/paths-filter#usage).
 
@@ -953,7 +961,11 @@ publication, exact tag SHA, asset ID, uploaded state и GitHub SHA256. Пере�
 Время и квоты hosted Actions для CI продолжают действовать; плата не включается.
 
 
-## Server deployment и Mac Worker dependency — разные результаты
+## Исторический Mac Worker и GSales lane contract
+
+Исторический контракт GSales Worker ниже не является release gate. Он сохранён
+для истории; текущая Native First архитектура не требует GSales runtime,
+GSALES lane probes или GSales DB/Core RLS checks.
 
 OWNER contract от 2026-10-05: технический исход server apply не зависит от
 временной операционной доступности локального Mac. Это правило применяется

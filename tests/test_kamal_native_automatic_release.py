@@ -185,21 +185,28 @@ def test_non_owner_cannot_rerun_migration_rehearsal(tmp_path):
     assert "triggering actor" in result.stderr.lower()
 
 
-def test_deploy_installs_the_pinned_agata_alembic_runtime_before_migration_checks():
+def test_deploy_uses_only_active_migration_ledgers_before_apply():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     steps = workflow["jobs"]["deploy"]["steps"]
     setup = next((i for i, step in enumerate(steps)
                   if step.get("uses", "").startswith("actions/setup-python@")), None)
     install = next((i for i, step in enumerate(steps)
-                    if "python -m pip install ./services/agata" in step.get("run", "")), None)
+                    if "services/agata" in step.get("run", "")), None)
     parity = next(i for i, step in enumerate(steps)
                   if step.get("name") == "Verify candidate compatibility with the live database baseline")
 
-    assert setup is not None
-    assert install is not None
-    assert setup < install < parity
-    assert steps[setup]["with"]["python-version"] == "3.12"
-    assert steps[setup]["with"]["cache-dependency-path"] == "services/agata/pyproject.toml"
+    assert install is None
+    assert setup is not None and setup < parity
+    assert "--policy compatible" in steps[parity]["run"]
+    assert "--prisma-only" in steps[parity]["run"]
+    for step in steps:
+        if "verify-kamal-migration-parity.py" in step.get("run", ""):
+            assert "--prisma-only" in step["run"] or "--static-pending" in step["run"]
+    workflow_text = WORKFLOW.read_text(encoding="utf-8")
+    assert "gsales-agata-api" not in workflow_text
+    assert "gsales-agata-memory-worker" not in workflow_text
+    assert "services/agata/migrations" not in workflow_text
+    assert "verify-kamal-migration-parity.py" in workflow_text
 
 
 def test_kamal_inventory_summary_contains_only_the_crosschecked_version():
@@ -231,7 +238,7 @@ def test_release_event_routing_is_fail_closed_and_does_not_give_prs_prod_access(
     assert workflow["permissions"] == {"contents": "read"}
 
 
-def test_runtime_verify_rechecks_public_and_all_six_kamal_roles_after_deploy():
+def test_runtime_verify_rechecks_public_routes_and_five_target_roles_after_deploy():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     deploy = workflow.split("  deploy:\n", 1)[1]
     deploy_step = deploy.index("name: Deploy exact immutable images with stock Kamal")
@@ -247,17 +254,19 @@ def test_runtime_verify_rechecks_public_and_all_six_kamal_roles_after_deploy():
         "gpoint-core-api",
         "gpoint-core-worker",
         "gpoint-core-bot",
-        "gpoint-agata-api",
-        "gpoint-agata-memory-worker",
         "gpoint-miniapp-web",
+        "gpoint-eros-pilot-engine",
         "kamal-proxy",
         "shared_postgres_1",
         "shared_redis_1",
         "PRISMA_HEAD",
-        "AGATA_HEAD",
         "GPOINT_MEDIA_READ_WRITE=PASS",
+        "verify-layer7-ollama.py",
     ):
         assert expected in verify
+    helper = (ROOT / "scripts/verify-layer7-ollama.py").read_text(encoding="utf-8")
+    assert 'BASE_URL = "http://ollama:11434"' in helper
+    assert 'const base = "http://ollama:11434"' in helper
 
 
 def test_verify_only_component_scope_runs_runtime_verification_without_kamal_replacements():
@@ -269,23 +278,27 @@ def test_verify_only_component_scope_runs_runtime_verification_without_kamal_rep
                   if step.get("name") == "Verify public routes and exact running services")
     run = apply["run"]
 
-    for component in ("CORE", "AGATA", "MINIAPP"):
+    for component in ("CORE", "EROS", "MINIAPP"):
         assert f'if [[ "$DEPLOY_{component}" == true ]]; then' in run
     assert "(success()) && inputs.mode != 'rollback'" in apply["if"]
     assert verify["if"].endswith("inputs.mode != 'rollback')")
     assert "EXPECTED_ROLE_IDENTITIES_B64" in verify["run"]
     for role in ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot",
-                 "gpoint-agata-api", "gpoint-agata-memory-worker", "gpoint-miniapp-web"):
+                 "gpoint-miniapp-web", "gpoint-eros-pilot-engine"):
         assert role in verify["run"]
 
 
 def test_production_preflight_accepts_historical_version_source_sha_split_but_checks_digest_identity():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     deploy = workflow.split("  deploy:\n", 1)[1]
+    inventory = deploy.split("name: Read live application version with Kamal", 1)[1].split(
+        "name: Verify installed Kamal topology before ordinary release", 1
+    )[0]
     preflight = deploy.split("name: Verify installed Kamal topology before ordinary release", 1)[1].split(
         "name: Verify candidate compatibility with the live database baseline", 1
     )[0]
-    assert "verify-kamal-production-baseline.py" in preflight
+    assert "verify-kamal-production-baseline.py" in inventory
+    assert "LIVE_ROLE_INVENTORY" in preflight
     assert '"$version" == "$source_sha"-*' not in preflight
     assert "RepoDigests" in (ROOT / "scripts/verify-kamal-production-baseline.py").read_text()
     assert "org.opencontainers.image.revision" in (ROOT / "scripts/verify-kamal-production-baseline.py").read_text()
@@ -299,8 +312,8 @@ def test_production_preflight_accepts_historical_version_source_sha_split_but_ch
     assert "DB_MOUNTS_SHA256" in verify and "REDIS_MOUNTS_SHA256" in verify
     assert "EXPECTED_ROLE_IDENTITIES_B64" in verify
     assert "core_version=\"$(sed -n 's/^gpoint-core-api|" in verify
-    assert "agata_version=\"$(sed -n 's/^gpoint-agata-api|" in verify
-    assert "BASELINE_PRISMA_HEAD" in verify and "BASELINE_AGATA_HEAD" in verify
+    assert "agata_version=" not in verify
+    assert "BASELINE_PRISMA_HEAD" in verify and "BASELINE_AGATA_HEAD" not in verify
     assert 'test "$prisma_migrations" = "$expected_prisma_migrations"' in verify
     assert 'test "$prisma_checksums" = "$expected_prisma_checksums"' in verify
     assert "find packages/db/prisma/migrations" not in verify
@@ -312,27 +325,24 @@ def test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails
     apply = deploy.split("name: Deploy exact immutable images with stock Kamal", 1)[1].split(
         "name: Verify public routes and exact running services", 1
     )[0]
-    agata = apply.split('if [[ "$DEPLOY_AGATA" == true ]]; then', 1)[1].split(
-        'if [[ "$DEPLOY_EROS" == true ]]; then', 1
-    )[0]
     eros = apply.split('if [[ "$DEPLOY_EROS" == true ]]; then', 1)[1].split(
         'if [[ "$DEPLOY_CORE" == true ]]; then', 1
     )[0]
     core = apply.split('if [[ "$DEPLOY_CORE" == true ]]; then', 1)[1].split(
         'if [[ "$DEPLOY_MINIAPP" == true ]]; then', 1
     )[0]
-    assert apply.index('if [[ "$DEPLOY_AGATA" == true ]]; then') < apply.index('if [[ "$DEPLOY_EROS" == true ]]; then')
     assert apply.index('if [[ "$DEPLOY_EROS" == true ]]; then') < apply.index('if [[ "$DEPLOY_CORE" == true ]]; then')
     assert apply.index('if [[ "$DEPLOY_CORE" == true ]]; then') < apply.index('if [[ "$DEPLOY_MINIAPP" == true ]]; then')
     assert core.index("KAMAL_ROLES=worker") < core.index("KAMAL_ROLES=bot")
-    for block, role in ((core, "worker"), (core, "bot"), (agata, "memory-worker")):
+    for block, role in ((core, "worker"), (core, "bot")):
         stop = block.index(f"kamal app stop --roles {role}")
         deploy_call = block.index(f"kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles {role}")
         assert stop < deploy_call
     assert "KAMAL_ROLES=worker,bot" not in apply
     assert "verify_single_running_role gpoint-core-worker" in apply
     assert "verify_single_running_role gpoint-core-bot" in apply
-    assert "verify_single_running_role gpoint-agata-memory-worker" in apply
+    assert "verify_single_running_role gpoint-agata-memory-worker" not in apply
+    assert "app stop --roles relay" not in apply
     ordinary = deploy.split("  rollback:\n", 1)[0]
     status = ordinary.split("name: Report recovery guidance after ordinary release", 1)[1]
     assert "RECOVERY_REQUIRED" in status
@@ -366,9 +376,9 @@ def test_manual_rollback_uses_native_environment_deployment_and_target_metadata(
     assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses' not in body
     assert "gpoint-runtime-target-sha=" in body
     assert "gpoint-core-source-sha=$CORE_SOURCE_SHA" in body
-    assert "gpoint-agata-source-sha=$AGATA_SOURCE_SHA" in body
     assert "gpoint-miniapp-source-sha=$MINIAPP_SOURCE_SHA" in body
-    for key in ("core_version", "agata_version", "miniapp_version"):
+    assert "gpoint-eros-source-sha=$EROS_SOURCE_SHA" in body
+    for key in ("core_version", "miniapp_version", "eros_version"):
         assert f"steps.evidence.outputs.{key}" in yaml.safe_dump(rollback)
     assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in body
     assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses' not in body
@@ -507,7 +517,7 @@ def test_migration_rehearsal_uses_immutable_oci_identity_across_docker_hosts():
         assert f'current_step=ghcr-{role}-repository-digest' in body
 
     assert build["outputs"]["app_digest"] == "${{ steps.app.outputs.digest }}"
-    assert build["outputs"]["agata_digest"] == "${{ steps.agata.outputs.digest }}"
+    assert "agata_digest" not in build["outputs"]
     assert "app_image_id" not in build.get("outputs", {})
     assert "agata_image_id" not in build.get("outputs", {})
     assert "image inspect" in build_body and "{{.Id}}" not in build_body
@@ -566,7 +576,7 @@ def test_scheduled_vps_backup_uploads_and_restores_same_bunny_snapshot_during_tr
     assert "restore_backup_file=" in helper and "restore_media_backup_file=" in helper
     assert 'OFFSITE_RESTORE=$(' in helper and 'MEDIA_OFFSITE_RESTORE=$(' in helper
     assert "gpoint-backup.agekey" in runner and "age-keygen" in runner
-    assert "/opt/gpoint/media" in runner and "media-tree" in runner
+    assert "/opt/gpoint/layer7-staging/media" in runner and "media-tree" in runner
     assert "def _retain_local(now: float)" in runner
 
 
@@ -593,9 +603,9 @@ def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
     for gate in (
         "rollback_target_sha", "rollback_deployment_id", "verify_native_rollback_evidence.py",
         "verify_native_image_readback.py", "verify_native_image_attestation.py",
-        "verify-kamal-migration-parity.py", "core_version", "agata_version",
+        "verify-kamal-migration-parity.py", "core_version", "eros_version",
         "miniapp_version", "KAMAL_ROLES=worker", "KAMAL_ROLES=bot",
-        "KAMAL_ROLES=memory-worker", "app stop --roles",
+        "app stop --roles",
         "RECOVERY_REQUIRED", "steps.verify.outputs.environment_url",
     ):
         assert gate in body
@@ -636,31 +646,34 @@ def test_no_runtime_change_skips_the_whole_deploy_job():
     assert '"BOOTSTRAP_FULL"' in build_scope["run"]
 
 
-def test_relay_only_kamal_apply_leaves_engine_and_other_roles_untouched(tmp_path):
+def test_release_apply_has_no_relay_component_or_role():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    step = next(s for s in workflow["jobs"]["deploy"]["steps"] if s.get("id") == "kamal_apply")
-    docker = tmp_path / "docker"
-    docker.write_text('#!/bin/sh\nprintf "%s|%s|%s\\n" "$GPOINT_KAMAL_SERVICE" "$GPOINT_KAMAL_EXPECTED_DIGEST" "$*"\n')
-    docker.chmod(0o755)
-    ssh = tmp_path / "ssh"
-    ssh.write_text('#!/bin/sh\nprintf "verify|%s\\n" "$*"\n')
-    ssh.chmod(0o755)
-    sha = "a" * 40
-    relay_digest = "sha256:" + "b" * 64
-    result = subprocess.run(
-        ["bash", "-c", step["run"]], text=True, capture_output=True,
-        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}",
-             "DEPLOY_AGATA": "false", "DEPLOY_CORE": "false", "DEPLOY_MINIAPP": "false",
-             "DEPLOY_EROS": "false", "DEPLOY_EROS_RELAY": "true", "EROS_INSTALLED": "true",
-             "DEPLOY_SCOPE": "EROS_RELAY", "EROS_RELAY_DIGEST": relay_digest,
-             "IMAGE_VERSION": sha + "-9-1", "GPOINT_COMMIT_SHA": sha,
-             "GPOINT_PRODUCTION_HOST": "example.invalid", "GITHUB_WORKSPACE": str(ROOT),
-             "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")},
-    )
+    steps = workflow["jobs"]["deploy"]["steps"]
+    apply = next(s for s in steps if s.get("id") == "kamal_apply")["run"]
+    build = workflow["jobs"]["build"]
+    assert "EROS_RELAY" not in apply
+    assert "DEPLOY_EROS_RELAY" not in apply
+    assert "--roles relay" not in apply
+    assert "EROS_RELAY" not in str(build)
 
-    assert result.returncode == 0, result.stderr
-    stop, deploy, verify = result.stdout.splitlines()
-    assert stop.startswith("gpoint-eros-relay||") and "app stop --roles relay" in stop
-    assert deploy.startswith(f"gpoint-eros-relay|{relay_digest}|")
-    assert "deploy --skip-push --version " + sha + "-9-1 --roles relay" in deploy
-    assert verify.endswith(f"gpoint-eros-relay-relay {sha}-9-1 {sha}")
+
+def test_topology_preflight_allows_missing_bootstrap_roles_and_absent_proxy_only_when_ports_are_free():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["deploy"]["steps"]
+    inventory = next(step for step in steps if step.get("id") == "kamal_inventory")
+    topology = next(step for step in steps if step.get("id") == "topology")
+
+    assert "verify-kamal-production-baseline.py" in inventory["run"]
+    assert "missing_roles" in inventory["run"]
+    assert "role not in roles" in topology["run"]
+    assert "GPOINT_LIVE_ROLE_INVENTORY" in inventory["run"]
+    assert any("GPOINT_LIVE_ROLE_INVENTORY" in value for value in topology["env"].values())
+    assert "legacy_relay" not in topology["run"]
+    assert "gpoint-eros-relay-relay" not in inventory["run"]
+    assert "ss -ltn" in topology["run"]
+    assert 'publish=$port' in topology["run"] and 'for port in 80 443' in topology["run"]
+    assert "test -n \"$ids\" || { echo \"expected stopped legacy Compose service is missing" not in topology["run"]
+    assert "legacy Compose service is still active" in topology["run"]
+    assert "shared_postgres_1" in topology["run"] and "shared_redis_1" in topology["run"]
+    assert "DB_MOUNTS_SHA256" in topology["run"] and "REDIS_MOUNTS_SHA256" in topology["run"]
+    assert 'docker inspect --format \'{{.State.Running}}\' kamal-proxy' in topology["run"]

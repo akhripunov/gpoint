@@ -146,7 +146,6 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             "Run stock Eros SQLx and synthetic conversation E2E": "workspace",
             "Build and typecheck workspace": "workspace",
             "Run Mini App end-to-end tests": "workspace",
-            "Run Eros Relay unit tests": "workspace",
             "Run workflow, Native First and Kamal boundary tests": "python",
             "Run isolated PostgreSQL 16 migration and integration suites": "python",
         }
@@ -163,10 +162,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("github.event_name == 'pull_request'", e2e["if"])
         self.assertIn("contains(github.event.pull_request.labels.*.name, 'me-62-full-build')", e2e["if"])
         self.assertNotIn("steps.filter.outputs.database == 'true'", e2e["if"])
-        relay = steps["Run Eros Relay unit tests"]
-        self.assertIn("steps.filter.outputs.eros_relay == 'true'", relay["if"])
-        self.assertIn("steps.filter.outputs.infrastructure == 'true'", relay["if"])
-        self.assertIn("node --test services/eros-engine/eros-pilot-embedding-relay.test.mjs", relay["run"])
+        self.assertNotIn("Run Eros Relay unit tests", steps)
         python = [steps[name] for name, suite in required_steps.items() if suite == "python"]
         for step in python:
             self.assertIn("unset DATABASE_URL SHADOW_DATABASE_URL", step["run"])
@@ -256,15 +252,15 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertNotIn("repos/$GITHUB_REPOSITORY/deployments", rehearsal_run)
         self.assertIn("--format '{{.Os}} {{.Architecture}}'", rehearsal_run)
 
-    def test_python_job_runs_the_disposable_postgres_migration_harness(self):
+    def test_python_job_keeps_gpoint_postgres_security_integration_only(self):
         job = self.workflow["jobs"]["tests"]
         run_steps = "\n".join(step.get("run", "") for step in job["steps"])
-        self.assertIn("services/gsales/tests/run_postgres.py", run_steps)
+        self.assertIn("tests/integration/gpoint-chat-schema-docker.py", run_steps)
+        self.assertNotIn("services/gsales/tests/", run_steps)
+        self.assertNotIn("gsales-api", run_steps)
         checkout = next(step for step in job["steps"]
                         if step.get("uses", "").startswith("actions/checkout@"))
         self.assertEqual(checkout["with"]["fetch-depth"], 0)
-        harness = (ROOT / "services/gsales/tests/run_postgres.py").read_text()
-        self.assertIn("pgvector/pgvector:0.8.6-pg16", harness)
 
     def test_native_workflow_runs_actionlint_before_build(self):
         steps = self.workflow["jobs"]["tests"]["steps"]
@@ -313,7 +309,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(miniapp["with"]["target"], "miniapp-runtime")
         self.assertEqual(miniapp["with"]["sbom"], True)
         self.assertEqual(miniapp["with"]["provenance"], "mode=max")
-        for role in ("agata", "miniapp"):
+        for role in ("miniapp",):
             image_step = next(step for step in steps if step.get("id") == role)
             self.assertIn("GPOINT_BUILD_SHA=${{ github.sha }}", image_step["with"]["build-args"])
 
@@ -324,7 +320,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         steps = build["steps"]
         resolver = next(i for i, step in enumerate(steps)
                         if step.get("id") == "build_scope")
-        for component, step_id in (("CORE", "app"), ("AGATA", "agata"), ("MINIAPP", "miniapp")):
+        for component, step_id in (("CORE", "app"), ("MINIAPP", "miniapp")):
             image = next(i for i, step in enumerate(steps) if step.get("id") == step_id)
             self.assertGreater(image, resolver)
             self.assertIn(component, steps[image]["if"])
@@ -372,10 +368,11 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         preflight = next(i for i, name in enumerate(names) if name == "Verify installed Kamal topology before ordinary release")
         deploy_roles = next(i for i, name in enumerate(names) if name == "Deploy exact immutable images with stock Kamal")
         self.assertLess(preflight, deploy_roles)
-        self.assertIn("for service in api worker bot agata-api agata-memory-worker", steps[preflight]["run"])
+        self.assertIn("for service in api worker bot", steps[preflight]["run"])
+        self.assertNotIn("agata-api", steps[preflight]["run"])
         self.assertIn("shared_postgres_1", steps[preflight]["run"])
         self.assertIn("compose.service=$service", steps[preflight]["run"])
-        self.assertIn("agata-memory-worker", steps[preflight]["run"])
+        self.assertNotIn("agata-memory-worker", steps[preflight]["run"])
 
     def test_stock_kamal_version_crosscheck_precedes_authoritative_docker_inspection(self):
         deploy = self.workflow["jobs"]["deploy"]
@@ -403,16 +400,17 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertNotIn("[:300]", commands)
         self.assertIn('>> "$GITHUB_OUTPUT"', commands)
         self.assertIn("config/deploy.yml", commands)
-        self.assertIn("config/deploy.agata.yml", commands)
+        self.assertNotIn("config/deploy.agata.yml", commands)
         self.assertIn("config/deploy.miniapp.yml", commands)
         topology = steps[topology_index]
-        for component in ("core", "agata", "miniapp"):
+        for component in ("core", "miniapp"):
             self.assertTrue(any(
                 f"steps.kamal_inventory.outputs.{component}_version" in value
                 for value in topology["env"].values()
             ))
         self.assertIn("KAMAL_CORE_VERSION", topology["run"])
-        self.assertIn("verify-kamal-production-baseline.py", topology["run"])
+        self.assertIn("LIVE_ROLE_INVENTORY", topology["run"])
+        self.assertIn("verify-kamal-production-baseline.py", commands)
         self.assertIn("RepoDigests", (ROOT / "scripts/verify-kamal-production-baseline.py").read_text())
 
     def test_pinned_kamal_image_is_pulled_and_digest_platform_checked_before_safe_config_test(self):
@@ -464,11 +462,11 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("OWNER_APPROVAL_ACTOR", script)
         self.assertEqual(deploy["needs"], ["tests", "build"])
         self.assertTrue(all(name in self.workflow["jobs"]["build"]["outputs"]
-                            for name in ("app_digest", "agata_digest", "miniapp_digest", "eros_digest")))
+                            for name in ("app_digest", "miniapp_digest", "eros_digest")))
         self.assertNotIn("gsales_digest", self.workflow["jobs"]["build"]["outputs"])
         deploy_text = yaml.safe_dump(deploy)
         self.assertIn("needs.build.outputs.app_digest", deploy_text)
-        self.assertIn("needs.build.outputs.agata_digest", deploy_text)
+        self.assertNotIn("needs.build.outputs.agata_digest", deploy_text)
         self.assertNotIn("needs.build.outputs.gsales_digest", deploy_text)
         self.assertIn("needs.build.outputs.miniapp_digest", deploy_text)
         self.assertIn("needs.build.outputs.eros_digest", deploy_text)
@@ -490,10 +488,9 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("verify_native_eros_image.py", workflow_text)
         self.assertIn("services/eros-engine/upstream.sha", workflow_text)
         self.assertIn("config/deploy.eros.yml", workflow_text)
-        self.assertIn("config/deploy.eros-relay.yml", workflow_text)
         self.assertIn("DEPLOY_EROS", workflow_text)
         self.assertIn("gpoint-eros-pilot-engine", workflow_text)
-        self.assertIn("gpoint-eros-relay-relay", workflow_text)
+        self.assertNotIn("gpoint-eros-relay-relay", workflow_text)
         self.assertIn('image: akhripunov/gpoint-eros', (ROOT / "config/deploy.eros.yml").read_text())
         self.assertIn('--eros-digest "$eros_digest"', workflow_text)
         self.assertNotIn("docker compose", workflow_text)
@@ -513,7 +510,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("--env GPOINT_KAMAL_SERVICE", deploy_script)
         self.assertIn("--env KAMAL_ROLES", deploy_script)
         self.assertIn("GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api", deploy_script)
-        self.assertIn("GPOINT_KAMAL_SERVICE=gpoint-agata KAMAL_ROLES=api", deploy_script)
+        self.assertNotIn("gpoint-agata", deploy_script)
         hook = (ROOT / ".kamal/hooks/post-app-boot").read_text()
         self.assertTrue(hook.startswith("#!/bin/sh\n"))
         self.assertIn('case "$version" in "$candidate"-*)', hook)
@@ -531,8 +528,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         ))
 
         config_check = (ROOT / "scripts/check-kamal-configs.sh").read_text()
-        for config in ("deploy.yml", "deploy.agata.yml", "deploy.miniapp.yml", "deploy.eros.yml",
-                       "deploy.eros-relay.yml", "deploy.eros-api.yml"):
+        for config in ("deploy.yml", "deploy.miniapp.yml", "deploy.eros.yml",
+                       "deploy.ollama.yml", "deploy.eros-api.yml"):
             self.assertIn(f"config/{config}", config_check)
         self.assertIn("config-validation-placeholder", config_check)
         self.assertIn("Kamal config validation failed", config_check)

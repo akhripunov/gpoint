@@ -10,9 +10,19 @@ import subprocess
 import sys
 from pathlib import Path
 
-from alembic.script import ScriptDirectory
-from alembic.script.revision import RevisionError
-from alembic.util.exc import CommandError
+try:
+    from alembic.script import ScriptDirectory
+    from alembic.script.revision import RevisionError
+    from alembic.util.exc import CommandError
+except ImportError:
+    # Static Prisma scans do not need AGATA's archived Alembic environment.
+    ScriptDirectory = None
+
+    class RevisionError(Exception):
+        pass
+
+    class CommandError(Exception):
+        pass
 
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 APPROVED_ALLOWLIST_SCHEMA = "gpoint-prisma-production-apply/v1"
@@ -172,6 +182,8 @@ def prisma_names(directory):
 
 
 def alembic_revisions(directory):
+    if ScriptDirectory is None:
+        raise ImportError("Alembic is required only for legacy AGATA ledger verification")
     version_directory = Path(directory).resolve(strict=True)
     source_root = version_directory.parent.parent
     if str(source_root) not in sys.path:
@@ -407,6 +419,17 @@ def verify_compatible(args, live_prisma, recorded):
         raise ValueError("live Prisma migrations are not a prefix of candidate migration history")
     if not live_prisma or args.prisma_current_head != live_prisma[-1]:
         raise ValueError("live Prisma head does not match its applied migration inventory")
+    if getattr(args, "prisma_only", False):
+        pending = [(name, Path(args.prisma_directory) / name / "migration.sql") for name in pending_prisma]
+        changed = list(changed_application_lines(repo_root, baseline, candidate))
+        approved_migrations = load_approved_migrations(
+            getattr(args, "approved_migrations", "") or
+            (Path(args.prisma_directory) / ".." / "production-approved-migrations.json").resolve())
+        require_no_pending_dependency(pending, changed, approved_migrations,
+                                      prisma_directory=args.prisma_directory, repo_root=repo_root)
+        if set(recorded) != set(live_prisma):
+            raise ValueError("live Prisma checksum inventory does not cover exactly applied migrations")
+        return live_prisma[-1], None, bool(pending)
     revisions, candidate_agata_head, revision_files = alembic_revisions(args.agata_directory)
     if args.agata_current_head not in revisions:
         raise ValueError("live AGATA head is absent from candidate migration history")
@@ -499,7 +522,7 @@ def verify_static_pending(args):
         path = (repo_root / raw).resolve()
         if path.name == "migration.sql" and path.parent.parent == prisma_directory:
             pending.append((path.parent.name, path))
-        elif raw.startswith("services/agata/migrations/versions/") and path.suffix == ".py":
+        elif not getattr(args, "prisma_only", False) and raw.startswith("services/agata/migrations/versions/") and path.suffix == ".py":
             pending.append((path.stem, path))
     changed = list(changed_application_lines(repo_root, baseline, candidate))
     allowlist = getattr(args, "approved_migrations", "")
@@ -514,9 +537,11 @@ def verify_static_pending(args):
 
 
 def verify(args):
-    missing = [name for name in ("prisma_current_migrations", "prisma_current_head",
-                                 "agata_directory", "agata_current_head")
+    missing = [name for name in ("prisma_current_migrations", "prisma_current_head")
                if not getattr(args, name, "")]
+    if not getattr(args, "prisma_only", False):
+        missing.extend(name for name in ("agata_directory", "agata_current_head")
+                       if not getattr(args, name, ""))
     if missing:
         raise ValueError(f"live parity check requires {','.join(missing)}")
     candidate_prisma = prisma_names(args.prisma_directory)
@@ -547,6 +572,8 @@ def verify(args):
     candidate_prisma_head = candidate_prisma[-1]
     if args.prisma_current_head != candidate_prisma_head:
         raise ValueError("PENDING_PRISMA_HEAD_MISMATCH")
+    if getattr(args, "prisma_only", False):
+        return candidate_prisma_head, None, False
     candidate_agata_head = alembic_head(args.agata_directory)
     if args.agata_current_head != candidate_agata_head:
         raise ValueError("PENDING_AGATA_HEAD_MISMATCH")
@@ -569,6 +596,8 @@ def main():
     parser.add_argument("--agata-current-checksums", default="")
     parser.add_argument("--require-no-agata-pending", action="store_true",
                         help="block Native Prisma Deploy if any AGATA revision still needs a separate guarded Apply")
+    parser.add_argument("--prisma-only", action="store_true",
+                        help="verify only the active Core Prisma ledger; leave archived AGATA history untouched")
     parser.add_argument("--static-pending", action="store_true",
                         help="scan only migrations added by this candidate; needs no live database")
     args = parser.parse_args()
@@ -589,10 +618,12 @@ def main():
         print(f"GPOINT_KAMAL_MIGRATION_PARITY=BLOCKED reason={exc}", file=sys.stderr)
         return 1
     if args.policy == "compatible":
-        print(f"GPOINT_KAMAL_SCHEMA_COMPATIBILITY=PASS LIVE_PRISMA_HEAD={prisma_head} LIVE_AGATA_HEAD={agata_head}")
+        print(f"GPOINT_KAMAL_SCHEMA_COMPATIBILITY=PASS LIVE_PRISMA_HEAD={prisma_head}" +
+              (f" LIVE_AGATA_HEAD={agata_head}" if agata_head else ""))
         print(f"GPOINT_KAMAL_DB_MIGRATION_REQUIRED={'YES' if pending else 'NO'}")
     else:
-        print(f"GPOINT_KAMAL_MIGRATION_PARITY=PASS PRISMA_HEAD={prisma_head} AGATA_HEAD={agata_head}")
+        print(f"GPOINT_KAMAL_MIGRATION_PARITY=PASS PRISMA_HEAD={prisma_head}" +
+              (f" AGATA_HEAD={agata_head}" if agata_head else ""))
         print("GPOINT_KAMAL_DB_MIGRATION_REQUIRED=NO")
     return 0
 

@@ -20,8 +20,7 @@ def test_approved_prisma_apply_is_inside_the_protected_deploy_before_kamal():
     apply = next(step for step in steps if step.get("id") == "migration_apply")
     assert apply["if"] == "needs.tests.outputs.mode == 'DEPLOY' && (inputs.mode != 'rollback')"
     assert 'if [[ "$APPLY" == false ]]' in apply["run"]
-    assert 'echo "agata_head=$BASELINE_AGATA_HEAD"' in apply["run"]
-    assert apply["env"]["BASELINE_AGATA_HEAD"] == "${{ steps.migration_baseline.outputs.agata_head }}"
+    assert "AGATA" not in apply["run"]
     assert not any("steps.migration_apply.outputs." in value for value in apply["env"].values())
     assert "gpoint-scheduled-backup.py" in apply["run"]
     assert "--release-backup" in apply["run"]
@@ -34,20 +33,20 @@ def test_approved_prisma_apply_is_inside_the_protected_deploy_before_kamal():
     assert kamal["if"] == "needs.tests.outputs.mode == 'DEPLOY' && ((success()) && inputs.mode != 'rollback')"
     verify = next(step for step in steps if step.get("id") == "verify")
     assert "steps.migration_apply.outputs.prisma_migrations" in verify["env"]["EXPECTED_PRISMA_MIGRATIONS"]
-    assert verify["env"]["BASELINE_AGATA_HEAD"] == "${{ steps.migration_baseline.outputs.agata_head }}"
-    assert '"$BASELINE_AGATA_HEAD" "$EXPECTED_ROLE_IDENTITIES_B64" "$EROS_DIGEST" "$expected_eros_upstream" "$EROS_RELAY_DIGEST" <<\'REMOTE\'' in verify["run"]
+    assert "BASELINE_AGATA_HEAD" not in verify["env"]
+    assert '"$EXPECTED_ROLE_IDENTITIES_B64" "$EROS_DIGEST" "$expected_eros_upstream" <<\'REMOTE\'' in verify["run"]
     assert set(jobs) == {"tests", "build", "deploy"}
     assert "ARTIFACT_PREPARE" not in jobs["deploy"]["if"]
 
 
-def test_prisma_apply_never_changes_agata_migrations_or_rolls_back_database():
+def test_prisma_apply_does_not_touch_retired_ledgers_or_roll_back_database():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     deploy = workflow["jobs"]["deploy"]
     apply = next(step for step in deploy["steps"] if step.get("id") == "migration_apply")
     body = apply["run"]
-    assert "--require-no-agata-pending" in next(
-        step["run"] for step in deploy["steps"] if step.get("id") == "migration_baseline"
-    )
+    baseline = next(step["run"] for step in deploy["steps"] if step.get("id") == "migration_baseline")
+    assert "agata.alembic_version" not in baseline
+    assert "AGATA_HEAD" not in baseline
     assert "prisma migrate resolve" not in body
     assert "prisma migrate reset" not in body
     assert "prisma migrate diff" not in body

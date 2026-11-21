@@ -46,10 +46,8 @@ set -f
 
 case "$service" in
   gpoint-core) repository=ghcr.io/akhripunov/gpoint-runtime ;;
-  gpoint-agata) repository=ghcr.io/akhripunov/gpoint-agata-runtime ;;
   gpoint-miniapp) repository=ghcr.io/akhripunov/gpoint-miniapp ;;
   gpoint-eros-pilot) repository=ghcr.io/akhripunov/gpoint-eros ;;
-  gpoint-eros-relay) repository=ghcr.io/akhripunov/gpoint-runtime ;;
   *) echo 'Unrecognized GPoint Kamal service' >&2; exit 1 ;;
 esac
 

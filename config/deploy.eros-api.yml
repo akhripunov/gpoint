@@ -19,11 +19,12 @@ servers:
       network:
         - shared_internal
         - gpoint_eros_data
+        - gpoint_ollama_internal
       network-alias: gpoint-core-api
       env-file:
         - /opt/gpoint/env/production.env
         - /opt/gpoint/env/eros-api.env
-      volume: /opt/gpoint/media:/data/media
+      volume: /opt/gpoint/layer7-staging/media:/data/media
     proxy:
       path_prefixes:
         - /api

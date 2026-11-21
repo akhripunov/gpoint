@@ -26,14 +26,13 @@ RUN_URL = re.compile(
 MANIFEST_SHA = re.compile(r"^[0-9a-f]{64}$")
 COMPONENT_SOURCE_KEYS = {
     "CORE": "gpoint-core-source-sha",
-    "AGATA": "gpoint-agata-source-sha",
     "MINIAPP": "gpoint-miniapp-source-sha",
     "EROS": "gpoint-eros-source-sha",
-    "EROS_RELAY": "gpoint-eros-relay-source-sha",
 }
-REQUIRED_COMPONENTS = ("CORE", "AGATA", "MINIAPP")
+HISTORICAL_SOURCE_KEYS = {"gpoint-agata-source-sha", "gpoint-eros-relay-source-sha"}
+REQUIRED_COMPONENTS = ("CORE", "MINIAPP")
 SUPPORTED_TASKS = {"deploy", "rollback"}
-BOOTSTRAP_BUILD_COMPONENTS = ["CORE", "AGATA", "MINIAPP", "EROS"]
+BOOTSTRAP_BUILD_COMPONENTS = ["CORE", "EROS", "MINIAPP"]
 
 
 def _timestamp(value: object) -> datetime:
@@ -83,7 +82,7 @@ def _manifest_baseline(environment_url: object, *, deployment_task: str,
     digest = values.get("gpoint-manifest-sha256", "")
     if not MANIFEST_SHA.fullmatch(digest):
         raise ValueError("production Deployment manifest digest is invalid")
-    source_keys = set(COMPONENT_SOURCE_KEYS.values())
+    source_keys = set(COMPONENT_SOURCE_KEYS.values()) | HISTORICAL_SOURCE_KEYS
     required_source_keys = {COMPONENT_SOURCE_KEYS[name] for name in REQUIRED_COMPONENTS}
     supported_keys = source_keys | {"gpoint-manifest-sha256", "gpoint-runtime-target-sha"}
     if set(values) - supported_keys:
@@ -95,11 +94,9 @@ def _manifest_baseline(environment_url: object, *, deployment_task: str,
         raise ValueError("production Deployment component source evidence is incomplete")
     sources = {component: values[key] for component, key in COMPONENT_SOURCE_KEYS.items()
                if key in values}
-    if "EROS" in sources:
-        # Older verified releases always deployed Engine and Relay together.
-        sources.setdefault("EROS_RELAY", sources["EROS"])
-    elif "EROS_RELAY" in sources:
-        raise ValueError("production Deployment component source evidence is incomplete")
+    for key in HISTORICAL_SOURCE_KEYS.intersection(values):
+        if not EXACT_SHA.fullmatch(values[key]):
+            raise ValueError("historical production component source SHA is invalid")
     if any(not EXACT_SHA.fullmatch(source) for source in sources.values()):
         raise ValueError("production Deployment component source SHA is invalid")
     runtime_target_sha = values.get("gpoint-runtime-target-sha")
