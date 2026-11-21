@@ -342,7 +342,7 @@ jobs:
           cache-dependency-path: services/gsales/pyproject.toml
       - name: Install Python test dependencies
         if: matrix.suite == 'python'
-        run: unset DATABASE_URL SHADOW_DATABASE_URL; python -m pip install './services/gsales[test]' 'alembic==1.16.5' pyyaml
+        run: unset DATABASE_URL SHADOW_DATABASE_URL; python -m pip install './services/agata[test]' './services/gsales[test]' pyyaml
       - name: Test Native image read-back validation
         if: matrix.suite == 'python'
         run: |
@@ -2195,7 +2195,7 @@ jobs:
             --prisma-directory "$GITHUB_WORKSPACE/rollback-core/packages/db/prisma/migrations" \
             --prisma-current-migrations "$(sed -n 's/^PRISMA_MIGRATIONS=//p' <<< "$facts")" \
             --prisma-current-checksums "$(sed -n 's/^PRISMA_CHECKSUMS=//p' <<< "$facts")" \
-            --prisma-current-head "$(sed -n 's/^PRISMA_HEAD=//p' <<< "$facts")" \
+            --prisma-current-head "$(sed -n 's/^PRISMA_HEAD=//p' <<< "$facts")"
           if [[ "$ROLLBACK_EROS" == true ]]; then
             model_digest="$(python3 -c 'import json; print(json.load(open("services/eros-engine/ollama-model.lock.json"))["digest"])')"
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - "$model_digest" < scripts/verify-layer7-ollama.py
