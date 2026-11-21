@@ -51,7 +51,10 @@ def test_ollama_network_and_eros_engine_start_before_core_api_uses_eros_config()
     assert eros < core
     assert core < miniapp
     assert body.index("verify_single_running_role gpoint-eros-pilot-engine", eros) < core
-    assert "kamal accessory reboot ollama --config-file config/deploy.ollama.yml" in body
+    assert "legacy_container=gpoint-eros-relay-ollama" in body
+    assert 'docker rename "$legacy_container" "$ollama_container"' in body
+    assert "accessory boot ollama --config-file config/deploy.ollama.yml" in body
+    assert "accessory reboot ollama" not in body
     assert "gpoint_ollama_internal" in body
     assert "core_api_config=config/deploy.eros-api.yml" in body
 
