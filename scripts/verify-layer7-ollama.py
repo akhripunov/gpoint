@@ -10,7 +10,7 @@ import sys
 BASE_URL = "http://ollama:11434"
 MODEL_NAME = "qwen3-embedding:0.6b"
 IMAGE = "ollama/ollama@sha256:a717bfc1c56acfc2e85d3109bd40a7646258ec9062c40cea83b9ed0927eb4223"
-CONTAINER = "gpoint-eros-relay-ollama"
+CONTAINER = "gpoint-ollama-ollama"
 NETWORK = "gpoint_ollama_internal"
 
 

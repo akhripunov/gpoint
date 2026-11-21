@@ -252,15 +252,15 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertNotIn("repos/$GITHUB_REPOSITORY/deployments", rehearsal_run)
         self.assertIn("--format '{{.Os}} {{.Architecture}}'", rehearsal_run)
 
-    def test_python_job_runs_the_disposable_postgres_migration_harness(self):
+    def test_python_job_keeps_gpoint_postgres_security_integration_only(self):
         job = self.workflow["jobs"]["tests"]
         run_steps = "\n".join(step.get("run", "") for step in job["steps"])
-        self.assertIn("services/gsales/tests/run_postgres.py", run_steps)
+        self.assertIn("tests/integration/gpoint-chat-schema-docker.py", run_steps)
+        self.assertNotIn("services/gsales/tests/", run_steps)
+        self.assertNotIn("gsales-api", run_steps)
         checkout = next(step for step in job["steps"]
                         if step.get("uses", "").startswith("actions/checkout@"))
         self.assertEqual(checkout["with"]["fetch-depth"], 0)
-        harness = (ROOT / "services/gsales/tests/run_postgres.py").read_text()
-        self.assertIn("pgvector/pgvector:0.8.6-pg16", harness)
 
     def test_native_workflow_runs_actionlint_before_build(self):
         steps = self.workflow["jobs"]["tests"]["steps"]

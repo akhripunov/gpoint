@@ -1,5 +1,15 @@
-service: gpoint-eros-relay
-image: akhripunov/gpoint-eros
+# Kamal requires an application role even for accessory-only commands. This
+# reserved TEST-NET target and unpublished image make app Deploy fail closed;
+# the Ollama accessory host below is the only production target.
+service: gpoint-ollama
+image: akhripunov/gpoint-ollama-config-only
+primary_role: web
+
+servers:
+  web:
+    hosts:
+      - 192.0.2.10
+    proxy: false
 
 accessories:
   ollama:

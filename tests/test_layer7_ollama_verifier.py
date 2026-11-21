@@ -70,7 +70,7 @@ def test_verifies_pinned_model_and_direct_private_api_embedding_route():
     ({"host_ip": "0.0.0.0"}, "loopback-only"),
     ({"internal": False}, "not internal"),
     ({"alias": False}, "alias"),
-    ({"attached": {"gpoint-eros-relay-ollama", "unrelated-container"}}, "unrelated"),
+    ({"attached": {"gpoint-ollama-ollama", "unrelated-container"}}, "unrelated"),
 ])
 def test_rejects_unsafe_public_or_unrelated_network_state(options, message):
     module = load_module()

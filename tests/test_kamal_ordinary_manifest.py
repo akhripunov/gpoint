@@ -33,7 +33,7 @@ if args[0] == "inspect" and name == "kamal-proxy":
 elif args[0] == "inspect" and name in ("shared_postgres_1", "shared_redis_1"):
  ident="{DB_ID}" if name == "shared_postgres_1" else "{REDIS_ID}"
  print(json.dumps([{{"Id":ident,"State":{{"Running":True}}}}]))
-elif args[0] == "inspect" and name.startswith(("gsales-", "legacy-")):
+elif args[0] == "inspect" and name.startswith("legacy-"):
  service=name.split("-", 1)[1]
  running=(name.startswith("legacy-") and __import__("os").environ.get("ACTIVE_COMPOSE_SERVICE") == service)
  print(json.dumps([{{"Id":name,"State":{{"Running":running}}}}]))
@@ -57,7 +57,7 @@ elif args[0:2] == ["ps", "-aq"]:
      or args[4] != "--filter" or not args[5].startswith("label=com.docker.compose.service=")):
   raise SystemExit("invalid Docker filter argument contract")
  service=args[-1].split("=")[-1]
- prefix="legacy-" if service in ("api", "worker", "bot") else "gsales-"
+ prefix="legacy-"
  print(prefix+service)
 else: raise SystemExit(2)
 ''')
@@ -160,8 +160,7 @@ def test_ordinary_manifest_binds_services_database_proxy_tls_and_routes(tmp_path
     assert len(manifest["preservation"]["legacyComposeContainers"]) == 3
     assert manifest["publicIngress"] == {"proxy": "kamal-proxy", "httpPort": 80, "httpsPort": 443,
                                          "tls": "PASS", "routes": "PASS"}
-    assert manifest["preservation"]["gsales"] == "STOPPED"
-    assert [row["service"] for row in manifest["preservation"]["gsalesContainers"]] == ["gsales-api"]
+    assert "gsales" not in json.dumps(manifest).lower()
     assert manifest["migrationHeads"]["prismaHead"] == "20261022110000_eros_gpoint_message_state"
     assert len(manifest["migrationHeads"]["prismaAppliedChecksums"]) == 2
     assert manifest["migrationHeads"]["liveBaselineUnchanged"] is True

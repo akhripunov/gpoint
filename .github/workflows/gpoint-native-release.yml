@@ -338,11 +338,9 @@ jobs:
         if: matrix.suite == 'python'
         with:
           python-version: '3.12'
-          cache: pip
-          cache-dependency-path: services/gsales/pyproject.toml
       - name: Install Python test dependencies
         if: matrix.suite == 'python'
-        run: unset DATABASE_URL SHADOW_DATABASE_URL; python -m pip install './services/agata[test]' './services/gsales[test]' pyyaml
+        run: unset DATABASE_URL SHADOW_DATABASE_URL; python -m pip install 'pytest==9.1.1' 'alembic==1.16.5' 'PyYAML==6.0.2'
       - name: Test Native image read-back validation
         if: matrix.suite == 'python'
         run: |
@@ -438,7 +436,6 @@ jobs:
         run: |
           unset DATABASE_URL SHADOW_DATABASE_URL
           python tests/integration/gpoint-chat-schema-docker.py --image pgvector/pgvector:0.8.6-pg16
-          python services/gsales/tests/run_postgres.py
 
   build:
     name: Build and publish immutable images
@@ -1441,18 +1438,58 @@ jobs:
           fi
           test "$(docker network inspect gpoint_ollama_internal --format '{{.Internal}}')" = true
           REMOTE_OLLAMA_NETWORK
-            accessory_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{.State.Status}}' gpoint-eros-relay-ollama 2>/dev/null || true)"
+            ollama_container=gpoint-ollama-ollama
+            legacy_container=gpoint-eros-relay-ollama
+            accessory_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{.State.Status}}' "$ollama_container" 2>/dev/null || true)"
+            legacy_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{.State.Status}}' "$legacy_container" 2>/dev/null || true)"
+            if [[ -n "$accessory_state" && "$accessory_state" != absent && -n "$legacy_state" && "$legacy_state" != absent ]]; then
+              echo 'Both current and legacy Ollama containers exist; refusing parallel accessories' >&2
+              exit 1
+            fi
+            if [[ -n "$legacy_state" && "$legacy_state" != absent ]]; then
+              case "$legacy_state" in
+                running|exited|created) ;;
+                *) echo "Legacy Ollama accessory is in an unexpected state: $legacy_state" >&2; exit 1 ;;
+              esac
+              legacy_image="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{.Config.Image}}' "$legacy_container")"
+              test "$legacy_image" = 'ollama/ollama@sha256:a717bfc1c56acfc2e85d3109bd40a7646258ec9062c40cea83b9ed0927eb4223' || {
+                echo 'Legacy Ollama accessory image differs from the pinned model server' >&2; exit 1;
+              }
+              legacy_mounts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{json .Mounts}}' "$legacy_container")"
+              python3 - "$legacy_mounts" <<'PY'
+          import json,sys
+          mounts=json.loads(sys.argv[1])
+          if not any(m.get('Name')=='ollama-layer7-models' and m.get('Destination')=='/root/.ollama' and m.get('RW') is True for m in mounts):
+              raise SystemExit('legacy Ollama model volume is not the approved persistent volume')
+          PY
+              if [[ "$legacy_state" == running ]]; then
+                legacy_networks="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{json .NetworkSettings.Networks}}' "$legacy_container")"
+                python3 - "$legacy_networks" <<'PY'
+          import json,sys
+          network=json.loads(sys.argv[1]).get('gpoint_ollama_internal',{})
+          if not network or 'ollama' not in network.get('Aliases',[]):
+              raise SystemExit('legacy Ollama is not on the expected private network')
+          PY
+              fi
+              ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker rename "$legacy_container" "$ollama_container"
+              accessory_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{.State.Status}}' "$ollama_container")"
+            fi
             if [[ "$accessory_state" == running ]]; then
-              on_network="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{json .NetworkSettings.Networks}}' gpoint-eros-relay-ollama)"
+              on_network="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{json .NetworkSettings.Networks}}' "$ollama_container")"
               if ! python3 -c 'import json,sys; n=json.loads(sys.argv[1]).get("gpoint_ollama_internal",{}); raise SystemExit(0 if "ollama" in n.get("Aliases",[]) else 1)' "$on_network"; then
-                GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay kamal accessory reboot ollama --config-file config/deploy.ollama.yml
+                echo 'Ollama accessory is missing its required private network alias' >&2
+                exit 1
               fi
             elif [[ "$accessory_state" == absent || -z "$accessory_state" ]]; then
-              GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay kamal accessory boot ollama --config-file config/deploy.ollama.yml
-              GPOINT_KAMAL_SERVICE=gpoint-eros-relay KAMAL_ROLES=relay kamal accessory exec ollama ollama pull qwen3-embedding:0.6b --config-file config/deploy.ollama.yml
-            else
+              GPOINT_KAMAL_SERVICE=gpoint-ollama KAMAL_ROLES=web kamal accessory boot ollama --config-file config/deploy.ollama.yml
+              GPOINT_KAMAL_SERVICE=gpoint-ollama KAMAL_ROLES=web kamal accessory exec ollama ollama pull qwen3-embedding:0.6b --config-file config/deploy.ollama.yml
+            elif [[ "$accessory_state" != exited && "$accessory_state" != created ]]; then
               echo "Ollama accessory is in an unexpected state: $accessory_state" >&2
               exit 1
+            else
+              ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker start "$ollama_container" >/dev/null
+              accessory_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{.State.Status}}' "$ollama_container")"
+              test "$accessory_state" = running
             fi
           fi
           if [[ "$DEPLOY_EROS" == true ]]; then
@@ -1682,14 +1719,6 @@ jobs:
           test "$prisma_checksums" = "$expected_prisma_checksums" || { echo 'Prisma applied checksums changed during ordinary deploy' >&2; exit 1; }
           test "$prisma_head" = "$expected_prisma_head" || { echo 'Prisma head changed during ordinary deploy' >&2; exit 1; }
           echo "GPOINT_RUNTIME_PRISMA_HEAD=$prisma_head"
-          for service in gsales-api; do
-            ids="$(docker ps -aq --filter "label=com.docker.compose.service=$service")"
-            test -n "$ids" || { echo "Expected stopped GSales service is missing: $service" >&2; exit 1; }
-            while IFS= read -r id; do
-              [[ -n "$id" ]] || continue
-              test "$(docker inspect --format '{{.State.Running}}' "$id")" = false
-            done <<< "$ids"
-          done
           echo 'GPOINT_MEDIA_READ_WRITE=PASS'
           echo 'GPOINT_ORDINARY_KAMAL_VERIFY=PASS'
           remote_manifest_dir="/opt/gpoint/release-logs/$sha"

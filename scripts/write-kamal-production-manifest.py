@@ -263,28 +263,12 @@ def main() -> int:
             if container.get("State", {}).get("Running"):
                 raise SystemExit(f"legacy Compose service must remain stopped: {service}")
             stopped_compose.append({"service": service, "containerId": container_id, "running": False})
-    stopped_gsales = []
-    for service in ("gsales-api",):
-        result = subprocess.run(["docker", "ps", "-aq", "--filter",
-                                 "label=com.docker.compose.project=compose",
-                                 "--filter", f"label=com.docker.compose.service={service}"],
-                                check=True, capture_output=True, text=True)
-        container_ids = [value for value in result.stdout.splitlines() if value]
-        if not container_ids:
-            raise SystemExit(f"expected stopped GSales service is missing: {service}")
-        for container_id in container_ids:
-            container = docker_json("inspect", container_id)[0]
-            if container.get("State", {}).get("Running"):
-                raise SystemExit(f"GSales service must remain stopped: {service}")
-            stopped_gsales.append({"service": service, "containerId": container_id, "running": False})
     ordinary_preservation = {
         "postgresContainerId": args.db_container_id,
         "redisContainerId": args.redis_container_id,
         "caddy": "INACTIVE",
         "legacyCompose": "STOPPED",
         "legacyComposeContainers": stopped_compose,
-        "gsales": "STOPPED",
-        "gsalesContainers": stopped_gsales,
         "databaseMigrationsAppliedByRelease": bool(pending_migrations),
         "migrationCompatibility": "PASS",
     }
@@ -340,7 +324,7 @@ def main() -> int:
         "verified": [
             "public-api-health", "public-media-route", "public-miniapp-routes",
             "exact-image-digests-and-git-sha", "service-health", "kamal-proxy-public-tls",
-            "postgres-redis-preserved", "live-schema-compatibility-and-baseline-unchanged", "gsales-stopped",
+            "postgres-redis-preserved", "live-schema-compatibility-and-baseline-unchanged",
         ],
     }
     output_path = Path(args.output)
