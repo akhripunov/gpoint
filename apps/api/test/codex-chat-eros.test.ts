@@ -39,7 +39,24 @@ function withOwnedErosEnvironment<T>(run: () => Promise<T>) {
   });
 }
 
-function approvalStore(payload: string, telegramId: string, approvedCount: () => void) {
+function approvalStore(payload: string, telegramId: string, approvedCount: () => void, options: { consents?: unknown[]; ages?: unknown[] } = {}) {
+  const tenantId = '30000000-0000-4000-8000-000000000003';
+  const policy = {
+    id: 'policy-1', sourceTenantId: tenantId, termsVersion: 'gpoint-terms-v1', privacyVersion: 'gpoint-privacy-v1', version: 1,
+    status: 'active', effectiveFrom: new Date('2026-01-01T00:00:00Z'), effectiveTo: null,
+    rules: { minimum_age: 18, ai_disclosure_required: true, self_attestation_allowed: false },
+  };
+  const consents = options.consents ?? [
+    { id: 'chat', sourceTenantId: tenantId, purpose: 'chat_history', grantedAt: new Date(), revokedAt: null, policyVersion: 'consent-v1' },
+    { id: 'memory', sourceTenantId: tenantId, purpose: 'long_term_memory', grantedAt: new Date(), revokedAt: null, policyVersion: 'consent-v1' },
+    { id: 'terms', sourceTenantId: tenantId, purpose: 'terms_of_use', grantedAt: new Date(), revokedAt: null, policyVersion: policy.termsVersion },
+    { id: 'privacy', sourceTenantId: tenantId, purpose: 'privacy_policy', grantedAt: new Date(), revokedAt: null, policyVersion: policy.privacyVersion },
+  ];
+  const ages = options.ages ?? [{
+    id: 'age-1', sourceTenantId: tenantId, ageBand: 'adult', status: 'verified', method: 'document',
+    verifiedAt: new Date(), assertedAt: null, expiresAt: null, version: 1,
+  }];
+  const receipts = [{ id: 'receipt-1', sourceTenantId: tenantId, policyProfileId: policy.id, policyVersion: policy.version, displayedAt: new Date(), memoryOptIn: true, memoryOptInAt: new Date() }];
   return {
     user: {
       findUnique: async (args: any) => {
@@ -71,6 +88,10 @@ function approvalStore(payload: string, telegramId: string, approvedCount: () =>
         return { instanceId: IDS.instance };
       },
     },
+    gpointChatPolicyProfile: { findMany: async () => [policy] },
+    gpointChatConsent: { findMany: async () => consents },
+    gpointAgeAssurance: { findMany: async () => ages },
+    gpointAiDisclosureReceipt: { findMany: async () => receipts },
   } as unknown as PrismaClient;
 }
 
@@ -149,6 +170,29 @@ test('Codex Telegram approval refuses an Eros relationship without existing hist
       );
       assert.equal(updates, 0);
       assert.equal(eros.paths.length, 2);
+    } finally {
+      await eros.close();
+    }
+  });
+});
+
+test('Codex Telegram approval refuses Eros history when GPoint consent is absent', async () => {
+  const telegramId = String(Date.now() + 300_004);
+  const payload = 'D'.repeat(43);
+  let updates = 0;
+  await withOwnedErosEnvironment(async () => {
+    const eros = await startErosFixture(true);
+    try {
+      await assert.rejects(
+        approveCodexDeviceWithTelegram(
+          { 'x-telegram-webhook-secret': 'disposable-test-webhook-secret' },
+          { payload, chat: { id: telegramId, type: 'private' }, from: { id: telegramId } },
+          approvalStore(payload, telegramId, () => { updates += 1; }, { consents: [] }),
+        ),
+        (error: unknown) => error instanceof UnauthorizedException,
+      );
+      assert.equal(updates, 0);
+      assert.equal(eros.paths.length, 0, 'consent is checked before reading Eros history');
     } finally {
       await eros.close();
     }

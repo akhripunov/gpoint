@@ -1,9 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { BadRequestException, Body, Controller, Headers, HttpException, Param, Post, Req, UnauthorizedException } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
-import { createAgataIntegration } from './agata-integration.js';
-import { ErosAdapterError, createErosEngineClient, erosIdentityFor, isGpointOwnedErosMode } from './eros-adapter.js';
+import { ErosAdapterError, createErosEngineClient, erosIdentityFor, isGpointOwnedChatIdentity, isGpointOwnedErosMode } from './eros-adapter.js';
 import { hashCodexCredential, isCodexOwnerAllowed, isCodexRefreshOwnerCurrent, parseCodexOwnerUserIds, parseCodexTrustedProxyIps, resolveCodexDeviceStartRateKey, resolveCodexMessageSession, validateTelegramCodexApproval, validTelegramWebhookSecret, CODEX_ACCESS_TTL_MS, CODEX_DEVICE_TTL_MS, CODEX_REFRESH_TTL_MS } from './codex-chat-auth.js';
+import { isGpointChatPermitted, loadGpointChatState } from './gpoint-chat-store.js';
 import { FixedWindowRateLimiter } from './rate-limit.js';
 
 const prisma = new PrismaClient();
@@ -58,22 +58,16 @@ export async function approveCodexDeviceWithTelegram(
   if (!authorization?.creatorId) throw new UnauthorizedException();
   const creator = await db.creator.findFirst({ where: { id: authorization.creatorId, profile: { status: 'APPROVED' }, owners: { some: { userId: user.id } } }, select: { id: true } });
   if (!creator) throw new UnauthorizedException();
-
+  if (!isGpointOwnedErosMode() || !isGpointOwnedChatIdentity(user.id, creator.id)) throw new UnauthorizedException();
+  if (!isGpointChatPermitted(await loadGpointChatState(db, user.id))) throw new UnauthorizedException();
+  const eros = createErosEngineClient();
+  if (!eros) throw new HttpException({ code: 'EROS_UNAVAILABLE' }, 503);
   let hasHistory: boolean;
-  if (isGpointOwnedErosMode()) {
-    const eros = createErosEngineClient();
-    if (!eros) throw new HttpException({ code: 'EROS_UNAVAILABLE' }, 503);
-    try {
-      hasHistory = await hasExistingErosCodexConversation(user.id, creator.id, db, eros);
-    } catch (error) {
-      if (error instanceof ErosAdapterError) throw new HttpException({ code: 'EROS_UNAVAILABLE' }, 503);
-      throw error;
-    }
-  } else {
-    const agata = createAgataIntegration();
-    if (!agata) throw new HttpException({ code: 'MESSAGES_UNAVAILABLE' }, 503);
-    const history = await agata.listMessages(user.id, creator.id, { limit: 1 });
-    hasHistory = history.items.length > 0;
+  try {
+    hasHistory = await hasExistingErosCodexConversation(user.id, creator.id, db, eros);
+  } catch (error) {
+    if (error instanceof ErosAdapterError) throw new HttpException({ code: 'EROS_UNAVAILABLE' }, 503);
+    throw error;
   }
   if (!hasHistory) throw new UnauthorizedException();
 
