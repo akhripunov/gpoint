@@ -63,9 +63,40 @@ def test_main_resolves_exact_active_deploy_job_url_for_this_attempt(monkeypatch,
 
     assert resolver.main() == 0
     assert capsys.readouterr().out.strip() == "deployment_id=101"
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     deploy_permissions = workflow.split("  deploy:\n", 1)[1].split("    env:\n", 1)[0]
     assert "      actions: read" in deploy_permissions
+
+
+def test_main_outputs_verified_successful_native_and_installed_eros_source_shas(monkeypatch, capsys):
+    eros_sha = "d" * 40
+    deployment_row = deployment() | {"created_at": "2026-11-21T10:00:00Z"}
+    status_row = status(
+        state="success", url=f"https://github.com/{REPOSITORY}/actions/runs/100",
+    ) | {"environment_url": f"https://gpoint.one/#gpoint-eros-source-sha={eros_sha}"}
+    monkeypatch.setattr(sys, "argv", [
+        "resolve_native_environment_deployment.py", "--repository", REPOSITORY,
+        "--latest-successful-native-sha",
+    ])
+
+    def gh_json(*args):
+        route = args[-1]
+        if route == f"repos/{REPOSITORY}/deployments?environment=production&task=deploy&per_page=100":
+            return [deployment_row]
+        if route == f"repos/{REPOSITORY}/deployments/101/statuses?per_page=100":
+            return [status_row]
+        raise AssertionError(f"unexpected GitHub API route: {route}")
+
+    monkeypatch.setattr(resolver, "_gh_json", gh_json)
+    monkeypatch.setattr(resolver.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(
+        stdout=json.dumps({
+            "head_sha": SHA, "conclusion": "success",
+            "path": ".github/workflows/gpoint-release.yml@refs/heads/main",
+        }),
+    ))
+
+    assert resolver.main() == 0
+    assert capsys.readouterr().out.splitlines() == [f"sha={SHA}", f"eros_source_sha={eros_sha}"]
 
 
 def test_gh_run_jobs_unwraps_github_object_pages(monkeypatch):
@@ -121,3 +152,40 @@ def test_rejects_ambiguous_current_run_deployments():
         resolver.resolve_native_deployment_id(
             [deployment(101), deployment(102)], {101: [status()], 102: [status()]},
             candidate_sha=SHA, repository=REPOSITORY, run_id=RUN, run_attempt=ATTEMPT)
+
+
+def test_infrastructure_baseline_uses_latest_successful_native_deploy_sha_only():
+    older_sha, newer_sha, failed_sha = "a" * 40, "b" * 40, "c" * 40
+    deployments = [
+        deployment(101) | {"sha": older_sha, "created_at": "2026-11-20T10:00:00Z"},
+        deployment(102) | {"sha": newer_sha, "created_at": "2026-11-21T10:00:00Z"},
+        deployment(103) | {"sha": failed_sha, "created_at": "2026-11-21T11:00:00Z"},
+    ]
+    statuses = {
+        101: [status(state="success", url=f"https://github.com/{REPOSITORY}/actions/runs/100")],
+        102: [status(state="success", url=f"https://github.com/{REPOSITORY}/actions/runs/101") | {
+            "environment_url": "https://gpoint.one/#gpoint-eros-source-sha=" + "d" * 40,
+        }],
+        103: [status(state="failure", url=f"https://github.com/{REPOSITORY}/actions/runs/102")],
+    }
+    runs = {
+        100: {"head_sha": older_sha, "conclusion": "success",
+              "path": ".github/workflows/gpoint-native-release.yml@refs/heads/main"},
+        101: {"head_sha": newer_sha, "conclusion": "success",
+              "path": ".github/workflows/gpoint-release.yml@refs/heads/main"},
+        102: {"head_sha": failed_sha, "conclusion": "failure",
+              "path": ".github/workflows/gpoint-release.yml@refs/heads/main"},
+    }
+    assert resolver.latest_successful_native_source_sha(
+        deployments, statuses, runs, repository=REPOSITORY) == newer_sha
+    assert resolver.latest_successful_native_eros_source_sha(
+        deployments, statuses, runs, repository=REPOSITORY) == "d" * 40
+
+
+def test_infrastructure_baseline_ignores_recovery_workflow_deployments():
+    row = deployment() | {"created_at": "2026-11-21T10:00:00Z"}
+    statuses = {101: [status(state="success", url=f"https://github.com/{REPOSITORY}/actions/runs/100")]}
+    runs = {100: {"head_sha": SHA, "conclusion": "success",
+                  "path": ".github/workflows/miniapp-recovery.yml@refs/heads/main"}}
+    with pytest.raises(ValueError, match="no successful verified Native"):
+        resolver.latest_successful_native_source_sha([row], statuses, runs, repository=REPOSITORY)

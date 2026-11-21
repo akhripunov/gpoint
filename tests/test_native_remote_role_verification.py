@@ -6,7 +6,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = ROOT / ".github/workflows/gpoint-native-release.yml"
+WORKFLOW = ROOT / ".github/workflows/gpoint-release.yml"
 VERIFIER = ROOT / "scripts/verify-kamal-role.sh"
 
 

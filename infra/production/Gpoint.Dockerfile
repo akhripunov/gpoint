@@ -1,8 +1,11 @@
 # syntax=docker/dockerfile:1.7
-FROM node:22-bookworm-slim AS build
+FROM node:22-bookworm-slim AS node-base
 WORKDIR /workspace
 ENV PNPM_HOME=/pnpm
 ENV PATH=${PNPM_HOME}:${PATH}
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate && pnpm config set store-dir /pnpm/store
+
+FROM node-base AS build
 RUN apt-get update && apt-get install -y --no-install-recommends git openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY --from=dependency-manifests /package.json ./package.json
@@ -13,7 +16,6 @@ COPY --from=dependency-manifests /apps/worker/package.json apps/worker/package.j
 COPY --from=dependency-manifests /packages/agata-client/package.json packages/agata-client/package.json
 COPY --from=dependency-manifests /packages/contracts/package.json packages/contracts/package.json
 COPY --from=dependency-manifests /packages/db/package.json packages/db/package.json
-RUN corepack enable && corepack prepare pnpm@9.15.0 --activate && pnpm config set store-dir /pnpm/store
 RUN --mount=type=cache,id=gpoint-pnpm-store,target=/pnpm/store pnpm install --frozen-lockfile
 # Separate stable backend builds from Mini App sources. Previously COPY . .
 # invalidated every backend compilation on UI-only changes.
@@ -29,8 +31,20 @@ RUN pnpm --filter @gpoint/worker build
 COPY apps/bot ./apps/bot
 RUN pnpm --filter @gpoint/bot build
 
-# Keep the exact-SHA Mini App build separate from stable backend/dependencies.
-FROM build AS miniapp-build
+# Keep UI compilation independent from the backend build graph. A Mini App-only
+# target installs only its workspace dependencies and never runs Core builds.
+FROM node-base AS miniapp-build
+COPY pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY --from=dependency-manifests /package.json ./package.json
+COPY --from=dependency-manifests /apps/api/package.json apps/api/package.json
+COPY --from=dependency-manifests /apps/bot/package.json apps/bot/package.json
+COPY --from=dependency-manifests /apps/miniapp/package.json apps/miniapp/package.json
+COPY --from=dependency-manifests /apps/worker/package.json apps/worker/package.json
+COPY --from=dependency-manifests /packages/agata-client/package.json packages/agata-client/package.json
+COPY --from=dependency-manifests /packages/contracts/package.json packages/contracts/package.json
+COPY --from=dependency-manifests /packages/db/package.json packages/db/package.json
+RUN --mount=type=cache,id=gpoint-pnpm-store,target=/pnpm/store pnpm install --filter @gpoint/miniapp --frozen-lockfile
+COPY tsconfig.base.json ./tsconfig.base.json
 COPY apps/miniapp ./apps/miniapp
 ARG GPOINT_BUILD_SHA
 ENV GPOINT_BUILD_SHA=${GPOINT_BUILD_SHA}

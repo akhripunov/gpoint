@@ -75,7 +75,7 @@ def test_missing_tenant_source_fails_closed(tmp_path):
 
 
 def test_eros_prerequisites_run_before_the_prisma_apply():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
     steps = workflow["jobs"]["deploy"]["steps"]
     names = [step.get("name", "") for step in steps]
     prereq = next(i for i, name in enumerate(names) if "Eros production prerequisites" in name)
@@ -131,7 +131,7 @@ def test_check_only_cannot_be_combined_with_provisioning(tmp_path):
 
 
 def test_workflow_preflight_is_read_only_and_provisioning_stays_in_apply():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
     steps = workflow["jobs"]["deploy"]["steps"]
     preflight = next(s for s in steps if "Eros production prerequisites" in s.get("name", ""))
     script = preflight["run"]

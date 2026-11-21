@@ -52,6 +52,8 @@ jobs:
     permissions:
       contents: read
       deployments: read
+      actions: read
+      pull-requests: read
     # Both required suites compute identical release intent outputs.
     outputs:
       mode: ${{ steps.intent.outputs.mode }}
@@ -94,52 +96,9 @@ jobs:
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-          token: ''
+          token: ${{ github.token }}
           predicate-quantifier: 'some-with-excludes'
-          filters: |
-            core:
-              - 'apps/api/**'
-              - 'apps/bot/**'
-              - 'apps/worker/**'
-              - 'config/deploy.yml'
-              - 'config/deploy.eros-api.yml'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - 'pnpm-workspace.yaml'
-              - 'tsconfig.base.json'
-              - 'packages/**'
-              - 'infra/production/Gpoint.Dockerfile'
-            miniapp:
-              - 'apps/miniapp/**'
-              - 'apps/api/package.json'
-              - 'apps/bot/package.json'
-              - 'apps/worker/package.json'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - 'pnpm-workspace.yaml'
-              - 'tsconfig.base.json'
-              - 'packages/**'
-              - 'infra/production/Gpoint.Dockerfile'
-              - 'infra/production/nginx-miniapp.conf'
-            eros_engine:
-              - 'services/eros-engine/**'
-              - '!services/eros-engine/*.toml'
-              - '!services/eros-engine/eros-pilot-embedding-relay*'
-              - '!services/eros-engine/open-mac-ollama-tunnel.sh'
-            database:
-              - 'packages/db/prisma/schema.prisma'
-              - 'packages/db/prisma/migrations/**'
-            infrastructure:
-              - '.github/**'
-              - '.kamal/**'
-              - 'config/deploy.yml'
-              - 'config/deploy.eros-api.yml'
-              - 'config/deploy.ollama.yml'
-              - 'config/deploy.eros.yml'
-              - 'config/deploy.miniapp.yml'
-              - 'infra/production/**'
-              - 'scripts/**'
-              - 'systemd/**'
+          filters: .github/filters/native-release.json
       - name: Read pinned Eros upstream source
         shell: bash
         run: |
@@ -147,25 +106,6 @@ jobs:
           upstream="$(cat services/eros-engine/upstream.sha)"
           [[ "$upstream" =~ ^[0-9a-f]{40}$ ]]
           echo "EROS_UPSTREAM_SHA=$upstream" >> "$GITHUB_ENV"
-      - name: Resolve verified production baseline for accumulated infrastructure scope
-        id: infrastructure_baseline
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          CANDIDATE_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          plan="$RUNNER_TEMP/gpoint-infrastructure-baseline.json"
-          python3 scripts/resolve_native_build_scope.py \
-            --candidate-sha "$CANDIDATE_SHA" --repository "$REPOSITORY" > "$plan"
-          python3 - "$plan" >> "$GITHUB_OUTPUT" <<'PY'
-          import json, sys
-          with open(sys.argv[1], encoding="utf-8") as stream:
-              plan = json.load(stream)
-          print("sha=" + (plan["baseline_sha"] if plan["status"] == "VERIFIED" else ""))
-          print("eros_engine=" + str("EROS" in plan["build_components"]).lower())
-          PY
       - name: Fail closed unless the event and complete path set allow a release
         id: intent
         env:
@@ -179,7 +119,6 @@ jobs:
           EVENT_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           MODE: ${{ inputs.mode || 'deploy' }}
-          INFRASTRUCTURE_BASELINE_SHA: ${{ steps.infrastructure_baseline.outputs.sha }}
           APPROVE_PRODUCTION: ${{ inputs.approve_production || false }}
         run: |
           set -euo pipefail
@@ -191,28 +130,45 @@ jobs:
           [[ -n "$EVENT_COMMIT_MESSAGE" ]] && args+=(--commit-message "$EVENT_COMMIT_MESSAGE")
           [[ "$MODE" == rollback ]] && args+=(--rollback)
           [[ "$APPROVE_PRODUCTION" == true ]] && args+=(--approve-production)
-          [[ -n "$INFRASTRUCTURE_BASELINE_SHA" ]] && args+=(--infrastructure-baseline-sha "$INFRASTRUCTURE_BASELINE_SHA")
           python3 scripts/native_release_intent.py "${args[@]}" >> "$GITHUB_OUTPUT"
-      - name: Resolve exact production component scope for manual Deploy
-        id: dispatch_build_scope
-        if: github.event_name == 'workflow_dispatch' && matrix.suite == 'workspace' && steps.intent.outputs.mode == 'DEPLOY'
+      - name: Resolve whether cumulative changes require Eros E2E
+        id: eros_scope
+        if: matrix.suite == 'workspace'
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+          RELEASE_MODE: ${{ inputs.mode || 'deploy' }}
+          PR_EROS_FILTER: ${{ steps.filter.outputs.eros_e2e || 'false' }}
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         run: |
           set -euo pipefail
-          plan="$RUNNER_TEMP/gpoint-dispatch-build-scope.json"
-          python3 scripts/resolve_native_build_scope.py \
-            --candidate-sha "$CANDIDATE_SHA" --repository "$REPOSITORY" > "$plan"
-          python3 - "$plan" >> "$GITHUB_OUTPUT" <<'PY'
-          import json, sys
-          with open(sys.argv[1], encoding="utf-8") as stream:
-              plan = json.load(stream)
-          if plan.get("status") not in {"VERIFIED", "BOOTSTRAP_FULL"}:
-              raise SystemExit("production component baseline is unknown for manual Deploy")
-          print("eros_engine=" + str("EROS" in plan["build_components"]).lower())
+          required=false
+          if [[ "$EVENT_NAME" == pull_request ]]; then
+            required="$PR_EROS_FILTER"
+          elif [[ "$RELEASE_MODE" == rollback ]]; then
+            required=false
+          else
+            baseline="$(python3 scripts/resolve_native_environment_deployment.py \
+              --repository "$REPOSITORY" --latest-successful-native-sha 2>/dev/null \
+              | sed -n 's/^eros_source_sha=//p' || true)"
+            if [[ ! "$baseline" =~ ^[0-9a-f]{40}$ ]]; then
+              echo 'Eros baseline is unavailable; requiring Eros E2E as the fail-safe.'
+              required=true
+            else
+              required="$(python3 - "$baseline" "$EVENT_SHA" <<'PY'
+          from pathlib import Path
+          import sys
+          sys.path.insert(0, str(Path.cwd() / "scripts"))
+          from native_release_intent import eros_e2e_required
+          print(str(eros_e2e_required(Path.cwd(), sys.argv[1], sys.argv[2])).lower())
           PY
+              )"
+            fi
+          fi
+          [[ "$required" == true || "$required" == false ]]
+          echo "required=$required" >> "$GITHUB_OUTPUT"
+          echo "GPOINT_EROS_E2E_REQUIRED=$required" >> "$GITHUB_STEP_SUMMARY"
       - name: Seed pinned Go 1.25.3 in Actions tool cache
         if: matrix.suite == 'workspace'
         env:
@@ -239,7 +195,7 @@ jobs:
         if: matrix.suite == 'workspace'
         run: >-
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-          .github/workflows/gpoint-native-release.yml
+          .github/workflows/gpoint-release.yml
       - name: Validate pinned Kamal configs and shared proxy routing
         if: matrix.suite == 'workspace'
         env:
@@ -249,12 +205,12 @@ jobs:
           ./scripts/check-kamal-configs.sh
           ./scripts/test-kamal-proxy-integration.sh
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-        if: matrix.suite == 'workspace' && (steps.filter.outputs.eros_engine == 'true' || steps.infrastructure_baseline.outputs.eros_engine == 'true' || steps.dispatch_build_scope.outputs.eros_engine == 'true' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'me-62-full-build')) || github.event.before == '0000000000000000000000000000000000000000')
+        if: matrix.suite == 'workspace' && steps.eros_scope.outputs.required == 'true'
         with:
           platforms: linux/amd64
       - name: Build stock Eros test image
         id: eros_test_image
-        if: matrix.suite == 'workspace' && (steps.filter.outputs.eros_engine == 'true' || steps.infrastructure_baseline.outputs.eros_engine == 'true' || steps.dispatch_build_scope.outputs.eros_engine == 'true' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'me-62-full-build')) || github.event.before == '0000000000000000000000000000000000000000')
+        if: matrix.suite == 'workspace' && steps.eros_scope.outputs.required == 'true'
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
           context: https://github.com/etherfunlab/eros-engine.git#${{ env.EROS_UPSTREAM_SHA }}
@@ -276,7 +232,7 @@ jobs:
           cache-to: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && 'type=gha,scope=gpoint-eros-test,mode=max,timeout=45s,ignore-error=true' || '' }}
       - name: Run stock Eros SQLx and synthetic conversation E2E
         id: eros_e2e
-        if: matrix.suite == 'workspace' && (steps.filter.outputs.eros_engine == 'true' || steps.infrastructure_baseline.outputs.eros_engine == 'true' || steps.dispatch_build_scope.outputs.eros_engine == 'true' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'me-62-full-build')) || github.event.before == '0000000000000000000000000000000000000000')
+        if: matrix.suite == 'workspace' && steps.eros_scope.outputs.required == 'true'
         run: |
           set -euo pipefail
           image="gpoint-eros:stock-$EROS_UPSTREAM_SHA"
@@ -411,7 +367,8 @@ jobs:
           unset DATABASE_URL SHADOW_DATABASE_URL; python -m pytest -q
           tests/test_simple_release_architecture.py
           tests/test_native_build_boundary.py
-          tests/test_native_build_scope.py
+          tests/test_native_change_surface.py
+          tests/test_docker_dependency_manifests.py
           tests/test_prepush_runner.py
           tests/test_release_scope_consistency.py
           tests/test_release_routing_matrix.py
@@ -445,22 +402,19 @@ jobs:
       ((github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)) ||
-       (github.event_name != 'pull_request' && needs.tests.outputs.mode == 'DEPLOY'))
+       (github.event_name != 'pull_request' && needs.tests.outputs.mode == 'DEPLOY' &&
+        needs.tests.outputs.deploy == 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       contents: read
       packages: write
-      deployments: read
-      actions: read
     outputs:
       app_digest: ${{ steps.app.outputs.digest }}
       miniapp_digest: ${{ steps.miniapp.outputs.digest }}
       eros_digest: ${{ steps.eros.outputs.digest }}
       image_version: ${{ steps.image_version.outputs.image_version }}
       build_components: ${{ steps.build_scope.outputs.build_components }}
-      baseline_mode: ${{ steps.build_scope.outputs.status }}
-      baseline_sources: ${{ steps.build_scope.outputs.baseline_sources }}
       deploy_scope: ${{ steps.build_scope.outputs.deploy_scope }}
       app_image_bytes: ${{ steps.image_readback.outputs.app_image_bytes }}
     steps:
@@ -475,31 +429,17 @@ jobs:
           upstream="$(cat services/eros-engine/upstream.sha)"
           [[ "$upstream" =~ ^[0-9a-f]{40}$ ]]
           echo "EROS_UPSTREAM_SHA=$upstream" >> "$GITHUB_ENV"
-      - name: Resolve exact production component build scope
+      - name: Select exact component build scope
         id: build_scope
-        env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-          FULL_BUILD_VALIDATION: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'me-62-full-build') }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          python3 scripts/resolve_native_build_scope.py \
-            --candidate-sha "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY" \
-            | tee "$RUNNER_TEMP/gpoint-build-scope.json"
-          python3 - "$RUNNER_TEMP/gpoint-build-scope.json" >> "$GITHUB_OUTPUT" <<'PY'
-          import json, os, sys
-          value = json.load(open(sys.argv[1], encoding="utf-8"))
-          if value.get("status") not in {"VERIFIED", "BOOTSTRAP_FULL"}:
-              raise SystemExit("production component build scope is not verified")
-          if (os.environ["GITHUB_EVENT_NAME"] == "pull_request"
-                  and os.environ["FULL_BUILD_VALIDATION"] == "true"
-                  and not value.get("build_components")):
-              value["build_components"] = ["CORE", "EROS", "MINIAPP"]
-              print("PR_BUILD_VALIDATION=ALL_THREE_IMAGES")
-          print("status=" + value["status"])
-          print("build_components=" + json.dumps(value["build_components"], separators=(",", ":")))
-          print("deploy_scope=" + value["deploy_scope"])
-          print("baseline_sources=" + json.dumps(value.get("baseline_sources", {}), sort_keys=True, separators=(",", ":")))
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          # Build every independently versioned image. Production Deploy will
+          # select only components that differ from the verified live roles.
+          components = ["CORE", "MINIAPP", "EROS"]
+          print("build_components=" + json.dumps(components, separators=(",", ":")))
+          print("deploy_scope=LIVE")
           PY
       - name: Select exact immutable image version
         id: image_version
@@ -730,15 +670,15 @@ jobs:
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
             test "$APPROVE_PRODUCTION" = true
+            test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY" || {
+              echo 'production release actor must match the repository owner' >&2; exit 1;
+            }
+            test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY" || {
+              echo 'production release triggering actor must match the repository owner' >&2; exit 1;
+            }
           elif [[ "$GITHUB_EVENT_NAME" != push ]]; then
             echo 'unsupported production release event' >&2; exit 1
           fi
-          test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY" || {
-            echo 'production release actor must match the repository owner' >&2; exit 1;
-          }
-          test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY" || {
-            echo 'production release triggering actor must match the repository owner' >&2; exit 1;
-          }
           test "$REQUESTED_SHA" = "$WORKFLOW_SHA"
           if ! [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo 'candidate SHA must be exactly 40 lowercase hexadecimal characters' >&2; exit 1;
@@ -994,6 +934,16 @@ jobs:
               *) echo 'unexpected topology fact' >&2; exit 1 ;;
             esac
           done <<< "$facts"
+      - name: Resolve last successful Native deployment as infrastructure approval baseline
+        if: github.event_name == 'push'
+        id: infrastructure_baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 scripts/resolve_native_environment_deployment.py \
+            --repository "$REPOSITORY" --latest-successful-native-sha >> "$GITHUB_OUTPUT"
       - name: Plan exact component-scoped Kamal update from live baseline
         if: (inputs.mode != 'rollback')
         id: component_plan
@@ -1003,9 +953,8 @@ jobs:
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
           EROS_DIGEST: ${{ needs.build.outputs.eros_digest }}
           BUILD_COMPONENTS: ${{ needs.build.outputs.build_components }}
-          BASELINE_MODE: ${{ needs.build.outputs.baseline_mode }}
-          BUILD_BASELINE_SOURCES: ${{ needs.build.outputs.baseline_sources }}
-          BUILD_DEPLOY_SCOPE: ${{ needs.build.outputs.deploy_scope }}
+          EVENT_NAME: ${{ github.event_name }}
+          INFRASTRUCTURE_BASELINE_SHA: ${{ steps.infrastructure_baseline.outputs.sha }}
         run: |
           set -euo pipefail
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
@@ -1014,7 +963,8 @@ jobs:
           sys.path.insert(0, str(Path.cwd() / "scripts"))
           from native_release_intent import (ALL_COMPONENT_ROLES, COMPONENT_IMAGES, ROLE_REPOSITORIES,
                                              classify_component_scope, expected_runtime_inventory_b64,
-                                             installed_component_sources)
+                                             changed_paths,
+                                             is_infrastructure_change)
 
           candidate = os.environ["CANDIDATE_SHA"]
           baseline = json.loads(os.environ["BASELINE_ROLE_INVENTORY"])
@@ -1023,19 +973,13 @@ jobs:
           scope_components = set(scope["scope"].split("+")) - {"NONE"}
           if not {COMPONENT_IMAGES[component] for component in scope_components}.issubset(builds):
               raise SystemExit("fresh live component scope is missing a prebuilt candidate image")
-          live_sources = installed_component_sources(baseline)
-          mode = os.environ["BASELINE_MODE"]
-          if mode == "VERIFIED":
-              expected_sources = json.loads(os.environ["BUILD_BASELINE_SOURCES"])
-              if live_sources != expected_sources:
-                  raise SystemExit("live production component sources changed after Build")
-              if scope["scope"] != os.environ["BUILD_DEPLOY_SCOPE"]:
-                  raise SystemExit("live production deploy scope differs from pre-build scope")
-          elif mode == "BOOTSTRAP_FULL":
-              if not set(COMPONENT_IMAGES.values()).issubset(builds):
-                  raise SystemExit("bootstrap release must build every GPoint runtime image")
-          else:
-              raise SystemExit("production component baseline mode is unsupported")
+          if os.environ["EVENT_NAME"] == "push":
+              infrastructure_baseline = os.environ["INFRASTRUCTURE_BASELINE_SHA"]
+              if not re.fullmatch(r"[0-9a-f]{40}", infrastructure_baseline):
+                  raise SystemExit("last verified Native production deployment SHA is unavailable")
+              accumulated_paths = changed_paths(infrastructure_baseline, candidate, repo=Path.cwd())
+              if is_infrastructure_change(accumulated_paths):
+                  raise SystemExit("accumulated production infrastructure changes require approved workflow_dispatch")
           effective = {}
           image_inputs = {"CORE": "APP_DIGEST", "MINIAPP": "MINIAPP_DIGEST", "EROS": "EROS_DIGEST"}
           outputs = {"CORE": "app_digest", "MINIAPP": "miniapp_digest", "EROS": "eros_digest"}

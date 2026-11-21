@@ -9,7 +9,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 def _workflow_source() -> str:
-    path = ".github/workflows/gpoint-native-release.yml"
+    path = ".github/workflows/gpoint-release.yml"
     return (ROOT / path).read_text()
 
 
@@ -52,7 +52,7 @@ def _tracked_paths() -> set[str]:
 
 
 def test_native_workflow_references_only_existing_release_scripts():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     paths = set(re.findall(r"(?<![A-Za-z0-9_])scripts/[A-Za-z0-9_./-]+\.(?:py|sh|mjs|js)", workflow))
     assert paths
     missing = sorted(path for path in paths if not (ROOT / path).is_file())
@@ -82,7 +82,7 @@ def test_retired_eros_pilot_compose_deployer_is_not_a_release_tool():
 
 def test_pr_candidate_runs_build_without_production_deploy():
     workflow = yaml.safe_load(
-        (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+        (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     )
     build = workflow["jobs"]["build"]
     deploy = workflow["jobs"]["deploy"]
@@ -93,28 +93,28 @@ def test_pr_candidate_runs_build_without_production_deploy():
     assert 'fromJSON(\'["OWNER","MEMBER","COLLABORATOR"]\')' in build["if"]
     assert build["permissions"]["packages"] == "write"
     build_scope = next(step for step in build["steps"] if step.get("id") == "build_scope")
-    assert build_scope["env"]["FULL_BUILD_VALIDATION"] == "${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'me-62-full-build') }}"
-    assert 'value["build_components"] = ["CORE", "EROS", "MINIAPP"]' in build_scope["run"]
+    assert 'components = ["CORE", "MINIAPP", "EROS"]' in build_scope["run"]
+    assert "steps.filter.outputs" not in build_scope["run"]
     tests = workflow["jobs"]["tests"]
     eros_e2e = next(step for step in tests["steps"] if step.get("id") == "eros_e2e")
-    assert "github.event_name == 'pull_request'" in eros_e2e["if"]
-    assert "contains(github.event.pull_request.labels.*.name, 'me-62-full-build')" in eros_e2e["if"]
+    assert "steps.eros_scope.outputs.required == 'true'" in eros_e2e["if"]
+    eros_scope = next(step for step in tests["steps"] if step.get("id") == "eros_scope")
+    assert "steps.filter.outputs.eros_e2e" in eros_scope["env"]["PR_EROS_FILTER"]
+    assert "latest-successful-native-sha" in eros_scope["run"]
     assert "eros_e2e" not in tests["outputs"]
     assert "tests" in build["needs"]
     assert "needs.tests.result == 'success'" in build["if"]
     path_filter = next(step for step in tests["steps"] if step.get("id") == "filter")
     assert path_filter["with"]["base"] == "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}"
-    assert path_filter["with"]["token"] == ""
-    assert "pull-requests" not in tests["permissions"]
+    assert path_filter["with"]["token"] == "${{ github.token }}"
+    assert "pull-requests" in tests["permissions"]
     assert not any(step.get("name") == "Require exact-candidate Eros test evidence" for step in build["steps"])
-    assert "steps.infrastructure_baseline.outputs.eros_engine" in eros_e2e["if"]
-    assert "steps.dispatch_build_scope.outputs.eros_engine" in eros_e2e["if"]
     assert "github.event_name == 'pull_request'" not in deploy["if"]
     assert "needs.tests.outputs.mode == 'DEPLOY'" in deploy["if"]
 
 
 def test_every_workflow_helper_has_a_replacement_and_retention_audit():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     documentation = (ROOT / "docs/release/automation.md").read_text()
     start = "<!-- ME62_HELPER_AUDIT_START -->"
     end = "<!-- ME62_HELPER_AUDIT_END -->"
@@ -136,7 +136,7 @@ def test_every_workflow_helper_has_a_replacement_and_retention_audit():
 
 
 def test_production_release_controller_and_unique_image_build_counts_are_explicit():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
     build_steps = [
         step for step in workflow["jobs"]["build"]["steps"]
         if step.get("uses", "").startswith("docker/build-push-action@")
@@ -146,7 +146,7 @@ def test_production_release_controller_and_unique_image_build_counts_are_explici
 
 
 def test_deploy_uses_one_authoritative_live_inventory_not_redundant_kamal_text_views():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
     steps = workflow["jobs"]["deploy"]["steps"]
     inventory = next(step for step in steps if step.get("id") == "kamal_inventory")
     topology = next(step for step in steps if step.get("id") == "topology")
@@ -163,7 +163,7 @@ def test_release_architecture_invariants_match_documented_state():
     current_workflow = _workflow_source()
     current = {
         "Production release controllers": sum(
-            path.endswith("gpoint-native-release.yml") for path in _tracked_paths()
+            path.endswith("gpoint-release.yml") for path in _tracked_paths()
         ),
         "Additional Layer7 staging deployment workflows": sum(
             path.endswith("gpoint-layer7-staging.yml") for path in _tracked_paths()

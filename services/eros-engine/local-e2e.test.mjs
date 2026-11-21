@@ -377,7 +377,7 @@ test('GitHub Prepare accepts only its pinned setup-docker Unix socket context', 
 });
 
 test('Native release uses its pinned Buildx action and has no legacy Prepare workflow', () => {
-  const workflow = readFileSync(new URL('../../.github/workflows/gpoint-native-release.yml', directory), 'utf8');
+  const workflow = readFileSync(new URL('../../.github/workflows/gpoint-release.yml', directory), 'utf8');
   assert.match(workflow, /uses: docker\/setup-buildx-action@[0-9a-f]{40}/);
   assert.match(workflow, /name: Build stock Eros test image/);
   assert.doesNotMatch(workflow, /setup-docker-action|gpoint-setup-docker|gpoint-prepare\.yml/);

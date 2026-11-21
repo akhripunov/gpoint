@@ -64,17 +64,69 @@ def test_generated_projection_matches_exact_candidate_source_manifests(tmp_path)
 def test_dockerfile_named_context_inventory_matches_projection_inventory():
     dockerfile = SCRIPT.parents[1] / 'infra/production/Gpoint.Dockerfile'
     docker_source = dockerfile.read_text()
-    copies = re.findall(
-        r'^COPY --from=dependency-manifests /([^\s]+) ([^\s]+)$',
-        docker_source, re.MULTILINE)
+    copies_by_stage = {}
+    current_stage = None
+    for line in docker_source.splitlines():
+        stage = re.match(r'^FROM\s+\S+\s+AS\s+(\S+)$', line, re.IGNORECASE)
+        if stage:
+            current_stage = stage.group(1)
+            copies_by_stage.setdefault(current_stage, [])
+        copy = re.match(r'^COPY --from=dependency-manifests /([^\s]+) ([^\s]+)$', line)
+        if copy:
+            copies_by_stage[current_stage].append(copy.groups())
 
-    assert tuple(source for source, _ in copies) == manifests.MANIFEST_PATHS
-    assert tuple(destination.removeprefix('./') for _, destination in copies) == manifests.MANIFEST_PATHS
-    lockfile_input = docker_source.index('COPY pnpm-lock.yaml pnpm-workspace.yaml ./')
-    install = docker_source.index('pnpm install --frozen-lockfile')
-    assert lockfile_input < install
-    assert all(docker_source.index(f'COPY --from=dependency-manifests /{relative} ')
-               < install for relative in manifests.MANIFEST_PATHS)
+    for stage in ('build', 'miniapp-build'):
+        copies = copies_by_stage[stage]
+        assert tuple(source for source, _ in copies) == manifests.MANIFEST_PATHS
+        assert tuple(destination.removeprefix('./') for _, destination in copies) == manifests.MANIFEST_PATHS
+        stage_start = docker_source.index(f' AS {stage}')
+        stage_end = next((docker_source.index(f' AS {name}', stage_start + 1)
+                          for name in ('build', 'miniapp-build', 'runtime', 'miniapp-runtime')
+                          if name != stage and docker_source.find(f' AS {name}', stage_start + 1) >= 0),
+                         len(docker_source))
+        stage_source = docker_source[stage_start:stage_end]
+        lockfile_input = stage_source.index('COPY pnpm-lock.yaml pnpm-workspace.yaml ./')
+        install = stage_source.index('pnpm install --')
+        assert lockfile_input < install
+        assert all(stage_source.index(f'COPY --from=dependency-manifests /{relative} ') < install
+                   for relative in manifests.MANIFEST_PATHS)
+
+
+def test_miniapp_target_does_not_depend_on_backend_compilation():
+    dockerfile = SCRIPT.parents[1] / 'infra/production/Gpoint.Dockerfile'
+    lines = dockerfile.read_text().splitlines()
+    stages = {}
+    current = None
+    for line in lines:
+        match = re.match(r'FROM\s+\S+(?:\s+AS\s+(\S+))?$', line, re.IGNORECASE)
+        if match:
+            current = match.group(1) or f'stage-{len(stages)}'
+            stages[current] = {'dependencies': set(), 'instructions': []}
+            continue
+        if current is None:
+            continue
+        stages[current]['instructions'].append(line)
+        source = re.match(r'COPY\s+--from=(\S+)\s+', line, re.IGNORECASE)
+        if source:
+            stages[current]['dependencies'].add(source.group(1))
+
+    def dependency_closure(stage):
+        found, pending = set(), list(stages[stage]['dependencies'])
+        while pending:
+            dependency = pending.pop()
+            if dependency in found or dependency not in stages:
+                continue
+            found.add(dependency)
+            pending.extend(stages[dependency]['dependencies'])
+        return found
+
+    assert 'build' not in dependency_closure('miniapp-runtime')
+    miniapp_instructions = '\n'.join(stages['miniapp-build']['instructions'])
+    assert 'pnpm install --filter @gpoint/miniapp --frozen-lockfile' in miniapp_instructions
+    assert 'pnpm --filter @gpoint/miniapp build' in miniapp_instructions
+    assert 'pnpm --filter @gpoint/api build' not in miniapp_instructions
+    assert 'pnpm --filter @gpoint/worker build' not in miniapp_instructions
+    assert 'pnpm --filter @gpoint/bot build' not in miniapp_instructions
 
 
 def test_workspace_manifests_are_accounted_for_by_production_subset():

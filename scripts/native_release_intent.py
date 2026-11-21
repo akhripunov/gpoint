@@ -51,6 +51,7 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     ".kamal/hooks/post-app-boot",
     ".kamal/hooks/pre-app-boot",
     "AGENTS.md",
+    ".github/filters/native-release.json",
     "packages/db/prisma/production-approved-migrations.json",
     "scripts/check-kamal-configs.sh",
     "scripts/classify-release-prepush.py",
@@ -138,6 +139,64 @@ PRODUCTION_KAMAL_CONFIGS = frozenset({
     "config/deploy.yml", "config/deploy.eros-api.yml", "config/deploy.ollama.yml",
     "config/deploy.eros.yml", "config/deploy.miniapp.yml",
 })
+NATIVE_RELEASE_FILTERS = json.loads(
+    (Path(__file__).resolve().parents[1] / ".github/filters/native-release.json").read_text()
+)
+
+
+def _path_filter_matches(path: str, patterns: list[str]) -> bool:
+    """Match the deliberately small glob subset shared with dorny/paths-filter."""
+    def compile_glob(pattern: str) -> re.Pattern[str]:
+        parts: list[str] = []
+        index = 0
+        while index < len(pattern):
+            char = pattern[index]
+            if char == "*":
+                if index + 1 < len(pattern) and pattern[index + 1] == "*":
+                    parts.append(".*")
+                    index += 2
+                else:
+                    parts.append("[^/]*")
+                    index += 1
+                continue
+            if char == "?":
+                parts.append("[^/]")
+            else:
+                parts.append(re.escape(char))
+            index += 1
+        return re.compile("^" + "".join(parts) + "$")
+
+    included = any(compile_glob(pattern).fullmatch(path)
+                   for pattern in patterns if not pattern.startswith("!"))
+    if not included:
+        return False
+    return not any(compile_glob(pattern[1:]).fullmatch(path)
+                   for pattern in patterns if pattern.startswith("!"))
+
+
+def paths_match_filter(paths: set[str] | frozenset[str], filter_name: str) -> bool:
+    patterns = NATIVE_RELEASE_FILTERS.get(filter_name)
+    if not isinstance(patterns, list):
+        raise ValueError("unknown canonical path filter")
+    return any(_path_filter_matches(path, patterns) for path in paths)
+
+
+def eros_e2e_required(repo: Path, baseline: str, candidate: str) -> bool:
+    """Fail safe: require Eros E2E when cumulative Eros impact is unclear."""
+    if not EXACT_SHA.fullmatch(baseline or "") or not EXACT_SHA.fullmatch(candidate or ""):
+        return True
+    if baseline == candidate:
+        return False
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", baseline, candidate], cwd=repo,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if ancestor.returncode:
+        return True
+    try:
+        return paths_match_filter(changed_paths(baseline, candidate, repo=repo), "eros_e2e")
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return True
 
 
 def is_infrastructure_change(changed_paths: set[str] | frozenset[str]) -> bool:
@@ -146,12 +205,11 @@ def is_infrastructure_change(changed_paths: set[str] | frozenset[str]) -> bool:
                for path in changed_paths)
 
 
-def push_deploy_authorized(*, mode: str, changed_paths: set[str] | frozenset[str],
-                           cumulative_infrastructure_change: bool = False) -> bool:
+def push_deploy_authorized(*, mode: str, changed_paths: set[str] | frozenset[str]) -> bool:
     """Require explicit dispatch approval before production infrastructure Apply."""
     # Production topology and release-control changes require an explicit
     # workflow_dispatch through the existing protected production Environment.
-    if cumulative_infrastructure_change or is_infrastructure_change(changed_paths):
+    if is_infrastructure_change(changed_paths):
         return False
     return mode == "DEPLOY"
 
@@ -323,41 +381,14 @@ def mixed_component_baselines(inventory: dict) -> set[str]:
 
 
 def _component_paths(path: str) -> set[str]:
-    if path in RETIRED_LAYER7_STAGING_PATHS | RETIRED_EROS_RELAY_PATHS:
-        return set()
     if (PRISMA_MIGRATION.fullmatch(path)
             or path == "packages/db/prisma/production-approved-migrations.json"):
         return set()
-    if path == "packages/db/prisma/schema.prisma":
-        return {"CORE"}
-    if path in {
-        "config/deploy.yml",
-        "config/deploy.eros-api.yml",
-    }:
-        return {"CORE"}
-    if path == "apps/miniapp/index.html" or path.startswith(("apps/miniapp/src/", "apps/miniapp/public/")):
-        return {"MINIAPP"}
-    # AGATA remains in the tree as historical source, but is no longer a
-    # runtime component and must never select an active image or Deploy.
-    if path.startswith(("services/agata/", "packages/agata-client/", "config/deploy.agata.yml")):
-        return set()
-    if path in EROS_MODEL_CONFIG_PATHS:
-        return set()
-    if path == "services/eros-engine/ollama-model.lock.json":
-        return {"CORE"}
-    if path.startswith(("services/eros-engine/", "config/deploy.eros")):
-        return {"EROS"}
-    if path in {"infra/production/Gpoint.Dockerfile", "infra/production/nginx-miniapp.conf"}:
-        return {"CORE", "MINIAPP"} if path.endswith("Gpoint.Dockerfile") else {"MINIAPP"}
-    if path == ".dockerignore":
-        return {"CORE", "MINIAPP"}
-    if path in APP_ROOT_FILES or path in {"pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json"}:
-        return {"CORE", "MINIAPP"}
-    if path.startswith("apps/"):
-        return {"CORE"}
-    if path.startswith("packages/") and not path.startswith("packages/gpoint-codex-mcp/"):
-        return {"CORE", "MINIAPP"}
-    return set()
+    # Component ownership comes only from the shared dorny filter definition.
+    # Schema/approval exceptions above are migration policy, not another map.
+    names = {"core": "CORE", "miniapp": "MINIAPP", "eros_engine": "EROS"}
+    return {component for filter_name, component in names.items()
+            if _path_filter_matches(path, NATIVE_RELEASE_FILTERS[filter_name])}
 
 
 def _non_runtime_documentation_path(path: str) -> bool:
@@ -579,32 +610,14 @@ def main() -> int:
     parser.add_argument("--rollback", action="store_true")
     parser.add_argument("--rollback-eros", action="store_true")
     parser.add_argument("--approve-production", action="store_true")
-    parser.add_argument("--infrastructure-baseline-sha", default="")
     args = parser.parse_args()
 
     try:
         if args.event == "push":
-            if args.ref == "refs/heads/main":
-                owner = args.repository_owner.lower()
-                if (not owner or args.actor.lower() != owner
-                        or args.triggering_actor.lower() != owner):
-                    raise ValueError("main push actor and triggering actor must match the repository owner")
             paths = changed_paths(args.before, args.sha)
             mode = classify_push(event_name=args.event, ref=args.ref, changed_paths=paths,
                                  commit_message=args.commit_message)
-            cumulative_infrastructure_change = False
-            if args.ref == "refs/heads/main":
-                if not EXACT_SHA.fullmatch(args.infrastructure_baseline_sha or ""):
-                    # Without a verified production baseline the accumulated
-                    # infrastructure diff is unknown, so automatic Apply stops.
-                    cumulative_infrastructure_change = True
-                else:
-                    cumulative_paths = changed_paths(args.infrastructure_baseline_sha, args.sha)
-                    cumulative_infrastructure_change = is_infrastructure_change(cumulative_paths)
-            deploy = push_deploy_authorized(
-                mode=mode, changed_paths=paths,
-                cumulative_infrastructure_change=cumulative_infrastructure_change,
-            )
+            deploy = push_deploy_authorized(mode=mode, changed_paths=paths)
         elif args.event == "workflow_dispatch":
             owner = args.repository_owner.lower()
             if not owner or args.triggering_actor.lower() != owner:

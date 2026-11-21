@@ -14,7 +14,7 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
 DEPLOY = WORKFLOW["jobs"]["deploy"]
 BUILD = WORKFLOW["jobs"]["build"]
 

@@ -6,9 +6,9 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = ROOT / ".github/workflows/gpoint-native-release.yml"
+WORKFLOW = ROOT / ".github/workflows/gpoint-release.yml"
 
-_ROLLBACK = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+_ROLLBACK = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
 _REHEARSAL = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())
 
 
@@ -92,14 +92,8 @@ def test_eros_builds_share_layers_without_publishing_the_test_image():
     assert release_inputs["provenance"] == "mode=max"
 
 
-def test_build_never_claims_a_noop_release_from_the_push_diff_alone():
-    """Build scope must come from the production baseline, not the pushed diff.
-
-    Run 43148553035 failed because Build trusted the push diff (tooling-only) and
-    skipped every image, while Deploy's fresh live inventory still required a
-    candidate Core/Mini App image. Without a proven component baseline the only
-    safe plan is a whole-image bootstrap build.
-    """
+def test_build_never_uses_github_deployment_history_as_runtime_baseline():
+    """Production image scope is conservative; Kamal's live inventory scopes Apply."""
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     build = workflow["jobs"]["build"]
     steps = build["steps"]
@@ -107,7 +101,8 @@ def test_build_never_claims_a_noop_release_from_the_push_diff_alone():
     run = resolver["run"]
     assert "--push-before" not in run
     assert "VERIFY_ONLY" not in run
-    assert '"BOOTSTRAP_FULL"' in run
+    assert '["CORE", "MINIAPP", "EROS"]' in run
+    assert "resolve_native_build_scope.py" not in run
     assert "EVENT_BEFORE" not in resolver.get("env", {})
     for step in steps:
         if step.get("uses", "").startswith(("docker/setup-buildx-action@", "docker/login-action@")):
@@ -118,7 +113,7 @@ def test_build_never_claims_a_noop_release_from_the_push_diff_alone():
     plan_run = component_plan["run"]
     assert "VERIFY_ONLY" not in plan_run
     assert 'raise SystemExit("fresh live component scope is missing a prebuilt candidate image")' in plan_run
-    assert 'bootstrap release must build every GPoint runtime image' in plan_run
+    assert "classify_component_scope" in plan_run
 
     migration_plan = next(step for step in deploy_steps if step.get("id") == "migration_plan")
     assert "BUILD_COMPONENTS" in migration_plan["env"]
@@ -126,7 +121,7 @@ def test_build_never_claims_a_noop_release_from_the_push_diff_alone():
     assert 'no prebuilt candidate Core image' in migration_plan["run"]
 
 
-def test_rerun_by_non_owner_cannot_deploy_a_main_push(tmp_path):
+def test_merge_bot_can_deploy_exact_current_main_sha_automatically(tmp_path):
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     deploy = workflow["jobs"]["deploy"]
     gate = next(step for step in deploy["steps"]
@@ -155,8 +150,7 @@ def test_rerun_by_non_owner_cannot_deploy_a_main_push(tmp_path):
             capture_output=True, text=True, check=False,
         )
 
-        assert result.returncode != 0
-        assert "triggering actor" in result.stderr.lower()
+        assert result.returncode == 0, result.stderr
     finally:
         fake_gh.unlink(missing_ok=True)
 
@@ -629,21 +623,19 @@ def test_deploy_publishes_release_timing_even_when_the_release_fails():
     assert 'jobs?per_page=100' in step["run"]
 
 
-def test_no_runtime_change_skips_the_whole_deploy_job():
-    """A docs-only candidate must not enter Deploy at all (criterion 4).
-
-    With a proven production baseline and no runtime change the build plan is
-    NONE; the workflow then skips the protected Deploy job instead of running an
-    empty Kamal transition. That is what keeps a UI/docs-only release short.
-    """
+def test_production_deploy_scope_is_resolved_only_from_live_inventory():
+    """Even an apparently no-op push reads installed roles before deciding Apply."""
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     condition = workflow["jobs"]["deploy"]["if"]
     assert "needs.build.outputs.deploy_scope != 'NONE'" in condition
     build_scope = next(
         step for step in workflow["jobs"]["build"]["steps"]
         if step.get("id") == "build_scope")
-    assert '"VERIFIED"' in build_scope["run"]
-    assert '"BOOTSTRAP_FULL"' in build_scope["run"]
+    assert "print(\"deploy_scope=LIVE\")" in build_scope["run"]
+    assert "resolve_native_build_scope.py" not in build_scope["run"]
+    component_plan = next(step for step in workflow["jobs"]["deploy"]["steps"]
+                          if step.get("id") == "component_plan")
+    assert "classify_component_scope" in component_plan["run"]
 
 
 def test_release_apply_has_no_relay_component_or_role():

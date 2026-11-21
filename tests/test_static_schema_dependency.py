@@ -116,7 +116,7 @@ def test_diff_only_base_misses_the_accumulated_migration(tmp_path):
 def test_workflow_dispatch_never_blocks_on_a_missing_base():
     import yaml
     workflow = yaml.safe_load(
-        (ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+        (ROOT / ".github/workflows/gpoint-release.yml").read_text())
     step = next(s for s in workflow["jobs"]["tests"]["steps"]
                 if s.get("name") == "Detect pending schema dependencies before Build")
     script = step["run"]

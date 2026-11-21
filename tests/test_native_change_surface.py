@@ -10,17 +10,46 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def workflow():
-    return yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    return yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
 
 
 def test_release_filters_contain_only_active_application_components():
     data = workflow()
     filter_step = next(step for step in data["jobs"]["tests"]["steps"] if step.get("id") == "filter")
-    filters = yaml.safe_load(filter_step["with"]["filters"])
-    assert {"core", "miniapp", "eros_engine", "database", "infrastructure"} <= set(filters)
+    assert filter_step["with"]["filters"] == ".github/filters/native-release.json"
+    filters = yaml.safe_load((ROOT / filter_step["with"]["filters"]).read_text())
+    assert {"core", "miniapp", "eros_engine", "eros_config", "eros_e2e", "database", "infrastructure"} <= set(filters)
     assert "agata" not in filters and "eros_relay" not in filters
     assert "config/deploy.ollama.yml" in filters["infrastructure"]
     assert "!services/eros-engine/eros-pilot-embedding-relay*" in filters["eros_engine"]
+    assert "services/eros-engine/*.toml" in filters["eros_config"]
+
+
+def test_component_path_classifier_agrees_with_the_shared_filter_source():
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import native_release_intent as intent
+
+    assert intent._component_paths("apps/miniapp/package.json") == {"MINIAPP"}
+    assert intent._component_paths("apps/api/package.json") == {"CORE", "MINIAPP"}
+    assert intent._component_paths("packages/contracts/src/message.ts") == {"CORE", "MINIAPP"}
+    assert intent._component_paths("services/eros-engine/src/main.rs") == {"EROS"}
+    assert intent._component_paths("services/eros-engine/ollama-model.lock.json") == {"CORE"}
+    assert intent._component_paths("config/deploy.miniapp.yml") == {"MINIAPP"}
+    assert intent._component_paths("services/eros-engine/eros-pilot-embedding-relay.mjs") == set()
+
+
+def test_eros_e2e_filter_is_shared_and_excludes_independent_core_miniapp_and_relay_paths():
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import native_release_intent as intent
+
+    assert intent.paths_match_filter({"services/eros-engine/src/main.rs"}, "eros_e2e")
+    assert intent.paths_match_filter({"config/deploy.eros.yml"}, "eros_e2e")
+    assert intent.paths_match_filter({"config/deploy.eros-api.yml"}, "eros_e2e")
+    assert not intent.paths_match_filter({"apps/api/src/messages.ts"}, "eros_e2e")
+    assert not intent.paths_match_filter({"apps/miniapp/src/page.tsx"}, "eros_e2e")
+    assert not intent.paths_match_filter(
+        {"services/eros-engine/eros-pilot-embedding-relay.mjs"}, "eros_e2e"
+    )
 
 
 def test_ollama_is_an_independent_pinned_internal_accessory():

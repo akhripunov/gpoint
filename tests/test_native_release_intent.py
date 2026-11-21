@@ -244,6 +244,40 @@ def test_infrastructure_requires_protected_dispatch_and_exact_owner_sha():
     assert result == "INVALID_DEPLOY" and not approved
 
 
+def test_accumulated_infrastructure_uses_the_successful_deploy_sha_marker(tmp_path):
+    repo, baseline = component_repo(tmp_path)
+    infra = commit_change(repo, "infra/production/nginx-miniapp.conf", "proxy change\n")
+    candidate = commit_change(repo, "apps/api/src/main.ts", "export const api = 2;\n")
+
+    pending = MODULE.changed_paths(baseline, candidate, repo=repo)
+    applied = MODULE.changed_paths(infra, candidate, repo=repo)
+
+    assert "infra/production/nginx-miniapp.conf" in pending
+    assert MODULE.is_infrastructure_change(pending)
+    assert not MODULE.is_infrastructure_change(applied)
+
+
+def test_eros_e2e_is_skipped_for_independent_components_and_required_for_eros_or_related_infra(tmp_path):
+    repo, baseline = component_repo(tmp_path)
+    miniapp = commit_change(repo, "apps/miniapp/src/page.tsx", "export const page = 2;\n")
+    assert not MODULE.eros_e2e_required(repo, baseline, miniapp)
+    core = commit_change(repo, "apps/api/src/main.ts", "export const api = 2;\n")
+    assert not MODULE.eros_e2e_required(repo, baseline, core)
+    eros = commit_change(repo, "services/eros-engine/src/main.rs", "fn main() { println!(\"v2\"); }\n")
+    assert MODULE.eros_e2e_required(repo, baseline, eros)
+    eros_config = commit_change(repo, "config/deploy.eros.yml", "service: gpoint-eros-pilot\n")
+    assert MODULE.eros_e2e_required(repo, baseline, eros_config)
+
+
+def test_eros_e2e_accumulates_after_failed_release_and_fails_safe_on_unknown_baseline(tmp_path):
+    repo, baseline = component_repo(tmp_path)
+    failed_eros_release = commit_change(repo, "services/eros-engine/src/main.rs", "fn main() {}\n// changed\n")
+    next_push = commit_change(repo, "apps/miniapp/src/page.tsx", "export const page = 3;\n")
+    assert failed_eros_release != baseline
+    assert MODULE.eros_e2e_required(repo, baseline, next_push)
+    assert MODULE.eros_e2e_required(repo, "f" * 40, next_push)
+
+
 def test_bootstrap_builds_the_three_active_application_images_only():
     assert MODULE.COMPONENT_IMAGES == {"CORE": "CORE", "MINIAPP": "MINIAPP", "EROS": "EROS"}
     assert set(MODULE.ALL_COMPONENT_ROLES) == {"CORE", "MINIAPP", "EROS"}

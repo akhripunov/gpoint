@@ -5,7 +5,7 @@ import pathlib
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-WORKFLOW = ROOT / ".github/workflows/gpoint-native-release.yml"
+WORKFLOW = ROOT / ".github/workflows/gpoint-release.yml"
 
 
 def load():

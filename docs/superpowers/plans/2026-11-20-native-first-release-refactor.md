@@ -4,7 +4,7 @@
 
 **Goal:** Use the simplest Native First architecture that preserves every required guarantee, replacing duplicate custom release behavior with native GitHub Actions, Git, Docker Buildx/GHCR, and Kamal 2 mechanisms where that materially simplifies the system.
 
-**Architecture:** Keep `.github/workflows/gpoint-native-release.yml` as the only production controller. Use GitHub's same-run job dependencies, concurrency, protected Environment, matrix and paths-filter mechanisms; Buildx outputs/attestations; actual Kamal/Docker-installed state; and Kamal's lifecycle/health/rollback commands. Retain the smallest adapters needed for GPoint-specific per-component baselines, migration policy, safety evidence and user-facing smoke where the native tools do not provide equivalent guarantees.
+**Architecture:** Keep `.github/workflows/gpoint-release.yml` as the only production controller. Use GitHub's same-run job dependencies, concurrency, protected Environment, matrix and paths-filter mechanisms; Buildx outputs/attestations; actual Kamal/Docker-installed state; and Kamal's lifecycle/health/rollback commands. Retain the smallest adapters needed for GPoint-specific per-component baselines, migration policy, safety evidence and user-facing smoke where the native tools do not provide equivalent guarantees.
 
 **Tech Stack:** GitHub Actions, pinned `dorny/paths-filter`, Git, Docker Buildx/BuildKit, GHCR, Kamal 2, Prisma, SQLx, Alembic, Python, Bash, Node.js, isolated Docker/PostgreSQL.
 
@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- One production controller: `.github/workflows/gpoint-native-release.yml`; no staging workflow/resource or replacement controller.
+- One production controller: `.github/workflows/gpoint-release.yml`; no staging workflow/resource or replacement controller.
 - Preserve exact SHA, per-component installed baselines, production concurrency, migration safety, rollback, immutable digest identity, healthchecks and smoke.
 - No code relocation or denominator change may be counted as LOC reduction.
 - Keep ordinary release conditional: no unnecessary image builds, backups, Eros tests or migration gates.
@@ -64,7 +64,7 @@ At exact PR candidate `0b721128f910748fe3643ffe1b83de7d9f27559b`, fixed measures
 ### Task 2: Replace duplicate component intent logic with native path filters
 
 **Files:**
-- Modify: `.github/workflows/gpoint-native-release.yml`
+- Modify: `.github/workflows/gpoint-release.yml`
 - Modify: `scripts/native_release_intent.py` only for behavior not expressible by Actions/Git/paths-filter
 - Modify: `scripts/resolve_native_build_scope.py` only for live baseline facts not exposed by Kamal
 - Test: `tests/test_native_release_intent.py`, `tests/test_native_build_scope.py`, `tests/test_release_scope_consistency.py`
@@ -79,7 +79,7 @@ At exact PR candidate `0b721128f910748fe3643ffe1b83de7d9f27559b`, fixed measures
 ### Task 3: Consolidate Buildx image builds without moving complexity
 
 **Files:**
-- Modify: `.github/workflows/gpoint-native-release.yml`
+- Modify: `.github/workflows/gpoint-release.yml`
 - Add or modify: tracked Buildx definition only if total release-code LOC decreases and outputs remain exact
 - Modify: image identity/readback tests and production image verification only for equivalent native Buildx/GitHub output
 
@@ -93,7 +93,7 @@ At exact PR candidate `0b721128f910748fe3643ffe1b83de7d9f27559b`, fixed measures
 ### Task 4: Reduce deploy and verification orchestration to stock Kamal
 
 **Files:**
-- Modify: `.github/workflows/gpoint-native-release.yml`
+- Modify: `.github/workflows/gpoint-release.yml`
 - Modify: `scripts/write-kamal-production-manifest.py`, `scripts/verify-kamal-production-baseline.py`, `scripts/verify_native_rollback_evidence.py` only where stock Kamal/Docker/GitHub results are equivalent
 - Preserve/update migration and runtime verification tests
 
@@ -108,7 +108,7 @@ Task 4 hosted feedback: exact SHA `1d058bc0aa708656f5c142f996ad82fa15270d21` cau
 ### Task 5: Simplify migration, Eros and environment gates
 
 **Files:**
-- Modify: `.github/workflows/gpoint-native-release.yml`
+- Modify: `.github/workflows/gpoint-release.yml`
 - Modify: `scripts/eros-native-database.py`, `scripts/prisma_migration_release_plan.py`, `scripts/verify-kamal-migration-parity.py`, `scripts/resolve_native_environment_deployment.py` only after call-graph/equivalence tests
 - Test: isolated PostgreSQL, migration-safety, Eros DB and protected Environment boundaries
 

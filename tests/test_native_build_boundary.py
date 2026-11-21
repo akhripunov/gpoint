@@ -8,7 +8,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = ROOT / ".github/workflows/gpoint-native-release.yml"
+WORKFLOW = ROOT / ".github/workflows/gpoint-release.yml"
 
 
 class NativeReleaseBoundaryTests(unittest.TestCase):
@@ -25,7 +25,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
     def test_pipeline_has_release_gate_and_protected_migration_rehearsal(self):
         jobs = self.workflow["jobs"]
         self.assertEqual(set(jobs), {"tests", "build", "deploy"})
-        rollback = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())["jobs"]["deploy"]
+        rollback = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())["jobs"]["deploy"]
         self.assertIn("inputs.mode == 'rollback'", rollback["if"])
         self.assertEqual(rollback["environment"]["name"], "production")
         self.assertIn("steps.verify.outputs.environment_url", rollback["environment"]["url"])
@@ -154,14 +154,13 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             self.assertIn(f"matrix.suite == '{suite}'", steps[name]["if"])
         eros = next(step for step in tests["steps"] if step.get("id") == "eros_test_image")
         self.assertIn("matrix.suite == 'workspace'", eros["if"])
-        self.assertIn("steps.filter.outputs.eros_engine == 'true'", eros["if"])
-        self.assertIn("github.event_name == 'pull_request'", eros["if"])
-        self.assertIn("contains(github.event.pull_request.labels.*.name, 'me-62-full-build')", eros["if"])
-        self.assertNotIn("steps.filter.outputs.database == 'true'", eros["if"])
+        self.assertIn("steps.eros_scope.outputs.required == 'true'", eros["if"])
         e2e = steps["Run stock Eros SQLx and synthetic conversation E2E"]
-        self.assertIn("github.event_name == 'pull_request'", e2e["if"])
-        self.assertIn("contains(github.event.pull_request.labels.*.name, 'me-62-full-build')", e2e["if"])
-        self.assertNotIn("steps.filter.outputs.database == 'true'", e2e["if"])
+        self.assertEqual(eros["if"], e2e["if"])
+        scope = next(step for step in tests["steps"] if step.get("id") == "eros_scope")
+        self.assertIn("steps.filter.outputs.eros_e2e", scope["env"]["PR_EROS_FILTER"])
+        self.assertIn("latest-successful-native-sha", scope["run"])
+        self.assertIn("eros_e2e_required", scope["run"])
         self.assertNotIn("Run Eros Relay unit tests", steps)
         python = [steps[name] for name, suite in required_steps.items() if suite == "python"]
         for step in python:
@@ -172,33 +171,49 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             self.assertNotIn("matrix.suite == 'release-tooling'", condition)
             self.assertNotIn("matrix.suite == 'eros'", condition)
 
-    def test_push_apply_gate_uses_verified_accumulated_production_baseline(self):
+    def test_runtime_image_build_scope_does_not_depend_on_github_deployment_history(self):
         tests = self.workflow["jobs"]["tests"]
-        baseline = next(step for step in tests["steps"]
-                        if step.get("id") == "infrastructure_baseline")
-        intent = next(step for step in tests["steps"] if step.get("id") == "intent")
-        self.assertIn("resolve_native_build_scope.py", baseline["run"])
-        self.assertIn("baseline_sha", baseline["run"])
-        self.assertNotIn("continue-on-error", baseline)
-        self.assertIn("steps.infrastructure_baseline.outputs.sha", intent["env"]["INFRASTRUCTURE_BASELINE_SHA"])
-        self.assertEqual(baseline["if"], "github.event_name == 'push' && github.ref == 'refs/heads/main'")
-        self.assertIn("--infrastructure-baseline-sha", intent["run"])
+        self.assertNotIn("infrastructure_baseline", [step.get("id") for step in tests["steps"]])
+        self.assertNotIn("dispatch_build_scope", [step.get("id") for step in tests["steps"]])
+        build = self.workflow["jobs"]["build"]
+        scope = next(step for step in build["steps"] if step.get("id") == "build_scope")
+        self.assertNotIn("resolve_native_build_scope.py", scope["run"])
+        self.assertIn('["CORE", "MINIAPP", "EROS"]', scope["run"])
+        self.assertNotIn("PR_CORE", str(scope.get("env", {})))
+        self.assertNotIn("steps.filter.outputs", scope["run"])
+        self.assertIn("CORE", scope["run"])
+        self.assertIn("MINIAPP", scope["run"])
+        self.assertIn("EROS", scope["run"])
+        image_steps = [step for step in build["steps"]
+                       if step.get("uses", "").startswith("docker/build-push-action@")]
+        self.assertEqual({step.get("id") for step in image_steps}, {"app", "miniapp", "eros"})
+        for component in ("CORE", "MINIAPP", "EROS"):
+            self.assertTrue(any(component in step["if"] for step in image_steps))
+        live_inventory = next(step for step in self.workflow["jobs"]["deploy"]["steps"]
+                              if step.get("id") == "kamal_inventory")
+        self.assertIn("verify-kamal-production-baseline.py", live_inventory["run"])
+
+    def test_accumulated_infrastructure_gate_uses_successful_native_marker(self):
+        steps = self.workflow["jobs"]["deploy"]["steps"]
+        marker = next(step for step in steps if step.get("id") == "infrastructure_baseline")
+        plan = next(step for step in steps if step.get("id") == "component_plan")
+        self.assertIn("latest-successful-native-sha", marker["run"])
+        self.assertIn("INFRASTRUCTURE_BASELINE_SHA", plan["env"])
+        self.assertIn("changed_paths(infrastructure_baseline, candidate", plan["run"])
+        self.assertNotIn("accumulated_changed_paths", plan["run"])
 
     def test_cumulative_engine_scope_runs_e2e_and_build_requires_same_run_tests_success(self):
         tests = self.workflow["jobs"]["tests"]
         steps = {step.get("id"): step for step in tests["steps"] if step.get("id")}
-        dispatch_scope = steps["dispatch_build_scope"]
-        self.assertEqual(dispatch_scope["if"], "github.event_name == 'workflow_dispatch' && matrix.suite == 'workspace' && steps.intent.outputs.mode == 'DEPLOY'")
-        self.assertIn("resolve_native_build_scope.py", dispatch_scope["run"])
-        self.assertEqual(dispatch_scope["env"]["CANDIDATE_SHA"], "${{ inputs.candidate_sha }}")
-        self.assertIn("steps.infrastructure_baseline.outputs.eros_engine == 'true'", steps["eros_test_image"]["if"])
-        self.assertIn("steps.dispatch_build_scope.outputs.eros_engine == 'true'", steps["eros_test_image"]["if"])
-        self.assertNotIn("github.event_name == 'workflow_dispatch'", steps["eros_test_image"]["if"])
+        self.assertNotIn("dispatch_build_scope", steps)
+        self.assertNotIn("infrastructure_baseline", steps)
+        self.assertIn("steps.eros_scope.outputs.required == 'true'", steps["eros_test_image"]["if"])
         self.assertEqual(steps["eros_test_image"]["if"], steps["eros_e2e"]["if"])
         self.assertNotIn("eros_e2e", tests["outputs"])
         build = self.workflow["jobs"]["build"]
         self.assertIn("tests", build["needs"])
         self.assertIn("needs.tests.result == 'success'", build["if"])
+        self.assertIn("needs.tests.outputs.deploy == 'true'", build["if"])
         self.assertFalse(any(step.get("name") == "Require exact-candidate Eros test evidence"
                              for step in build["steps"]))
 
@@ -313,7 +328,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             image_step = next(step for step in steps if step.get("id") == role)
             self.assertIn("GPOINT_BUILD_SHA=${{ github.sha }}", image_step["with"]["build-args"])
 
-    def test_runtime_images_build_only_after_verified_component_baseline(self):
+    def test_production_images_build_independently_and_apply_uses_live_baseline(self):
         build = self.workflow["jobs"]["build"]
         self.assertNotIn("environment", build)
         self.assertEqual(build["needs"], ["tests"])
@@ -325,9 +340,10 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             self.assertGreater(image, resolver)
             self.assertIn(component, steps[image]["if"])
         resolver_run = steps[resolver]["run"]
-        self.assertIn("scripts/resolve_native_build_scope.py", resolver_run)
-        self.assertEqual(build["permissions"]["deployments"], "read")
-        self.assertEqual(build["permissions"]["actions"], "read")
+        self.assertNotIn("resolve_native_build_scope.py", resolver_run)
+        self.assertNotIn("deployments", build["permissions"])
+        self.assertNotIn("actions", build["permissions"])
+        self.assertIn("LIVE", resolver_run)
         workflow_runs = "\n".join(
             step.get("run", "")
             for job in self.workflow["jobs"].values()
