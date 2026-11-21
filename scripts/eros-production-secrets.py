@@ -360,7 +360,6 @@ def write_native_engine_env(path=ENV_PATH, output=NATIVE_ENV_PATH):
         'OPENROUTER_API_KEY': '',
         'SUPABASE_JWT_SECRET': values['EROS_JWT_SECRET'],
         'MODEL_CONFIG_PATH': '/etc/eros-engine/model_config.toml',
-        'EROS_PILOT_EMBEDDING_PROBE_URL': 'http://172.31.254.1:11434/api/embed',
         'RUST_LOG': 'info',
     }
     if target.exists() and (target.is_symlink() or not stat.S_ISREG(target.stat().st_mode)
@@ -419,7 +418,7 @@ def write_native_api_env(path=ENV_PATH, source_env=SOURCE_ENV_PATH, output=NATIV
         'EROS_WORKER_TENANT_ID': values['EROS_TENANT_ID'],
         'EROS_REQUEST_TIMEOUT_MS': '240000',
         'EROS_BRIDGE_TIMEOUT_SECONDS': '240',
-        'EROS_OLLAMA_EMBEDDING_URL': 'http://172.31.254.1:11434/api/embed',
+        'EROS_OLLAMA_EMBEDDING_URL': 'http://ollama:11434/api/embed',
         'GPOINT_CHAT_POLICY_TENANT_ID': policy_tenant,
         'EROS_PRODUCTION_TEST_USER_IDS': '',
         'EROS_PRODUCTION_TEST_CREATOR_IDS': '',
@@ -475,7 +474,7 @@ def ensure_postgres_network():
     if (network.get('Driver') != 'bridge' or network.get('Internal') is not True or
             len(ipam) != 1 or ipam[0].get('Subnet') != '172.31.254.0/24' or
             ipam[0].get('Gateway') != '172.31.254.1'):
-        raise RuntimeError('existing Eros data network does not match the private relay gateway contract')
+        raise RuntimeError('existing Eros data network does not match the private database network contract')
     container = json.loads(docker(['inspect', 'shared_postgres_1']))[0]
     networks = container.get('NetworkSettings', {}).get('Networks', {})
     attached = networks.get('gpoint_eros_data')

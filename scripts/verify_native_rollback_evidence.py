@@ -53,12 +53,9 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
         values = dict(pairs)
         if len(values) != len(pairs):
             _fail("native Deployment URL metadata contains duplicate fields")
-        source_keys = {"gpoint-core-source-sha", "gpoint-agata-source-sha", "gpoint-miniapp-source-sha"}
+        source_keys = {"gpoint-core-source-sha", "gpoint-miniapp-source-sha"}
         eros_source_key = "gpoint-eros-source-sha"
-        relay_source_key = "gpoint-eros-relay-source-sha"
-        supported_keys = source_keys | {eros_source_key, relay_source_key, "gpoint-manifest-sha256", "gpoint-runtime-target-sha"}
-        if relay_source_key in values and eros_source_key not in values:
-            _fail("native Deployment URL component source evidence is incomplete")
+        supported_keys = source_keys | {eros_source_key, "gpoint-manifest-sha256", "gpoint-runtime-target-sha"}
         if set(values) - supported_keys:
             _fail("native Deployment URL metadata contains unsupported fields")
         native_manifest_sha = values.get("gpoint-manifest-sha256")
@@ -70,12 +67,10 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
         if present_sources:
             native_sources = {
                 "core": values["gpoint-core-source-sha"],
-                "agata": values["gpoint-agata-source-sha"],
                 "miniapp": values["gpoint-miniapp-source-sha"],
             }
             if eros_source_key in values:
                 native_sources["eros"] = values[eros_source_key]
-                native_sources["eros_relay"] = values.get(relay_source_key, values[eros_source_key])
             if any(not SHA40.fullmatch(value) for value in native_sources.values()):
                 _fail("native Deployment URL component source SHA is invalid")
         runtime_target = values.get("gpoint-runtime-target-sha")
@@ -122,10 +117,7 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
         _fail("rollback target has no exact immutable build attempt tag")
     images = candidate.get("images", {})
     digests: dict[str, str] = {}
-    eros_installed = any(isinstance(item, dict)
-                         and item.get("name", "").startswith("gpoint-eros-pilot-engine-")
-                         for item in manifest.get("runtimeServices", []))
-    image_keys = set(REPOSITORIES) if eros_installed else set(REPOSITORIES) - {"eros", "eros_relay"}
+    image_keys = set(REPOSITORIES)
     for key in image_keys:
         repo = REPOSITORIES[key]
         value = images.get(key, "")
@@ -145,9 +137,8 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
         if role in by_name:
             _fail("manifest contains a duplicate GPoint Kamal role")
         by_name[role] = (item, role_version)
-    base_roles = set(ROLE_IMAGES) - {"gpoint-eros-pilot-engine", "gpoint-eros-relay-relay"}
-    expected_roles = set(ROLE_IMAGES) if eros_installed else base_roles
-    if len(services) != len(expected_roles) or set(by_name) != expected_roles:
+    expected_roles = set(ROLE_IMAGES)
+    if set(by_name) != expected_roles:
         _fail("manifest does not contain a complete GPoint Kamal role inventory")
     component_versions = {}
     component_sources = {}
@@ -171,16 +162,12 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
         component_sources[image_key] = source_sha
         component_digests[image_key] = repo_digest
         allowed_components = {None, image_key.upper()}
-        if image_key == "eros_relay":
-            allowed_components.add("EROS")
         if service.get("component") not in allowed_components:
             _fail(f"manifest runtime component is inconsistent for {name}")
     for component, role_names in {
         "core": ("gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot"),
-        "agata": ("gpoint-agata-api", "gpoint-agata-memory-worker"),
         "miniapp": ("gpoint-miniapp-web",),
         "eros": ("gpoint-eros-pilot-engine",),
-        "eros_relay": ("gpoint-eros-relay-relay",),
     }.items():
         role_names = tuple(name for name in role_names if name in expected_roles)
         if not role_names:

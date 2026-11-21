@@ -53,7 +53,6 @@ def deployment_fixture(*, task="deploy", target_sha=BASELINE, environment_url=No
     source_url = environment_url or (
         "https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA
         + "&gpoint-core-source-sha=" + BASELINE
-        + "&gpoint-agata-source-sha=" + BASELINE
         + "&gpoint-miniapp-source-sha=" + BASELINE
     )
     status = {
@@ -83,7 +82,7 @@ def test_latest_native_deployment_exposes_exact_component_baselines():
         "deployment_id": 200,
         "deployment_sha": BASELINE,
         "manifest_sha256": MANIFEST_SHA,
-        "component_sources": {"CORE": BASELINE, "AGATA": BASELINE, "MINIAPP": BASELINE},
+        "component_sources": {"CORE": BASELINE, "MINIAPP": BASELINE},
     }
 
 
@@ -304,7 +303,7 @@ def test_tooling_only_push_without_manifest_still_builds_every_component(tmp_pat
     assert plan == {
         "status": "BOOTSTRAP_FULL",
         "deploy_scope": "UNRESOLVED",
-        "build_components": ["CORE", "AGATA", "MINIAPP", "EROS"],
+        "build_components": ["CORE", "EROS", "MINIAPP"],
         "reason": "successful_legacy_deployment_has_no_component_source_manifest",
     }
 
@@ -329,7 +328,7 @@ def test_no_push_path_can_skip_images_without_a_component_manifest(tmp_path, pat
     )
 
     assert plan["status"] == "BOOTSTRAP_FULL"
-    assert plan["build_components"] == ["CORE", "AGATA", "MINIAPP", "EROS"]
+    assert plan["build_components"] == ["CORE", "EROS", "MINIAPP"]
 
 
 def test_rollback_baseline_requires_all_sources_equal_the_exact_target_sha():
@@ -341,7 +340,6 @@ def test_rollback_baseline_requires_all_sources_equal_the_exact_target_sha():
     statuses[200][0]["environment_url"] = (
         "https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA
         + "&gpoint-core-source-sha=" + target
-        + "&gpoint-agata-source-sha=" + target
         + "&gpoint-miniapp-source-sha=" + target
     )
 
@@ -350,7 +348,7 @@ def test_rollback_baseline_requires_all_sources_equal_the_exact_target_sha():
     )
 
     assert baseline["component_sources"] == {
-        "CORE": target, "AGATA": target, "MINIAPP": target,
+        "CORE": target, "MINIAPP": target,
     }
 
 
@@ -365,7 +363,6 @@ def test_native_environment_rollback_tracks_workflow_sha_and_runtime_target_sepa
         "https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA
         + "&gpoint-runtime-target-sha=" + target
         + "&gpoint-core-source-sha=" + target
-        + "&gpoint-agata-source-sha=" + target
         + "&gpoint-miniapp-source-sha=" + target
     )
 
@@ -375,7 +372,7 @@ def test_native_environment_rollback_tracks_workflow_sha_and_runtime_target_sepa
 
     assert baseline["status"] == "VERIFIED"
     assert baseline["component_sources"] == {
-        "CORE": target, "AGATA": target, "MINIAPP": target,
+        "CORE": target, "MINIAPP": target,
     }
 
 
@@ -390,7 +387,6 @@ def test_native_environment_rollback_rejects_invalid_runtime_target_sha():
         "https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA
         + "&gpoint-runtime-target-sha=" + target
         + "&gpoint-core-source-sha=" + workflow_sha
-        + "&gpoint-agata-source-sha=" + workflow_sha
         + "&gpoint-miniapp-source-sha=" + BASELINE
     )
 
@@ -407,7 +403,6 @@ def test_selective_plan_builds_only_the_component_changed_since_its_baseline(tmp
                                                        run_head_sha=baseline_sha)
     url = "https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA
     url += "&gpoint-core-source-sha=" + baseline_sha
-    url += "&gpoint-agata-source-sha=" + baseline_sha
     url += "&gpoint-miniapp-source-sha=" + baseline_sha
     statuses[200][0]["environment_url"] = url
 
@@ -431,7 +426,6 @@ def test_selective_plan_returns_verify_only_for_staggered_sources_and_old_migrat
     statuses[200][0]["environment_url"] = (
         "https://gpoint.one/#gpoint-manifest-sha256=" + MANIFEST_SHA
         + "&gpoint-core-source-sha=" + core_source_sha
-        + "&gpoint-agata-source-sha=" + baseline_sha
         + "&gpoint-miniapp-source-sha=" + baseline_sha
     )
 
@@ -441,7 +435,7 @@ def test_selective_plan_returns_verify_only_for_staggered_sources_and_old_migrat
 
     assert plan["status"] == "VERIFIED"
     assert plan["baseline_sources"] == {
-        "CORE": core_source_sha, "AGATA": baseline_sha, "MINIAPP": baseline_sha,
+        "CORE": core_source_sha, "MINIAPP": baseline_sha,
     }
     assert plan["deploy_scope"] == "NONE"
     assert plan["build_components"] == []
@@ -458,22 +452,18 @@ def test_missing_deployment_history_is_fail_closed_for_component_scope(tmp_path)
     )
 
     assert plan == {"status": "BOOTSTRAP_FULL", "deploy_scope": "UNRESOLVED",
-                    "build_components": ["CORE", "AGATA", "MINIAPP", "EROS"],
+                    "build_components": ["CORE", "EROS", "MINIAPP"],
                     "reason": "production_component_baseline_unavailable"}
 
 
-@pytest.mark.parametrize("explicit_relay", [False, True])
-def test_production_deployment_extracts_engine_and_relay_source_shas(explicit_relay):
+def test_production_deployment_extracts_eros_engine_source_sha_only():
     deployments, statuses, runs = deployment_fixture()
     engine_source = "e" * 40
-    relay_source = "f" * 40 if explicit_relay else engine_source
     statuses[200][0]["environment_url"] += "&gpoint-eros-source-sha=" + engine_source
-    if explicit_relay:
-        statuses[200][0]["environment_url"] += "&gpoint-eros-relay-source-sha=" + relay_source
 
     baseline = MODULE.resolve_production_component_sources(
         deployments, statuses, runs, repository=REPOSITORY
     )
 
     assert baseline["component_sources"]["EROS"] == engine_source
-    assert baseline["component_sources"]["EROS_RELAY"] == relay_source
+    assert "EROS_RELAY" not in baseline["component_sources"]

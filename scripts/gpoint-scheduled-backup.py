@@ -28,8 +28,9 @@ RCLONE_CONFIG = Path("/root/.config/rclone/rclone.conf")
 BUNNY_TEMP_ROOT = Path("/run")
 BACKUP_ROOT = Path("/opt/gpoint/backups")
 SCHEDULED_ROOT = BACKUP_ROOT / "scheduled"
-MEDIA_ROOT = Path("/opt/gpoint/media")
+MEDIA_ROOT = Path("/opt/gpoint/layer7-staging/media")
 POSTGRES = "shared_postgres_1"
+DATABASE_NAME = "gpoint_staging"
 AGE_RECIPIENT = re.compile(r"age1[0-9a-z]{58}\Z")
 SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 BUNNY_S3_REGIONS = {"de", "ny", "sg", "uk", "se", "la", "jh", "syd"}
@@ -238,6 +239,19 @@ def _import_policy():
     return module
 
 
+def _verified_postgres_identity(facts: list[str]) -> tuple[str, str]:
+    if len(facts) != 7:
+        raise ScheduledBackupError("shared PostgreSQL identity is invalid")
+    name, container_id, image_id, running, health, project, service = facts
+    labels = (project, service)
+    valid_labels = labels in (("shared", "postgres"), ("<no value>", "<no value>"))
+    if (name != "/shared_postgres_1" or not re.fullmatch(r"[0-9a-f]{64}", container_id)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)
+            or running != "true" or health != "healthy" or not valid_labels):
+        raise ScheduledBackupError("shared PostgreSQL identity is invalid")
+    return container_id, image_id
+
+
 def _source_facts() -> tuple[str, str, str, str, dict[str, object]]:
     api_ids = _run(["docker", "ps", "-q", "--filter", "name=^/gpoint-core-api-"],
                    stage="Kamal API inventory").splitlines()
@@ -256,28 +270,26 @@ def _source_facts() -> tuple[str, str, str, str, dict[str, object]]:
     if (len(media) != 1 or media[0].get("Type") != "bind"
             or media[0].get("Source") != str(MEDIA_ROOT) or media[0].get("RW") is not True):
         raise ScheduledBackupError("Kamal API does not expose the expected writable media mount")
-    kamal_proxy = _run(["docker", "inspect", "--format", "{{.State.Running}}", "kamal-proxy"],
-                       stage="Kamal proxy health")
-    if kamal_proxy != "true":
-        raise ScheduledBackupError("Kamal proxy is not running")
     caddy = _run(["systemctl", "show", "--property=ActiveState", "--value", "caddy"],
                  stage="legacy Caddy state")
     if caddy != "inactive":
         raise ScheduledBackupError("legacy Caddy is not proven inactive")
     pg = _run(["docker", "inspect", "--format",
-                '{{.Id}}\t{{.Image}}\t{{.State.Running}}\t{{.State.Health.Status}}\t{{index .Config.Labels "com.docker.compose.project"}}\t{{index .Config.Labels "com.docker.compose.service"}}',
+                '{{.Name}}\t{{.Id}}\t{{.Image}}\t{{.State.Running}}\t{{.State.Health.Status}}\t{{index .Config.Labels "com.docker.compose.project"}}\t{{index .Config.Labels "com.docker.compose.service"}}',
                POSTGRES], stage="PostgreSQL identity").split("\t")
-    if len(pg) != 6 or pg[2:] != ["true", "healthy", "shared", "postgres"]:
-        raise ScheduledBackupError("shared PostgreSQL identity is invalid")
+    postgres_id, postgres_image = _verified_postgres_identity(pg)
     psql = ["docker", "exec", POSTGRES, "sh", "-ec",
-            'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d gpoint -c "$1"', "gpoint-backup"]
+            f'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d {DATABASE_NAME} -c "$1"', "gpoint-backup"]
     system_id = _run(psql + ["SELECT system_identifier::text FROM pg_control_system()"],
                      stage="PostgreSQL cluster identity")
     prisma = _run(psql + ["SELECT coalesce((SELECT migration_name FROM public._prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY finished_at DESC, migration_name DESC LIMIT 1), 'NONE')"],
                   stage="Prisma head inventory")
-    agata = _run(psql + ["SELECT version_num FROM agata.alembic_version"], stage="AGATA head inventory")
+    agata_schema = _run(psql + ["SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='agata')"],
+                        stage="AGATA schema inventory")
+    agata = (_run(psql + ["SELECT version_num FROM agata.alembic_version"], stage="AGATA head inventory")
+             if agata_schema == "t" else "ABSENT")
     if (not system_id.isdigit() or not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+|NONE", prisma)
-            or not re.fullmatch(r"[A-Za-z0-9_]+", agata)):
+            or not re.fullmatch(r"[A-Za-z0-9_]+|ABSENT", agata)):
         raise ScheduledBackupError("database migration baseline is invalid")
     inventory = {
         "schema": "gpoint-vps-inventory/v1",
@@ -287,7 +299,7 @@ def _source_facts() -> tuple[str, str, str, str, dict[str, object]]:
                         "destination": media[0]["Destination"], "readWrite": True}],
         }],
     }
-    return api[2], pg[0], pg[1], system_id, {"PRISMA_HEAD": prisma, "AGATA_HEAD": agata,
+    return api[2], postgres_id, postgres_image, system_id, {"PRISMA_HEAD": prisma, "AGATA_HEAD": agata,
                                                "inventory": inventory, "api_id": api[0]}
 
 
@@ -515,6 +527,7 @@ def run(*, release_backup: bool = False) -> None:
         values = {
             "BASELINE_SCHEMA": ("gpoint-migration-rehearsal-baseline/v1" if migration_rehearsal
                                 else "gpoint-kamal-cutover-baseline/v1"),
+            "DATABASE_NAME": DATABASE_NAME,
             "CANDIDATE_SHA": candidate, "RUN_ID": run_id, "ATTEMPT": attempt,
             "POSTGRES_CONTAINER_ID": postgres_id, "POSTGRES_IMAGE_ID": postgres_image,
             "POSTGRES_SYSTEM_IDENTIFIER": system_id,

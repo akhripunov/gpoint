@@ -2,9 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { isAllowedOllamaEmbeddingEndpoint } from '../src/eros-network-policy.js';
 
-test('production permits the private Ollama and pinned Native relay endpoints', () => {
+test('production permits only the private Docker Ollama alias', () => {
   assert.equal(isAllowedOllamaEmbeddingEndpoint('http://ollama:11434/api/embed'), true);
-  assert.equal(isAllowedOllamaEmbeddingEndpoint('http://172.31.254.1:11434/api/embed'), true);
 });
 
 test('production rejects public hosts, alternate services, and URL injection', () => {
@@ -13,6 +12,7 @@ test('production rejects public hosts, alternate services, and URL injection', (
     'http://127.0.0.1:11434/api/embed',
     'http://localhost:11434/api/embed',
     'http://172.31.254.2:11434/api/embed',
+    'http://172.31.254.1:11434/api/embed',
     'http://ollama:11435/api/embed',
     'http://user:pass@ollama:11434/api/embed',
     'http://ollama:11434/api/embed?redirect=https://example.com',

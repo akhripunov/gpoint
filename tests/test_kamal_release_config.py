@@ -49,7 +49,7 @@ def test_kamal_core_config_uses_public_tls_proxy_and_only_core_roles():
     api = config["servers"]["api"]
     assert "host" not in api["proxy"]
     assert api["proxy"]["path_prefixes"] == ["/api"]
-    assert api["options"]["volume"] == "/opt/gpoint/media:/data/media"
+    assert api["options"]["volume"] == "/opt/gpoint/layer7-staging/media:/data/media"
     assert config["proxy"]["hosts"] == ["gpoint.one"]
     assert config["proxy"]["ssl"] is False
     assert config["proxy"]["ssl_redirect"] is False
@@ -63,16 +63,16 @@ def test_kamal_core_config_uses_public_tls_proxy_and_only_core_roles():
     assert "eros" not in config["servers"]
 
 
-def test_kamal_agata_and_miniapp_are_separate_services():
-    agata = yaml.safe_load((ROOT / "config/deploy.agata.yml").read_text())
+def test_kamal_app_components_use_three_images_and_ollama_is_infrastructure():
     miniapp = yaml.safe_load((ROOT / "config/deploy.miniapp.yml").read_text())
-    assert agata["service"] == "gpoint-agata"
-    for config in (agata, miniapp):
+    eros = yaml.safe_load((ROOT / "config/deploy.eros.yml").read_text())
+    ollama = yaml.safe_load((ROOT / "config/deploy.ollama.yml").read_text())
+    assert not (ROOT / "config/deploy.agata.yml").exists()
+    assert not (ROOT / "config/deploy.eros-relay.yml").exists()
+    for config in (miniapp, eros, ollama):
         assert config["ssh"]["keys"] == ["<%= ENV.fetch(\"GPOINT_SSH_KEY\") %>"]
         assert config["ssh"]["config"] is True
         assert config["ssh"]["keys_only"] is True
-    assert agata["image"] == "akhripunov/gpoint-agata-runtime"
-    assert set(agata["servers"]) == {"api", "memory-worker"}
     assert miniapp["service"] == "gpoint-miniapp"
     assert miniapp["image"] == "akhripunov/gpoint-miniapp"
     core = yaml.safe_load((ROOT / "config/deploy.yml").read_text())
@@ -81,17 +81,19 @@ def test_kamal_agata_and_miniapp_are_separate_services():
     assert miniapp["proxy"]["ssl_redirect"] is True
     assert miniapp["proxy"]["run"] == core["proxy"]["run"]
     assert set(miniapp["servers"]) == {"web"}
-    assert "host" not in miniapp["servers"]["web"]["proxy"]
-    dockerfile = (ROOT / "infra/production/Gpoint.Dockerfile").read_text()
-    assert "FROM nginx:1.27-alpine AS miniapp-runtime" in dockerfile
-    assert "COPY --from=miniapp-build /workspace/apps/miniapp/dist/ /usr/share/nginx/html/" in dockerfile
-    assert "COPY --from=miniapp-build /workspace/apps/miniapp/dist/ /usr/share/nginx/html/" in dockerfile
+    assert eros["service"] == "gpoint-eros-pilot"
+    assert eros["image"] == "akhripunov/gpoint-eros"
+    assert set(eros["servers"]) == {"engine"}
+    accessory = ollama["accessories"]["ollama"]
+    assert accessory["network"] == "gpoint_ollama_internal"
+    assert accessory["options"]["network-alias"] == "ollama"
+    assert accessory["image"].startswith("ollama/ollama@sha256:")
+    assert accessory["volumes"] == ["ollama-layer7-models:/root/.ollama"]
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     assert "id: miniapp" in workflow and "target: miniapp-runtime" in workflow
     assert "ghcr.io/akhripunov/gpoint-miniapp:${{ github.sha }}" in workflow
     assert "MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}" in workflow
-    assert "APP_DIGEST: ${{ steps.app.outputs.digest }}" in workflow
-    assert "AGATA_DIGEST: ${{ steps.agata.outputs.digest }}" in workflow
+    assert "AGATA_DIGEST" not in workflow and "EROS_RELAY_DIGEST" not in workflow
 
 
 def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
@@ -130,7 +132,7 @@ def test_kamal_uses_attempt_scoped_tag_with_buildkit_digest_verification():
     )[1].split("name: Verify candidate compatibility with the live database baseline", 1)[0]
     assert '''--format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$CANDIDATE_SHA"''' in verify_images
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST"' in deploy
-    assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST"' in deploy
+    assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST"' not in deploy
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST"' in deploy
     hook = (ROOT / ".kamal/hooks/pre-app-boot").read_text()
     assert hook.startswith("#!/bin/sh\n")
@@ -157,7 +159,7 @@ def test_miniapp_nginx_proxies_media_without_rewriting_uri_or_losing_auth():
     assert "COPY infra/production/nginx-miniapp.conf /etc/nginx/conf.d/default.conf" in dockerfile
 
 
-def test_kamal_network_hook_joins_only_allowed_core_and_agata_roles():
+def test_kamal_network_hook_joins_only_allowed_core_roles_and_internal_ollama():
     hook = (ROOT / ".kamal/hooks/post-app-boot").read_text()
     assert hook.startswith("#!/bin/sh\n")
     assert 'case "$version" in "$candidate"-*)' in hook
@@ -168,14 +170,15 @@ def test_kamal_network_hook_joins_only_allowed_core_and_agata_roles():
     assert '"$version" =~ ^[0-9a-f]{40}$' not in hook
     assert "printf '%s\\n' \"$candidate\" | grep -Eq '^[0-9a-f]{40}$'" in hook
     assert 'test "$(docker inspect --format' in hook and '"$app_source_sha"' in hook
-    assert "gpoint-core:api) networks='gpoint_app:api,shared_internal:'" in hook
-    assert "gpoint-agata:api) networks='gpoint_app:agata-api,shared_internal:agata-api'" in hook
+    assert "gpoint-core:api) networks='gpoint_app:api,shared_internal:'" not in hook
+    assert "gpoint-agata" not in hook
+    assert "gpoint-eros-relay" not in hook
+    assert "gpoint-core:api) networks='gpoint_app:api,shared_internal:,gpoint_ollama_internal:'" in hook
     assert "docker network connect --alias \"$alias\" \"$network\" \"$id\"" in hook
     assert "StrictHostKeyChecking=yes" in hook
     assert "gsales" not in hook.lower()
     assert "gpoint-miniapp:web) networks='gpoint_app:'" in hook
-    assert "gpoint-eros-pilot)" in hook and "gpoint-eros-relay)" in hook
-    assert "gpoint-eros-pilot:engine|gpoint-eros-relay:relay) networks=''" in hook
+    assert "gpoint-eros-pilot:engine) networks=''" in hook
     assert "Eros engine is not attached to its data network" in hook
     assert "getent hosts api" in hook
     assert 'GPOINT_KAMAL_ROOT_ROUTE_BOOTSTRAP' in hook
@@ -184,8 +187,7 @@ def test_kamal_network_hook_joins_only_allowed_core_and_agata_roles():
     assert 'api_container="gpoint-core-api-${core_version}"' in hook
     assert "resolved_ip" in hook and "test \"$resolved_ip\" = \"$api_ip\"" in hook
     assert "nginx -t" in hook
-    assert 'if [[ "$service:$role" == "gpoint-agata:memory-worker" ]]' in hook
-    assert "python -m app.memory.worker --healthcheck" in hook
+    assert 'if [[ "$service:$role" == "gpoint-agata:memory-worker" ]]' not in hook
 
 
 @pytest.mark.parametrize("name", ["pre-app-boot", "post-app-boot"])
@@ -267,7 +269,7 @@ def test_ssh_heredoc_commands_keep_stdin_available():
 def test_production_host_comes_from_exact_environment_and_known_hosts():
     workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
     configs = "\n".join((ROOT / f"config/{name}").read_text()
-                         for name in ("deploy.yml", "deploy.agata.yml", "deploy.miniapp.yml"))
+                         for name in ("deploy.yml", "deploy.eros-api.yml", "deploy.miniapp.yml"))
     assert "38.180.110.92" not in workflow + configs
     assert "GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}" in workflow
     assert 'ssh-keygen -F "$GPOINT_PRODUCTION_HOST" -f "$HOME/.ssh/known_hosts"' in workflow
@@ -297,8 +299,6 @@ def test_native_release_rejects_non_layer7_ssh_target_before_remote_setup():
     assert script.index(guard) < script.index('ssh-keygen -F "$GPOINT_PRODUCTION_HOST"')
     assert credentials_index < next(i for i, step in enumerate(steps)
                                     if step.get("uses", "").startswith("actions/setup-python@"))
-    assert credentials_index < next(i for i, step in enumerate(steps)
-                                    if step.get("name") == "Install pinned AGATA Alembic graph dependencies")
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -383,7 +383,8 @@ def test_kamal_pre_app_boot_checks_the_pulled_digest_before_boot():
     assert 'test "$platform" = linux/amd64' in hook
     assert "--env GPOINT_KAMAL_EXPECTED_DIGEST" in workflow
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core' in workflow
-    assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$AGATA_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-agata' in workflow
+    assert "gpoint-agata" not in workflow
+    assert "gpoint-eros-relay:relay" not in workflow
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp' in workflow
 
 
@@ -832,7 +833,7 @@ def test_native_runtime_verify_compares_live_database_to_its_predeploy_baseline(
     assert "BASELINE_PRISMA_CHECKSUMS: ${{ steps.migration_baseline.outputs.prisma_checksums }}" in verify
     assert 'test "$prisma_migrations" = "$expected_prisma_migrations"' in verify
     assert 'test "$prisma_checksums" = "$expected_prisma_checksums"' in verify
-    assert 'test "$agata_head" = "$expected_agata_head"' in verify
+    assert "AGATA_HEAD" not in verify
     assert "find packages/db/prisma/migrations" not in verify
     assert "alembic_head('services/agata/migrations/versions')" not in verify
 
@@ -1064,11 +1065,10 @@ def test_kamal_hooks_use_only_the_explicit_pinned_ssh_configuration(name):
     assert '-o UserKnownHostsFile="$known_hosts"' in hook
 
 
-def test_memory_worker_has_database_network_before_process_start():
-    agata = yaml.safe_load((ROOT / 'config/deploy.agata.yml').read_text())
-    assert agata['servers']['memory-worker']['options']['network'] == 'shared_internal'
-    # API aliases remain assigned by the existing post-boot hook.
-    assert 'network' not in agata['servers']['api']['options']
+def test_core_api_has_internal_ollama_network_before_process_start():
+    api = yaml.safe_load((ROOT / 'config/deploy.eros-api.yml').read_text())
+    assert 'gpoint_ollama_internal' in api['servers']['api']['options']['network']
+    assert api['servers']['api']['options']['network-alias'] == 'gpoint-core-api'
 
 
 def test_ordinary_verify_receives_baseline_facts_in_remote_shell():

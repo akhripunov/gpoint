@@ -479,7 +479,7 @@ def test_migration_restore_path_never_reads_live_database_or_kamal_api():
     rehearsal_baseline = helper.split('if [[ "${GPOINT_MIGRATION_REHEARSAL:-0}" == "1" ]]', 1)[1].split('\nelse\n', 1)[0]
     assert 'docker exec "$postgres"' not in rehearsal_baseline
     assert 'docker inspect "$api_container_id"' not in rehearsal_baseline
-    assert '/opt/gpoint/media' not in rehearsal_baseline
+    assert '/opt/gpoint/layer7-staging/media' not in rehearsal_baseline
 
 
 def test_isolated_restore_reassignment_uses_a_non_pinned_admin_role():
@@ -578,3 +578,17 @@ def test_rehearsal_matches_verified_migration_privileges_without_runtime_bypass(
     assert 'CREATE ROLE gpoint LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS' in helper
     assert 'runtime_role=gpoint' in helper
     assert 'GPOINT_MIGRATION_PRODUCTION_GRANTS_RLS=NOT_CHECKED' in (Path(__file__).resolve().parents[1] / "scripts/gpoint-scheduled-backup.py").read_text() or 'MIGRATION_PRODUCTION_GRANTS_RLS=NOT_CHECKED' in helper
+
+
+def test_backup_tracks_the_active_layer7_media_bind_mount_without_moving_data():
+    assert gpoint_scheduled_backup.MEDIA_ROOT == Path("/opt/gpoint/layer7-staging/media")
+
+
+def test_backup_targets_the_approved_canonical_production_database():
+    assert gpoint_scheduled_backup.DATABASE_NAME == "gpoint_staging"
+
+
+def test_backup_accepts_exact_healthy_database_container_without_compose_labels():
+    facts = ["/shared_postgres_1", "a" * 64, "sha256:" + "b" * 64,
+             "true", "healthy", "<no value>", "<no value>"]
+    assert gpoint_scheduled_backup._verified_postgres_identity(facts) == ("a" * 64, "sha256:" + "b" * 64)

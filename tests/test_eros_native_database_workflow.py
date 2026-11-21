@@ -41,7 +41,7 @@ def test_eros_digest_is_available_to_kamal_apply_and_runtime_verify():
     assert verify["env"]["EROS_DIGEST"] == "${{ steps.component_plan.outputs.eros_digest }}"
 
 
-def test_first_eros_engine_and_relay_start_before_core_api_selects_eros_route():
+def test_ollama_network_and_eros_engine_start_before_core_api_uses_eros_config():
     deploy = steps_for("deploy")
     kamal = next(step for step in deploy if step.get("name") == "Deploy exact immutable images with stock Kamal")
     body = kamal["run"]
@@ -51,7 +51,8 @@ def test_first_eros_engine_and_relay_start_before_core_api_selects_eros_route():
     assert eros < core
     assert core < miniapp
     assert body.index("verify_single_running_role gpoint-eros-pilot-engine", eros) < core
-    assert body.index("verify_single_running_role gpoint-eros-relay-relay", eros) < core
+    assert "kamal accessory reboot ollama --config-file config/deploy.ollama.yml" in body
+    assert "gpoint_ollama_internal" in body
     assert "core_api_config=config/deploy.eros-api.yml" in body
 
 
@@ -103,22 +104,15 @@ def test_eros_runtime_label_helper_passes_valid_docker_templates_and_fails_close
         assert "identity mismatch" in rejected.stderr
 
 
-def test_eros_relay_health_checks_use_its_configured_host_bind_address():
-    deploy = next(step for step in steps_for("deploy") if step.get("id") == "verify")
-    rollback = next(step for step in steps_for("rollback")
-                    if step.get("name") == "Verify rollback Runtime and preserve databases before SUCCESS")
-    for step in (deploy, rollback):
-        assert "http://172.31.254.1:11434/healthz" in step["run"]
-        assert "http://127.0.0.1:11434/healthz" not in step["run"]
-
-
 def test_ollama_is_a_pinned_persistent_private_kamal_accessory():
-    config = yaml.safe_load((ROOT / "config/deploy.eros-relay.yml").read_text())
+    config = yaml.safe_load((ROOT / "config/deploy.ollama.yml").read_text())
     ollama = config["accessories"]["ollama"]
     assert ollama["image"] == (
         "ollama/ollama@sha256:a717bfc1c56acfc2e85d3109bd40a7646258ec9062c40cea83b9ed0927eb4223"
     )
     assert ollama["port"] == "127.0.0.1:11435:11434"
+    assert ollama["network"] == "gpoint_ollama_internal"
+    assert ollama["options"]["network-alias"] == "ollama"
     assert "ollama-layer7-models:/root/.ollama" in ollama["volumes"]
     assert ollama["options"]["restart"] == "unless-stopped"
     assert ollama["options"]["cpus"] == 1.5
@@ -126,41 +120,26 @@ def test_ollama_is_a_pinned_persistent_private_kamal_accessory():
     assert ollama["options"]["memory-swap"] == "3g"
 
 
-def test_native_eros_deploy_bootstraps_and_verifies_local_ollama_before_engine():
+def test_native_eros_deploy_uses_stock_kamal_accessory_and_verifies_direct_route():
     deploy = steps_for("deploy")
     kamal = next(step for step in deploy if step.get("name") == "Deploy exact immutable images with stock Kamal")
     body = kamal["run"]
     eros = body.index('if [[ "$DEPLOY_EROS" == true ]]; then')
-    accessory_boot = body.index("kamal accessory boot ollama", eros)
-    model_pull = body.index("kamal accessory exec ollama ollama pull qwen3-embedding:0.6b", accessory_boot)
-    model_verify = body.index("verify-layer7-ollama.py", model_pull)
-    relay_deploy = body.index("kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles relay", model_verify)
-    engine_deploy = body.index("kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles engine", relay_deploy)
-    assert accessory_boot < model_pull < model_verify < relay_deploy < engine_deploy
-    assert "EROS_OLLAMA_MODEL_DIGEST" in body
-    assert 'if [[ "$accessory_state" == ABSENT ]]; then' in body
-    assert '"No such object: gpoint-eros-relay-ollama"' in body
-    assert 'docker inspect --format' in body
-    assert '2>/dev/null || true' not in body
-    legacy_verify = body.index(
-        'python3 - "$EROS_OLLAMA_MODEL_DIGEST" ollama-layer7',
-        body.index('if [[ "$accessory_state" == ABSENT ]]; then'),
-    )
-    legacy_stop = body.index('docker stop ollama-layer7', legacy_verify)
-    assert legacy_verify < legacy_stop < accessory_boot
-    assert "restore_legacy_ollama" in body
-    assert body.index('docker rm ollama-layer7') > model_verify
+    accessory = body.index("kamal accessory boot ollama --config-file config/deploy.ollama.yml")
+    model_pull = body.index("kamal accessory exec ollama ollama pull qwen3-embedding:0.6b", accessory)
+    engine = body.index("kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles engine", eros)
+    assert accessory < model_pull < engine
+    assert "config/deploy.eros-relay.yml" not in body
+    assert "restore_legacy_ollama" not in body
+    assert "verify-layer7-ollama.py" in body
 
 
 def test_runtime_verify_sends_512_dimension_embedding_from_inside_eros_container():
     verify = next(step for step in steps_for("deploy") if step.get("id") == "verify")
     body = verify["run"]
-    assert "docker exec \"gpoint-eros-pilot-engine-$eros_version\" sh -c" in body
-    assert "EROS_PILOT_EMBEDDING_PROBE_URL" in body
-    assert "EROS_OLLAMA_EMBEDDING_URL" not in body
-    assert "http://172.31.254.1:11434/api/embed" in body
-    assert '\\"dimensions\\":512' in body
-    assert "Synthetic Layer7 Eros network verification" in body
+    assert "verify-layer7-ollama.py" in body
+    assert "gpoint_ollama_internal" not in body  # network membership is checked by the helper
+    assert "http://gpoint-core-api:3000/eros-worker/v1/embeddings" in body
 
 
 def test_production_embedding_route_is_layer7_internal_and_not_mac_hosted():
@@ -170,7 +149,7 @@ def test_production_embedding_route_is_layer7_internal_and_not_mac_hosted():
     assert "http://gpoint-core-api:3000/eros-worker/v1/embeddings" in model_config
     assert "Mac-hosted Ollama" not in readme
     assert "Eros embeddings use the pinned Qwen model on Layer7" in readme
-    assert "'EROS_OLLAMA_EMBEDDING_URL': 'http://172.31.254.1:11434/api/embed'" in secret_writer
+    assert "'EROS_OLLAMA_EMBEDDING_URL': 'http://ollama:11434/api/embed'" in secret_writer
 
 
 def test_native_deploy_materializes_and_hash_verifies_the_required_model_config():

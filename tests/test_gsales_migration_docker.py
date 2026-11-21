@@ -47,7 +47,7 @@ class GSalesMigrationDockerTests(unittest.TestCase):
             return result
 
         def query(statement):
-            return docker("exec", "-i", postgres, "psql", "-XqAt", "-U", "postgres", "-d", "gpoint",
+            return docker("exec", "-i", postgres, "psql", "-XqAt", "-U", "postgres", "-d", "gpoint_staging",
                           "-v", "ON_ERROR_STOP=1", input=statement).stdout.strip()
 
         with tempfile.TemporaryDirectory(prefix="gpoint-sales-migration-") as scratch:
@@ -71,7 +71,7 @@ class GSalesMigrationDockerTests(unittest.TestCase):
                     time.sleep(0.5)
                 else:
                     self.fail("disposable migration PostgreSQL not ready")
-                docker("exec", postgres, "createdb", "-U", "postgres", "gpoint")
+                docker("exec", postgres, "createdb", "-U", "postgres", "gpoint_staging")
                 query(f"""
                     CREATE ROLE gsales_runtime LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS NOINHERIT NOCREATEDB NOCREATEROLE;
                     CREATE ROLE gpoint_runtime LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS NOINHERIT NOCREATEDB NOCREATEROLE;
@@ -109,22 +109,22 @@ class GSalesMigrationDockerTests(unittest.TestCase):
                 query(f"INSERT INTO gsales.sellers(tenant_id,agata_character_id,display_name) VALUES"
                       f"('{tenant}','{uuid4()}','own seller'),('{foreign_tenant}','{uuid4()}','foreign seller')")
                 own_rows = docker("exec", "--env-file", str(env), "-i", postgres, "psql", "-XqAt", "-h", "127.0.0.1",
-                                  "-U", "gsales_runtime", "-d", "gpoint", "-v", "ON_ERROR_STOP=1",
+                                  "-U", "gsales_runtime", "-d", "gpoint_staging", "-v", "ON_ERROR_STOP=1",
                                   input=f"SET app.tenant_id='{foreign_tenant}'; SELECT display_name FROM gsales.sellers")
                 self.assertEqual(own_rows.stdout.strip(), "own seller", "runtime tenant spoof exposed foreign G Sales data")
                 forbidden = docker("exec", "--env-file", str(env), "-i", postgres, "psql", "-XqAt", "-h", "127.0.0.1",
-                                   "-U", "gpoint_runtime", "-d", "gpoint", "-v", "ON_ERROR_STOP=1",
+                                   "-U", "gpoint_runtime", "-d", "gpoint_staging", "-v", "ON_ERROR_STOP=1",
                                    input="SELECT display_name FROM gsales.sellers", check=False)
                 self.assertNotEqual(forbidden.returncode, 0, "Core role gained access to G Sales data")
                 gate.DB_CONTAINER, gate.DB_NETWORK = postgres, network
                 backup = gate.complete_backup(sha, directory=Path(scratch) / "backup")
                 self.assertEqual(backup["status"], "COMPLETE_PROTECTED")
                 self.assertEqual(Path(backup["path"]).stat().st_mode & 0o777, 0o600)
-                docker("exec", postgres, "dropdb", "-U", "postgres", "gpoint")
-                docker("exec", postgres, "createdb", "-U", "postgres", "gpoint")
+                docker("exec", postgres, "dropdb", "-U", "postgres", "gpoint_staging")
+                docker("exec", postgres, "createdb", "-U", "postgres", "gpoint_staging")
                 with Path(backup["path"]).open("rb") as stream:
                     restored = subprocess.run(["docker", "exec", "-i", postgres, "pg_restore", "-U", "postgres",
-                                               "-d", "gpoint", "--no-owner", "--clean", "--if-exists"], stdin=stream, capture_output=True, timeout=120)
+                                               "-d", "gpoint_staging", "--no-owner", "--clean", "--if-exists"], stdin=stream, capture_output=True, timeout=120)
                 self.assertEqual(restored.returncode, 0, "disposable backup restore failed; details withheld")
                 # Missing gsales_meta breaks this query (and would rerun non-idempotent DDL).
                 self.assertEqual(query("SELECT version,sha256,applied_at FROM gsales_meta.migrations ORDER BY version"), ledger_before)

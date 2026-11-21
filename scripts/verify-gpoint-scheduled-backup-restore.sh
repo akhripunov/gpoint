@@ -169,10 +169,10 @@ rows=[row for row in inventory.get('containers', [])
 if len(rows) != 1 or rows[0].get('id') != sys.argv[2] or rows[0].get('running') is not True:
     raise SystemExit('fresh inventory does not identify exactly one running Compose API container')
 mounts=[mount for mount in rows[0].get('mounts', []) if mount.get('destination') == '/data/media']
-if len(mounts) != 1 or mounts[0].get('type') != 'bind' or mounts[0].get('source') != '/opt/gpoint/media' or mounts[0].get('readWrite') is not True:
+if len(mounts) != 1 or mounts[0].get('type') != 'bind' or mounts[0].get('source') != '/opt/gpoint/layer7-staging/media' or mounts[0].get('readWrite') is not True:
     raise SystemExit('fresh inventory does not prove the required writable persistent media bind mount')
 PY
-  media_root=/opt/gpoint/media
+  media_root=/opt/gpoint/layer7-staging/media
   test -d "$media_root" && test ! -L "$media_root"
   media_source_manifest="$plaintext_dir/media-source.json"
   media_manifest_output="$(python3 "$media_tree_helper" manifest --root "$media_root" --output "$media_source_manifest")"
@@ -190,18 +190,20 @@ PY
   test "$(baseline_value ATTEMPT)" = "$attempt"
 
   postgres=shared_postgres_1
+  database_name="$(baseline_value DATABASE_NAME)"
+  [[ "$database_name" == gpoint_staging ]]
   test "$(docker inspect --format '{{.Id}}' "$postgres")" = "$(baseline_value POSTGRES_CONTAINER_ID)"
   test "$(docker inspect --format '{{.Image}}' "$postgres")" = "$(baseline_value POSTGRES_IMAGE_ID)"
   test "$(docker inspect --format '{{.State.Running}}' "$postgres")" = true
-  postgres_system_identifier="$(docker exec "$postgres" sh -ec 'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d gpoint -c "SELECT system_identifier::text FROM pg_control_system()"')"
+  postgres_system_identifier="$(docker exec "$postgres" sh -ec "exec psql -XqAt -v ON_ERROR_STOP=1 -U \"\$POSTGRES_USER\" -d $database_name -c 'SELECT system_identifier::text FROM pg_control_system()'")"
   test "$postgres_system_identifier" = "$(baseline_value POSTGRES_SYSTEM_IDENTIFIER)"
   postgres_user="$(docker exec "$postgres" sh -ec 'printf %s "$POSTGRES_USER"')"
   pgdata="$(docker exec "$postgres" sh -ec 'printf %s "${PGDATA:-/var/lib/postgresql/data}"')"
   [[ "$postgres_user" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]
   [[ "$pgdata" == /* && "$pgdata" != / && "$pgdata" != *..* ]]
-  database_bytes="$(docker exec "$postgres" sh -ec 'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d gpoint -c "SELECT pg_database_size('\''gpoint'\'')"')"
+  database_bytes="$(docker exec "$postgres" sh -ec "exec psql -XqAt -v ON_ERROR_STOP=1 -U \"\$POSTGRES_USER\" -d $database_name -c \"SELECT pg_database_size('$database_name')\"")"
   [[ "$database_bytes" =~ ^[0-9]+$ && "$database_bytes" -gt 0 ]]
-  source_tables="$(docker exec "$postgres" sh -ec 'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d gpoint -c "SELECT count(*) FROM pg_tables WHERE schemaname IN ('\''public'\'','\''agata'\'','\''gsales'\'','\''gsales_meta'\'','\''agata_identity'\'')"')"
+  source_tables="$(docker exec "$postgres" sh -ec "exec psql -XqAt -v ON_ERROR_STOP=1 -U \"\$POSTGRES_USER\" -d $database_name -c \"SELECT count(*) FROM pg_tables WHERE schemaname IN ('public','agata','gsales','gsales_meta','agata_identity')\"")"
   [[ "$source_tables" =~ ^[0-9]+$ && "$source_tables" -gt 0 ]]
 fi
 

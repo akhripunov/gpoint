@@ -5,26 +5,22 @@ import json
 import re
 import subprocess
 import sys
-from urllib.request import Request, urlopen
 
 
-BASE_URL = "http://127.0.0.1:11435"
+BASE_URL = "http://ollama:11434"
 MODEL_NAME = "qwen3-embedding:0.6b"
 IMAGE = "ollama/ollama@sha256:a717bfc1c56acfc2e85d3109bd40a7646258ec9062c40cea83b9ed0927eb4223"
 CONTAINER = "gpoint-eros-relay-ollama"
-CONTAINER_IMAGES = {
-    CONTAINER: IMAGE,
-    "ollama-layer7": "ollama/ollama@sha256:0e59999e0e8f9fd4e704bd788a89b7e4cad399367fb1365f8c102ac662288761",
-}
+NETWORK = "gpoint_ollama_internal"
 
 
 def verify(expected_digest: str, base_url: str = BASE_URL, docker_inspect=None,
            container_name: str = CONTAINER) -> None:
     if not re.fullmatch(r"[a-f0-9]{64}", expected_digest):
         raise ValueError("invalid expected model digest")
-    expected_image = CONTAINER_IMAGES.get(container_name)
-    if expected_image is None:
+    if container_name != CONTAINER:
         raise ValueError("unrecognized Ollama container identity")
+    expected_image = IMAGE
     inspect = docker_inspect or subprocess.run
     inspected = inspect(
         ["docker", "inspect", container_name], check=True, capture_output=True, text=True
@@ -45,10 +41,25 @@ def verify(expected_digest: str, base_url: str = BASE_URL, docker_inspect=None,
         raise ValueError("Ollama accessory OCI digest mismatch")
     if container["State"]["Running"] is not True:
         raise ValueError("Ollama accessory is not running")
-    if container["HostConfig"]["PortBindings"].get("11434/tcp") != [
-        {"HostIp": "127.0.0.1", "HostPort": "11435"}
-    ]:
-        raise ValueError("Ollama accessory is not loopback-only")
+    bindings = container["HostConfig"].get("PortBindings") or {}
+    if bindings != {"11434/tcp": [{"HostIp": "127.0.0.1", "HostPort": "11435"}]}:
+        raise ValueError("Ollama accessory port binding is not loopback-only")
+    network = container.get("NetworkSettings", {}).get("Networks", {}).get(NETWORK)
+    if not network or "ollama" not in network.get("Aliases", []):
+        raise ValueError("Ollama accessory is missing its private Docker network alias")
+    network_result = inspect(["docker", "network", "inspect", NETWORK], check=True, capture_output=True, text=True)
+    network_config = json.loads(network_result.stdout)[0]
+    if network_config.get("Internal") is not True:
+        raise ValueError("Ollama Docker network is not internal")
+    allowed_names = {container_name}
+    for row in network_config.get("Containers", {}).values():
+        name = row.get("Name", "")
+        if name == container_name or name.startswith("gpoint-core-api-"):
+            allowed_names.add(name)
+        else:
+            raise ValueError("unrelated container is attached to the Ollama network")
+    if container_name not in allowed_names:
+        raise ValueError("Ollama accessory is absent from its private network inventory")
     if container["HostConfig"]["RestartPolicy"]["Name"] != "unless-stopped":
         raise ValueError("Ollama accessory restart policy mismatch")
     if not any(
@@ -58,40 +69,41 @@ def verify(expected_digest: str, base_url: str = BASE_URL, docker_inspect=None,
         for mount in container["Mounts"]
     ):
         raise ValueError("Ollama accessory model volume identity mismatch")
-    with urlopen(f"{base_url}/api/tags", timeout=10) as response:
-        models = json.load(response).get("models")
-    if not isinstance(models, list):
-        raise ValueError("invalid Ollama model inventory")
-    model = next((entry for entry in models if entry.get("name") == MODEL_NAME), None)
-    if not model or model.get("digest") != expected_digest:
-        raise ValueError("pinned Ollama model digest is unavailable")
-
-    body = json.dumps({
-        "model": MODEL_NAME,
-        "input": "Synthetic Layer7 embedding readiness probe.",
-        "dimensions": 512,
-    }).encode()
-    request = Request(
-        f"{base_url}/api/embed",
-        data=body,
-        headers={"Content-Type": "application/json"},
+    api_containers = inspect(
+        ["docker", "ps", "-q", "--filter", "name=^/gpoint-core-api-"],
+        check=True, capture_output=True, text=True,
+    ).stdout.splitlines()
+    if len(api_containers) != 1:
+        raise ValueError("expected exactly one running Core API for the embedding route probe")
+    probe = r'''const base = "http://ollama:11434";
+const expected = process.argv[1];
+const fail = () => { console.error("OLLAMA_PRIVATE_ROUTE_VERIFY=FAIL"); process.exit(1); };
+try {
+  const tags = await fetch(`${base}/api/tags`, { signal: AbortSignal.timeout(10000) });
+  if (!tags.ok) fail();
+  const models = (await tags.json()).models;
+  if (!Array.isArray(models) || !models.some((m) => m.name === "qwen3-embedding:0.6b" && m.digest === expected)) fail();
+  const response = await fetch(`${base}/api/embed`, { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "qwen3-embedding:0.6b", input: "Synthetic Layer7 embedding readiness probe.", dimensions: 512, truncate: false }),
+    signal: AbortSignal.timeout(60000) });
+  if (!response.ok) fail();
+  const rows = (await response.json()).embeddings;
+  if (!Array.isArray(rows) || rows.length !== 1 || !Array.isArray(rows[0]) || rows[0].length !== 512 ||
+      !rows[0].every((v) => typeof v === "number" && Number.isFinite(v)) || !rows[0].some((v) => Math.abs(v) > 1e-8)) fail();
+  console.log("OLLAMA_PRIVATE_ROUTE_VERIFY=PASS model=qwen3-embedding:0.6b dimensions=512");
+} catch { fail(); }'''
+    result = inspect(
+        ["docker", "exec", api_containers[0], "node", "-e", probe, expected_digest],
+        check=True, capture_output=True, text=True,
     )
-    with urlopen(request, timeout=60) as response:
-        payload = json.load(response)
-    embeddings = payload.get("embeddings")
-    if not isinstance(embeddings, list) or len(embeddings) != 1:
-        raise ValueError("invalid embedding response")
-    vector = embeddings[0]
-    if not isinstance(vector, list) or len(vector) != 512 or not any(
-        isinstance(value, (int, float)) and abs(value) > 1e-8 for value in vector
-    ):
-        raise ValueError("embedding dimension or values are invalid")
+    if "OLLAMA_PRIVATE_ROUTE_VERIFY=PASS" not in result.stdout:
+        raise ValueError("Core API could not verify the private Ollama embedding route")
 
 
 def main() -> int:
     container_name = sys.argv[2] if len(sys.argv) == 3 else CONTAINER
-    if len(sys.argv) not in (2, 3) or container_name not in CONTAINER_IMAGES:
-        print("usage: verify-layer7-ollama.py <expected-model-sha256> [gpoint-eros-relay-ollama|ollama-layer7]", file=sys.stderr)
+    if len(sys.argv) not in (2, 3) or container_name != CONTAINER:
+        print(f"usage: verify-layer7-ollama.py <expected-model-sha256> [{CONTAINER}]", file=sys.stderr)
         return 2
     try:
         verify(sys.argv[1], container_name=container_name)

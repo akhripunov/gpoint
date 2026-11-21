@@ -6,7 +6,7 @@ version="${2:-}"
 expected_sha="${3:-}"
 
 case "$prefix" in
-  gpoint-core-api|gpoint-core-worker|gpoint-core-bot|gpoint-agata-api|gpoint-agata-memory-worker|gpoint-miniapp-web|gpoint-eros-pilot-engine|gpoint-eros-relay-relay) ;;
+  gpoint-core-api|gpoint-core-worker|gpoint-core-bot|gpoint-miniapp-web|gpoint-eros-pilot-engine) ;;
   *) echo "unsupported Kamal role prefix" >&2; exit 2 ;;
 esac
 [[ "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]] || { echo "invalid Kamal version" >&2; exit 2; }

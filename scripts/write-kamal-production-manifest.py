@@ -32,15 +32,14 @@ def docker_json(*args: str) -> object:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
-    for name in ("output", "sha", "app-source-sha", "version", "app-digest", "agata-digest", "miniapp-digest",
+    for name in ("output", "sha", "app-source-sha", "version", "app-digest", "miniapp-digest",
                  "run-id", "attempt", "deployment-id"):
         result.add_argument(f"--{name}", required=True)
     result.add_argument("--eros-digest")
-    result.add_argument("--eros-relay-digest")
     result.add_argument("--mode", choices=("ordinary",), default="ordinary")
-    for name in ("db-container-id", "redis-container-id", "prisma-head", "agata-head",
+    for name in ("db-container-id", "redis-container-id", "prisma-head",
                  "prisma-migrations", "prisma-checksums", "baseline-prisma-head",
-                 "baseline-prisma-migrations", "baseline-prisma-checksums", "baseline-agata-head",
+                 "baseline-prisma-migrations", "baseline-prisma-checksums",
                  "pending-prisma-migrations", "pending-prisma-checksums", "expected-role-identities-b64"):
         result.add_argument(f"--{name}")
     result.add_argument("--public-routes-verified", action="store_true")
@@ -57,9 +56,8 @@ def main() -> int:
     expected_role_plan = None
     if not SHA256.fullmatch(args.db_container_id or "") or not SHA256.fullmatch(args.redis_container_id or ""):
         raise SystemExit("ordinary manifest needs exact PostgreSQL and Redis container IDs")
-    if (not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", args.prisma_head or "")
-            or not re.fullmatch(r"[A-Za-z0-9_]+", args.agata_head or "")):
-        raise SystemExit("ordinary manifest needs verified Prisma and AGATA migration heads")
+    if not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", args.prisma_head or ""):
+        raise SystemExit("ordinary manifest needs a verified Prisma migration head")
     migrations = (args.prisma_migrations or "").split(",")
     checksums = (args.prisma_checksums or "").split(",")
     if (not migrations or any(not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", value) for value in migrations)
@@ -79,9 +77,6 @@ def main() -> int:
     baseline_checksums = (args.baseline_prisma_checksums or "").split(",")
     pending_migrations = (args.pending_prisma_migrations or "").split(",") if args.pending_prisma_migrations else []
     pending_checksums = (args.pending_prisma_checksums or "").split(",") if args.pending_prisma_checksums else []
-    if (not re.fullmatch(r"[A-Za-z0-9_]+", args.baseline_agata_head or "")
-            or args.baseline_agata_head != args.agata_head):
-        raise SystemExit("ordinary manifest AGATA head changed during Deploy")
     if (not baseline_migrations
             or any(not re.fullmatch(r"[0-9]{14}_[a-z0-9_]+", value) for value in baseline_migrations)
             or len(baseline_migrations) != len(set(baseline_migrations))
@@ -120,9 +115,7 @@ def main() -> int:
     except (ValueError, UnicodeError, json.JSONDecodeError):
         raise SystemExit("ordinary manifest expected component role inventory is malformed") from None
     expected_roles = expected_role_plan.get("roles") if isinstance(expected_role_plan, dict) else None
-    if not isinstance(expected_roles, dict) or set(expected_roles) not in (
-            set(ROLE_REPOSITORIES) - {"gpoint-eros-pilot-engine", "gpoint-eros-relay-relay"},
-            set(ROLE_REPOSITORIES)):
+    if not isinstance(expected_roles, dict) or set(expected_roles) != set(ROLE_REPOSITORIES):
         raise SystemExit("ordinary manifest role inventory is incomplete")
     role_repositories = {role: ROLE_REPOSITORIES[role] for role in expected_roles}
     role_components = {role: ROLE_COMPONENTS[role] for role in expected_roles}
@@ -148,17 +141,13 @@ def main() -> int:
         "gpoint-core-api": "ghcr.io/akhripunov/gpoint-runtime@" + args.app_digest,
         "gpoint-core-worker": "ghcr.io/akhripunov/gpoint-runtime@" + args.app_digest,
         "gpoint-core-bot": "ghcr.io/akhripunov/gpoint-runtime@" + args.app_digest,
-        "gpoint-agata-api": "ghcr.io/akhripunov/gpoint-agata-runtime@" + args.agata_digest,
-        "gpoint-agata-memory-worker": "ghcr.io/akhripunov/gpoint-agata-runtime@" + args.agata_digest,
         "gpoint-miniapp-web": "ghcr.io/akhripunov/gpoint-miniapp@" + args.miniapp_digest,
         "gpoint-eros-pilot-engine": "ghcr.io/akhripunov/gpoint-eros@" + (args.eros_digest or ""),
-        "gpoint-eros-relay-relay": "ghcr.io/akhripunov/gpoint-runtime@" + (args.eros_relay_digest or ""),
     }
     has_eros = "gpoint-eros-pilot-engine" in expected_roles
-    eros_digests = (args.eros_digest, args.eros_relay_digest)
-    if has_eros and not all(OCI_DIGEST.fullmatch(digest or "") for digest in eros_digests):
-        raise SystemExit("ordinary manifest needs exact Eros Engine and Relay OCI digests")
-    if not has_eros and any(eros_digests):
+    if has_eros and not OCI_DIGEST.fullmatch(args.eros_digest or ""):
+        raise SystemExit("ordinary manifest needs the exact Eros Engine OCI digest")
+    if not has_eros and args.eros_digest:
         raise SystemExit("ordinary manifest received an Eros digest without Eros roles")
     component_identities = {}
     for role, repository in role_repositories.items():
@@ -187,7 +176,7 @@ def main() -> int:
             raise SystemExit(f"{field.replace('_', ' ')} must be a positive integer")
     if args.version != f"{args.sha}-{args.run_id}-{args.attempt}":
         raise SystemExit("attempt tag does not match the exact candidate SHA and workflow attempt")
-    for field in ("app_digest", "agata_digest", "miniapp_digest"):
+    for field in ("app_digest", "miniapp_digest"):
         if not OCI_DIGEST.fullmatch(getattr(args, field)):
             raise SystemExit(f"{field.replace('_', ' ')} must be an immutable OCI digest")
 
@@ -195,14 +184,11 @@ def main() -> int:
         ("gpoint-core-api", "ghcr.io/akhripunov/gpoint-runtime", args.app_digest),
         ("gpoint-core-worker", "ghcr.io/akhripunov/gpoint-runtime", args.app_digest),
         ("gpoint-core-bot", "ghcr.io/akhripunov/gpoint-runtime", args.app_digest),
-        ("gpoint-agata-api", "ghcr.io/akhripunov/gpoint-agata-runtime", args.agata_digest),
-        ("gpoint-agata-memory-worker", "ghcr.io/akhripunov/gpoint-agata-runtime", args.agata_digest),
         ("gpoint-miniapp-web", "ghcr.io/akhripunov/gpoint-miniapp", args.miniapp_digest),
     ]
     if "gpoint-eros-pilot-engine" in expected_role_plan["roles"]:
         expected_services.extend([
             ("gpoint-eros-pilot-engine", "ghcr.io/akhripunov/gpoint-eros", args.eros_digest),
-            ("gpoint-eros-relay-relay", "ghcr.io/akhripunov/gpoint-runtime", args.eros_relay_digest),
         ])
     runtime_services = []
     for prefix, repository, digest in expected_services:
@@ -222,18 +208,10 @@ def main() -> int:
         if (not container["State"]["Running"]
                 or container["Config"]["Labels"].get(revision_label) != role_source):
             raise SystemExit(f"final runtime identity changed before manifest: {name}")
-        if prefix in {"gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot",
-                      "gpoint-agata-api", "gpoint-agata-memory-worker",
-                      "gpoint-eros-relay-relay"}:
-            if prefix.startswith("gpoint-agata-"):
-                process_sha = subprocess.run(
-                    ["docker", "exec", name, "python", "-c",
-                     "import os; print(os.environ.get('RELEASE_SHA', ''))"],
-                    check=True, capture_output=True, text=True).stdout.strip()
-            else:
-                process_sha = subprocess.run(
-                    ["docker", "exec", name, "node", "-p", "process.env.RELEASE_SHA || ''"],
-                    check=True, capture_output=True, text=True).stdout.strip()
+        if prefix in {"gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot"}:
+            process_sha = subprocess.run(
+                ["docker", "exec", name, "node", "-p", "process.env.RELEASE_SHA || ''"],
+                check=True, capture_output=True, text=True).stdout.strip()
             if process_sha != role_source:
                 raise SystemExit(f"runtime RELEASE_SHA does not match application source: {name}")
         if expected_digest not in image.get("RepoDigests", []):
@@ -272,7 +250,7 @@ def main() -> int:
         if not any(binding.get("HostPort") == port.split("/", 1)[0] for binding in bindings):
             raise SystemExit(f"Kamal Proxy does not own public port {port.split('/', 1)[0]}")
     stopped_compose = []
-    for service in ("api", "worker", "bot", "agata-api", "agata-memory-worker"):
+    for service in ("api", "worker", "bot"):
         result = subprocess.run(["docker", "ps", "-aq", "--filter",
                                  "label=com.docker.compose.project=compose", "--filter",
                                  f"label=com.docker.compose.service={service}"],
@@ -286,7 +264,7 @@ def main() -> int:
                 raise SystemExit(f"legacy Compose service must remain stopped: {service}")
             stopped_compose.append({"service": service, "containerId": container_id, "running": False})
     stopped_gsales = []
-    for service in ("gsales-api", "gsales-agata-api", "gsales-agata-memory-worker"):
+    for service in ("gsales-api",):
         result = subprocess.run(["docker", "ps", "-aq", "--filter",
                                  "label=com.docker.compose.project=compose",
                                  "--filter", f"label=com.docker.compose.service={service}"],
@@ -324,10 +302,9 @@ def main() -> int:
             "appSourceSha": args.app_source_sha,
             "images": {
                 "core": f"ghcr.io/akhripunov/gpoint-runtime@{args.app_digest}",
-                "agata": f"ghcr.io/akhripunov/gpoint-agata-runtime@{args.agata_digest}",
                 "miniapp": f"ghcr.io/akhripunov/gpoint-miniapp@{args.miniapp_digest}",
                 **({"eros": f"ghcr.io/akhripunov/gpoint-eros@{args.eros_digest}",
-                    "eros_relay": f"ghcr.io/akhripunov/gpoint-runtime@{args.eros_relay_digest}"}
+                }
                    if "gpoint-eros-pilot-engine" in expected_role_plan["roles"] else {}),
             },
         },
@@ -340,7 +317,7 @@ def main() -> int:
                     "githubDeploymentId": args.deployment_id},
         "evidence": {
             "publicRoutes": "PASS", "migrationCompatibility": "PASS",
-            "prismaHead": args.prisma_head, "agataHead": args.agata_head,
+            "prismaHead": args.prisma_head,
         },
         "preservation": ordinary_preservation,
         "publicIngress": public_ingress,
@@ -348,12 +325,10 @@ def main() -> int:
             "prismaHead": args.prisma_head,
             "prismaAppliedMigrations": migrations,
             "prismaAppliedChecksums": checksum_rows,
-            "agataHead": args.agata_head,
             "baselineUnchanged": {
                 "prismaHead": args.baseline_prisma_head,
                 "prismaMigrations": baseline_migrations,
                 "prismaChecksums": baseline_checksum_rows,
-                "agataHead": args.baseline_agata_head,
             },
             "approvedPendingMigrations": [
                 {"name": name, "checksum": digest} for name, digest in pending_checksum_rows.items()

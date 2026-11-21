@@ -109,9 +109,8 @@ def _scope_repo(tmp_path):
         "gpoint-core-api": "ghcr.io/akhripunov/gpoint-runtime",
         "gpoint-core-worker": "ghcr.io/akhripunov/gpoint-runtime",
         "gpoint-core-bot": "ghcr.io/akhripunov/gpoint-runtime",
-        "gpoint-agata-api": "ghcr.io/akhripunov/gpoint-agata-runtime",
-        "gpoint-agata-memory-worker": "ghcr.io/akhripunov/gpoint-agata-runtime",
         "gpoint-miniapp-web": "ghcr.io/akhripunov/gpoint-miniapp",
+        "gpoint-eros-pilot-engine": "ghcr.io/akhripunov/gpoint-eros",
     }
     identity = {}
     for index, image_repo in enumerate(dict.fromkeys(repositories.values()), 1):

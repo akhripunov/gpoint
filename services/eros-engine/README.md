@@ -61,8 +61,9 @@ alter its installed configuration.
   access-isolation, backup and recovery requirements remain active; this decision
   does not claim that stock Eros provides a full-erasure endpoint. The initial
   pilot remains synthetic-only in a dedicated Eros database, with no real user
-  data. Eros embeddings use the pinned Qwen model on Layer7 through its private
-  relay; this removes the Mac dependency for embeddings. The existing Mac
+  data. Eros embeddings use the pinned Qwen model on Layer7 through the Core
+  API's private Docker-network connection to Ollama; no Relay or Mac tunnel is
+  required for embeddings. The existing Mac
   Product Worker remains the chat-inference route and is still required for
   real Eros dialogue until that existing Worker is available to the request.
 - Stock `classify_session` performs model/extraction and embedding before an

@@ -47,17 +47,11 @@ case "$service" in
   gpoint-core)
     default_roles='api,worker,bot'
     ;;
-  gpoint-agata)
-    default_roles='api,memory-worker'
-    ;;
   gpoint-miniapp)
     default_roles='web'
     ;;
   gpoint-eros-pilot)
     default_roles='engine'
-    ;;
-  gpoint-eros-relay)
-    default_roles='relay'
     ;;
   *)
     echo 'Unrecognized GPoint Kamal service' >&2
@@ -71,12 +65,10 @@ case "$roles" in *[!A-Za-z0-9,_-]*) echo 'KAMAL_ROLES contains an invalid role c
 
 for role in $(printf '%s' "$roles" | tr ',' ' '); do
   case "$service:$role" in
-    gpoint-core:api) networks='gpoint_app:api,shared_internal:' ;;
+    gpoint-core:api) networks='gpoint_app:api,shared_internal:,gpoint_ollama_internal:' ;;
     gpoint-core:worker|gpoint-core:bot) networks='gpoint_app:,shared_internal:' ;;
-    gpoint-agata:api) networks='gpoint_app:agata-api,shared_internal:agata-api' ;;
-    gpoint-agata:memory-worker) networks='gpoint_app:,shared_internal:' ;;
     gpoint-miniapp:web) networks='gpoint_app:' ;;
-    gpoint-eros-pilot:engine|gpoint-eros-relay:relay) networks='' ;;
+    gpoint-eros-pilot:engine) networks='' ;;
     *)
       echo 'Unrecognized GPoint Kamal role' >&2
       exit 1
@@ -163,17 +155,6 @@ if "gpoint_eros_data" not in (json.loads(sys.argv[1]) or {}):
 PY
 fi
 
-if [[ "$service:$role" == "gpoint-agata:memory-worker" ]]; then
-  healthy=0
-  for attempt in {1..24}; do
-    if docker exec "$id" python -m app.memory.worker --healthcheck >/dev/null 2>&1; then
-      healthy=1
-      break
-    fi
-    sleep 5
-  done
-  test "$healthy" -eq 1 || { echo 'AGATA memory worker did not become healthy after network attachment' >&2; exit 1; }
-fi
   if [[ "$service:$role" == "gpoint-miniapp:web" ]]; then
     docker exec "$id" nginx -t >/dev/null
   fi
