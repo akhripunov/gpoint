@@ -31,7 +31,7 @@ def validate(records: list[dict]) -> dict:
         raise ValueError("running Kamal role set is incomplete or duplicated, or lacks a live Core baseline")
     missing_roles = set(all_roles) - record_roles
     role_repositories = all_roles
-    versions, result, images_by_group, component_identities = set(), {}, {}, {}
+    versions, result, images_by_source, identities_by_group = set(), {}, {}, {}
     for row in records:
         role = row["role"]
         name, version = row.get("name"), row.get("version")
@@ -41,7 +41,8 @@ def validate(records: list[dict]) -> dict:
             raise ValueError(f"Kamal version is missing or malformed for {role}")
         if name != role + "-" + version:
             raise ValueError(f"invalid Kamal version/name for {role}")
-        if not SHA40.fullmatch(source or "") or not IMAGE_ID.fullmatch(image_id or ""):
+        if (not SHA40.fullmatch(source or "") or not version.startswith(source + "-")
+                or not IMAGE_ID.fullmatch(image_id or "")):
             raise ValueError(f"invalid OCI source SHA or Docker image ID for {role}")
         repo = role_repositories[role]
         group = ("EROS_ENGINE" if role == "gpoint-eros-pilot-engine" else
@@ -49,22 +50,20 @@ def validate(records: list[dict]) -> dict:
         matching = [x for x in (repo_digests or []) if REPO_DIGEST.fullmatch(x or "") and x.startswith(repo + "@sha256:")]
         if len(matching) != 1:
             raise ValueError(f"expected one immutable GHCR RepoDigest for {role}")
-        identity = (image_id, matching[0])
-        if group in images_by_group and images_by_group[group] != identity:
-            if images_by_group[group][0] != image_id:
-                raise ValueError(f"roles for {repo} have different Docker image IDs")
-            raise ValueError(f"roles for {repo} have different image digests")
-        images_by_group[group] = identity
         versions.add(version)
-        if group in component_identities and component_identities[group] != (version, source):
-            raise ValueError(f"roles for {repo} have mixed release versions or mixed source revisions")
-        component_identities[group] = (version, source)
+        source_identity = (image_id, matching[0])
+        if (group, source) in images_by_source and images_by_source[(group, source)] != source_identity:
+            raise ValueError(f"roles for {repo} with the same source SHA have different image identities")
+        images_by_source[(group, source)] = source_identity
+        identities_by_group.setdefault(group, set()).add((version, source, image_id, matching[0]))
         result[role] = {"name": name, "version": version, "source_sha": source,
-                        "image_id": image_id, "repo_digest": matching[0]}
+                        "image_id": image_id, "repo_digest": matching[0],
+                        "started_at": row.get("started_at")}
     core_source = result["gpoint-core-api"]["source_sha"]
+    mixed_components = sorted(group for group, identities in identities_by_group.items() if len(identities) > 1)
     return {"version": next(iter(versions)) if len(versions) == 1 else None,
             "source_sha": core_source, "roles": result,
-            "missing_roles": sorted(missing_roles)}
+            "missing_roles": sorted(missing_roles), "mixed_components": mixed_components}
 
 
 def inspect_running_roles() -> list[dict]:
@@ -90,6 +89,7 @@ def inspect_running_roles() -> list[dict]:
                     else labels.get("org.opencontainers.image.revision"))
         rows.append({"role": role, "name": name, "version": version,
                      "image_id": image_id,
+                     "started_at": inspected.get("State", {}).get("StartedAt"),
                      "revision": revision,
                      "repo_digests": image.get("RepoDigests") or []})
     return rows

@@ -99,7 +99,9 @@ ROLE_IDENTITY_GROUP = {
     **{role: "MINIAPP" for role in COMPONENT_ROLES["MINIAPP"]},
     "gpoint-eros-pilot-engine": "EROS_ENGINE",
 }
-BASELINE_ROLES = set(ROLE_REPOSITORIES)
+# Core Bot is optional until its production credentials and polling behavior
+# are explicitly enabled. A missing Bot must not be bootstrapped by a release.
+BASELINE_ROLES = set(ROLE_REPOSITORIES) - {"gpoint-core-bot"}
 EXACT_SHA = re.compile(r"^[0-9a-f]{40}$")
 EXACT_VERSION = re.compile(r"^[0-9a-f]{40}-[0-9]+-[0-9]+$")
 EXACT_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -280,7 +282,7 @@ def _validate_role_inventory(inventory: dict) -> dict[str, dict[str, str]]:
             or len(declared_missing) != len(set(declared_missing))
             or set(declared_missing) != missing):
         raise ValueError("verified role inventory missing-role declaration is inconsistent")
-    repository_identities: dict[str, tuple[str, str]] = {}
+    image_identities_by_source: dict[tuple[str, str], tuple[str, str]] = {}
     for role, repository in ROLE_REPOSITORIES.items():
         if role not in roles:
             continue
@@ -293,19 +295,31 @@ def _validate_role_inventory(inventory: dict) -> dict[str, dict[str, str]]:
         if (not isinstance(version, str) or not EXACT_VERSION.fullmatch(version)
                 or name != f"{role}-{version}"
                 or not isinstance(source, str) or not EXACT_SHA.fullmatch(source)
+                or not version.startswith(source + "-")
                 or not isinstance(image_id, str) or not EXACT_DIGEST.fullmatch(image_id)
                 or not isinstance(repo_digest, str)
                 or not re.fullmatch(re.escape(repository) + r"@sha256:[0-9a-f]{64}", repo_digest)):
             raise ValueError("verified role inventory contains an invalid runtime identity")
-        # One image repository may serve independently-versioned Kamal services.
-        # The image bytes/digest must agree, while each service's version/source
-        # identity remains role-specific.
-        identity = (image_id, repo_digest)
         group = ROLE_IDENTITY_GROUP[role]
-        if group in repository_identities and repository_identities[group] != identity:
-            raise ValueError("shared image roles have different image identities")
-        repository_identities[group] = identity
+        key = (group, source)
+        identity = (image_id, repo_digest)
+        if key in image_identities_by_source and image_identities_by_source[key] != identity:
+            raise ValueError("shared image roles with the same source SHA have different image identities")
+        image_identities_by_source[key] = identity
     return roles
+
+
+def mixed_component_baselines(inventory: dict) -> set[str]:
+    """Return components whose enabled roles have independently confirmed releases."""
+    roles = _validate_role_inventory(inventory)
+    identities: dict[str, set[tuple[str, str, str, str]]] = {}
+    for role, row in roles.items():
+        component = ROLE_IDENTITY_GROUP[role]
+        if component == "EROS_ENGINE":
+            component = "EROS"
+        identities.setdefault(component, set()).add((row["version"], row["source_sha"],
+                                                       row["image_id"], row["repo_digest"]))
+    return {component for component, values in identities.items() if len(values) > 1}
 
 
 def _component_paths(path: str) -> set[str]:
@@ -471,16 +485,32 @@ def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dic
     component_sources = installed_component_sources(inventory)
     plan = classify_component_build_plan(repo, candidate, component_sources)
     components = set(str(plan["deploy_scope"]).split("+")) - {"NONE"}
+    mixed = mixed_component_baselines(inventory)
+    if "CORE" in mixed:
+        core_source = component_sources["CORE"]
+        for role in ALL_COMPONENT_ROLES["CORE"]:
+            row = inventory["roles"].get(role)
+            if row is None or row["source_sha"] in {core_source, candidate}:
+                continue
+            ancestor = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", row["source_sha"], candidate],
+                cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            if ancestor.returncode:
+                raise ValueError(f"{role} production source is not an ancestor of the candidate")
+    components.update(mixed)
     # The production topology has five required runtime roles.
     missing_required = BASELINE_ROLES - set(inventory["roles"])
     for component, roles in ALL_COMPONENT_ROLES.items():
         if missing_required.intersection(roles):
             components.add(component)
-    forced = components != (set(str(plan["deploy_scope"]).split("+")) - {"NONE"})
+    planned_components = set(str(plan["deploy_scope"]).split("+")) - {"NONE"}
+    forced = components != planned_components
     scope_name = "+".join(sorted(components)) if components else "NONE"
     result = {
         "scope": scope_name,
-        "reason": "missing_runtime_roles" if forced else str(plan["reason"]),
+        "reason": ("mixed_component_baseline" if mixed else
+                   "missing_runtime_roles" if forced else str(plan["reason"])),
         "deploy_core": "CORE" in components,
         "deploy_miniapp": "MINIAPP" in components,
         "deploy_eros": "EROS" in components,
@@ -503,6 +533,8 @@ def expected_runtime_inventory(scope: str, inventory: dict, candidate: str, vers
             or not EXACT_VERSION.fullmatch(version or "") or not version.startswith(candidate + "-")):
         raise ValueError("candidate component runtime plan is malformed")
     updated = scope_components
+    if "CORE" in mixed_component_baselines(inventory) and "CORE" not in updated:
+        raise ValueError("mixed CORE baseline requires a full Core rollout")
     digests = {"CORE": app_digest, "MINIAPP": miniapp_digest, "EROS": eros_digest}
     for component, value in digests.items():
         if component in updated and not EXACT_DIGEST.fullmatch(value or ""):
@@ -514,6 +546,8 @@ def expected_runtime_inventory(scope: str, inventory: dict, candidate: str, vers
         for role in component_roles:
             baseline = roles.get(role)
             if component in updated:
+                if role == "gpoint-core-bot" and baseline is None:
+                    continue
                 repository_digest = f"{ROLE_REPOSITORIES[role]}@{digests[component]}"
                 inventory_out[role] = {"version": version, "sourceSha": candidate,
                                        "repositoryDigest": repository_digest,

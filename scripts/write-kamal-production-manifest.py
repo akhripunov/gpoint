@@ -23,6 +23,7 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 OCI_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 ROLE_COMPONENTS = {role: component for component, roles in ALL_COMPONENT_ROLES.items()
                    for role in roles}
+OPTIONAL_RUNTIME_ROLES = {"gpoint-core-bot"}
 
 
 def docker_json(*args: str) -> object:
@@ -115,7 +116,9 @@ def main() -> int:
     except (ValueError, UnicodeError, json.JSONDecodeError):
         raise SystemExit("ordinary manifest expected component role inventory is malformed") from None
     expected_roles = expected_role_plan.get("roles") if isinstance(expected_role_plan, dict) else None
-    if not isinstance(expected_roles, dict) or set(expected_roles) != set(ROLE_REPOSITORIES):
+    required_roles = set(ROLE_REPOSITORIES) - OPTIONAL_RUNTIME_ROLES
+    if (not isinstance(expected_roles, dict) or not required_roles.issubset(expected_roles)
+            or not set(expected_roles).issubset(ROLE_REPOSITORIES)):
         raise SystemExit("ordinary manifest role inventory is incomplete")
     role_repositories = {role: ROLE_REPOSITORIES[role] for role in expected_roles}
     role_components = {role: ROLE_COMPONENTS[role] for role in expected_roles}
@@ -183,9 +186,10 @@ def main() -> int:
     expected_services = [
         ("gpoint-core-api", "ghcr.io/akhripunov/gpoint-runtime", args.app_digest),
         ("gpoint-core-worker", "ghcr.io/akhripunov/gpoint-runtime", args.app_digest),
-        ("gpoint-core-bot", "ghcr.io/akhripunov/gpoint-runtime", args.app_digest),
         ("gpoint-miniapp-web", "ghcr.io/akhripunov/gpoint-miniapp", args.miniapp_digest),
     ]
+    if "gpoint-core-bot" in expected_roles:
+        expected_services.append(("gpoint-core-bot", "ghcr.io/akhripunov/gpoint-runtime", args.app_digest))
     if "gpoint-eros-pilot-engine" in expected_role_plan["roles"]:
         expected_services.extend([
             ("gpoint-eros-pilot-engine", "ghcr.io/akhripunov/gpoint-eros", args.eros_digest),

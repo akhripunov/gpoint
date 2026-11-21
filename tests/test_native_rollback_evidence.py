@@ -22,9 +22,11 @@ REPOS = {
 }
 
 
-def evidence():
+def evidence(*, include_bot=True):
     services = []
     for role, component in MODULE.ROLE_IMAGES.items():
+        if role == "gpoint-core-bot" and not include_bot:
+            continue
         key = component.lower()
         services.append({
             "name": f"{role}-{VERSION}", "revision": SHA, "running": True,
@@ -71,6 +73,14 @@ def test_accepts_exact_successful_five_role_manifest_with_immutable_digests():
     assert result["run_id"] == RUN_ID
     assert result["digests"] == DIGESTS
     assert set(result["component_sources"]) == {"core", "miniapp", "eros"}
+    assert result["core_bot_enabled"] is True
+
+
+def test_accepts_exact_rollback_manifest_without_disabled_core_bot():
+    result = verify(evidence(include_bot=False))
+    assert result["core_bot_enabled"] is False
+    assert result["component_versions"]["core"] == VERSION
+    assert result["component_sources"]["core"] == SHA
 
 
 def test_accepts_native_manifest_status_url_with_exact_component_sources():

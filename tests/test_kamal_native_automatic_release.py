@@ -677,3 +677,56 @@ def test_topology_preflight_allows_missing_bootstrap_roles_and_absent_proxy_only
     assert "shared_postgres_1" in topology["run"] and "shared_redis_1" in topology["run"]
     assert "DB_MOUNTS_SHA256" in topology["run"] and "REDIS_MOUNTS_SHA256" in topology["run"]
     assert 'docker inspect --format \'{{.State.Running}}\' kamal-proxy' in topology["run"]
+
+
+def test_rollback_preflight_checks_retained_target_after_consumer_stopped():
+    steps = _ROLLBACK["jobs"]["deploy"]["steps"]
+    preflight = next(step for step in steps if step.get("id") == "baseline")
+    role_checks = preflight["run"].split("rollback_roles=(", 1)[1]
+    role_checks = "rollback_roles=(" + role_checks.split('\ndb_mounts=', 1)[0]
+    script = r'''
+set -euo pipefail
+version_holder=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+core_version="$version_holder-91-1"
+miniapp_version="$core_version"
+core_sha="$version_holder"
+miniapp_sha="$version_holder"
+core='ghcr.io/akhripunov/gpoint-runtime@sha256:example'
+miniapp="$core"
+bot_enabled=false
+docker() {
+    case "$1 $2" in
+      "ps -q")
+        case "$4" in
+          'name=^/gpoint-core-worker-') printf '%s' "$MOCK_WORKER" ;;
+          'name=^/gpoint-core-bot-') ;;
+          *) printf 'current\n' ;;
+        esac ;;
+      "ps -aq")
+        if [[ "$4" != *gpoint-core-worker* || "$MOCK_RETAINED" == true ]]; then
+          printf 'retained\n'
+        fi ;;
+      "inspect --format")
+        case "$3" in
+          '{{.Name}}') printf '/%s\n' "$prefix-$core_version" ;;
+          '{{.Image}}') printf 'image\n' ;;
+          *) printf '%s\n' "$version_holder" ;;
+        esac ;;
+      "image inspect") printf '["%s"]\n' "$core" ;;
+      *) return 2 ;;
+    esac
+}
+''' + role_checks
+    env = {**os.environ, "MOCK_WORKER": "", "MOCK_RETAINED": "true"}
+    result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert "ROLLBACK_WORKER_RUNNING=false" in result.stdout
+
+    for changes in ({"MOCK_RETAINED": "false"}, {"MOCK_WORKER": "first\nsecond\n"}):
+        result = subprocess.run(["bash", "-c", script], env={**env, **changes}, capture_output=True)
+        assert result.returncode != 0
+
+    apply = next(step for step in steps if step.get("id") == "rollback_apply")
+    assert apply["env"]["ROLLBACK_WORKER_RUNNING"] == "${{ steps.baseline.outputs.ROLLBACK_WORKER_RUNNING }}"
+    assert 'if [[ "$ROLLBACK_WORKER_RUNNING" == true ]]; then' in apply["run"]
+    assert 'verify_role gpoint-core-worker "$CORE_VERSION" "$CORE_SOURCE_SHA"' in apply["run"]
