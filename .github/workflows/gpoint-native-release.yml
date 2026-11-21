@@ -793,9 +793,9 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$GPOINT_PRODUCTION_HOST" || { echo 'GPOINT_KAMAL_HOST is required' >&2; exit 1; }
-          test -n "$SSH_PRIVATE_KEY" && test -n "$VERIFIED_KNOWN_HOSTS" || {
+          if [[ -z "$SSH_PRIVATE_KEY" || -z "$VERIFIED_KNOWN_HOSTS" ]]; then
             echo 'required production SSH credentials are missing' >&2; exit 1;
-          }
+          fi
           [[ "$GPOINT_PRODUCTION_HOST" == "95.133.236.59" ]] || {
             echo 'production target must match the verified Layer7 address' >&2; exit 1;
           }

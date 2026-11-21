@@ -293,6 +293,7 @@ def test_native_release_rejects_non_layer7_ssh_target_before_remote_setup():
 
     assert guard is not None, "the release must reject a host other than the documented Layer7 VPS"
     assert "ssh-keygen -F" in script
+    assert 'if [[ -z "$SSH_PRIVATE_KEY" || -z "$VERIFIED_KNOWN_HOSTS" ]]; then' in script
     assert script.index(guard) < script.index('ssh-keygen -F "$GPOINT_PRODUCTION_HOST"')
     assert credentials_index < next(i for i, step in enumerate(steps)
                                     if step.get("uses", "").startswith("actions/setup-python@"))
