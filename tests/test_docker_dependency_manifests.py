@@ -123,6 +123,7 @@ def test_miniapp_target_does_not_depend_on_backend_compilation():
     assert 'build' not in dependency_closure('miniapp-runtime')
     miniapp_instructions = '\n'.join(stages['miniapp-build']['instructions'])
     assert 'pnpm install --filter @gpoint/miniapp --frozen-lockfile' in miniapp_instructions
+    assert 'COPY packages/contracts/src ./packages/contracts/src' in miniapp_instructions
     assert 'pnpm --filter @gpoint/miniapp build' in miniapp_instructions
     assert 'pnpm --filter @gpoint/api build' not in miniapp_instructions
     assert 'pnpm --filter @gpoint/worker build' not in miniapp_instructions

@@ -45,6 +45,7 @@ COPY --from=dependency-manifests /packages/contracts/package.json packages/contr
 COPY --from=dependency-manifests /packages/db/package.json packages/db/package.json
 RUN --mount=type=cache,id=gpoint-pnpm-store,target=/pnpm/store pnpm install --filter @gpoint/miniapp --frozen-lockfile
 COPY tsconfig.base.json ./tsconfig.base.json
+COPY packages/contracts/src ./packages/contracts/src
 COPY apps/miniapp ./apps/miniapp
 ARG GPOINT_BUILD_SHA
 ENV GPOINT_BUILD_SHA=${GPOINT_BUILD_SHA}
