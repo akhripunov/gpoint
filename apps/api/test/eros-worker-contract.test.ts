@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { ErosWorkerGatewayController } from '../src/eros-worker-gateway.js';
 import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, deriveBridgeInferenceIdentity, parseBridgeRequest, parseErosEmbeddingRequest, signBridgeIdentity, verifyBridgeIdentity, workerChatCompletionRequest } from '../src/eros-worker-contract.js';
 
 const secret = new TextEncoder().encode('local-test-bridge-signing-secret-at-least-32-bytes');
@@ -178,4 +179,41 @@ test('embedding proxy contract requires exact Qwen model and native 512-dimensio
   assert.equal(output.data[1].index, 1);
   assert.throws(() => buildOpenAiEmbeddingResponse(request.model, [Array(1024).fill(0)]));
   assert.throws(() => buildOpenAiEmbeddingResponse(request.model, [Array(512).fill(Number.NaN)]));
+});
+
+test('Core embeddings call the private Ollama alias with the pinned Qwen contract', async () => {
+  const env = {
+    key: process.env.EROS_EMBEDDING_API_KEY,
+    url: process.env.EROS_OLLAMA_EMBEDDING_URL,
+  };
+  const originalFetch = globalThis.fetch;
+  let calledUrl = '';
+  let calledInit: RequestInit | undefined;
+  process.env.EROS_EMBEDDING_API_KEY = 'local-embedding-test-key';
+  process.env.EROS_OLLAMA_EMBEDDING_URL = 'http://ollama:11434/api/embed';
+  globalThis.fetch = async (input, init) => {
+    calledUrl = String(input);
+    calledInit = init;
+    return new Response(JSON.stringify({ embeddings: [Array.from({ length: 512 }, (_, index) => index / 512)] }), { status: 200 });
+  };
+  try {
+    const controller = Object.create(ErosWorkerGatewayController.prototype) as ErosWorkerGatewayController;
+    const result = await controller.embeddings(
+      { authorization: 'Bearer local-embedding-test-key' },
+      { model: 'qwen3-embedding:0.6b', input: 'private network embedding', dimensions: 512 },
+    );
+    assert.equal(calledUrl, 'http://ollama:11434/api/embed');
+    assert.equal(calledInit?.method, 'POST');
+    assert.equal(calledInit?.redirect, 'error');
+    assert.deepEqual(JSON.parse(String(calledInit?.body)), {
+      model: 'qwen3-embedding:0.6b', input: ['private network embedding'], dimensions: 512, truncate: false,
+    });
+    assert.equal((result as { data: { embedding: number[] }[] }).data[0].embedding.length, 512);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (env.key === undefined) delete process.env.EROS_EMBEDDING_API_KEY;
+    else process.env.EROS_EMBEDDING_API_KEY = env.key;
+    if (env.url === undefined) delete process.env.EROS_OLLAMA_EMBEDDING_URL;
+    else process.env.EROS_OLLAMA_EMBEDDING_URL = env.url;
+  }
 });
