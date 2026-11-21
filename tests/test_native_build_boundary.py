@@ -139,10 +139,9 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(tests["outputs"], {
             "mode": "${{ steps.intent.outputs.mode }}",
             "deploy": "${{ steps.intent.outputs.deploy }}",
-            "eros_e2e_required": "${{ steps.eros_scope.outputs.required }}",
         })
         eros_scope = next(step for step in tests["steps"] if step.get("id") == "eros_scope")
-        self.assertNotIn("matrix.suite == 'workspace'", eros_scope.get("if", ""))
+        self.assertEqual(eros_scope.get("if"), "matrix.suite == 'workspace'")
         required_steps = {
             "Validate GitHub Actions workflow": "workspace",
             "Validate pinned Kamal configs and shared proxy routing": "workspace",

@@ -267,6 +267,30 @@ def test_eros_e2e_accumulates_after_failed_release_and_fails_safe_on_unknown_bas
     assert MODULE.eros_e2e_required(repo, "f" * 40, next_push)
 
 
+@pytest.mark.parametrize("outcome", ["skipped", "failure", "missing"])
+def test_live_eros_baseline_divergence_blocks_without_successful_workspace_e2e(tmp_path, outcome):
+    repo, live_eros_sha = component_repo(tmp_path)
+    candidate = commit_change(repo, "services/eros-engine/src/main.rs", "fn main() {}\n// changed\n")
+    github_deployment_eros_sha = candidate
+
+    # The successful Deployment manifest claims the candidate Eros SHA, so the
+    # test planner alone would skip. The actual installed Docker/Kamal Eros SHA
+    # still has cumulative Eros changes and must require a successful E2E step.
+    assert not MODULE.eros_e2e_required(repo, github_deployment_eros_sha, candidate)
+    assert MODULE.eros_e2e_required(repo, live_eros_sha, candidate)
+    with pytest.raises(ValueError, match="live Eros baseline requires successful Eros E2E"):
+        MODULE.require_live_eros_e2e_success(repo, live_eros_sha, candidate, outcome)
+
+
+def test_live_eros_baseline_divergence_allows_successful_workspace_e2e(tmp_path):
+    repo, live_eros_sha = component_repo(tmp_path)
+    candidate = commit_change(repo, "services/eros-engine/src/main.rs", "fn main() {}\n// changed\n")
+
+    assert MODULE.require_live_eros_e2e_success(
+        repo, live_eros_sha, candidate, "success",
+    ) is True
+
+
 def test_live_deploy_components_are_independently_scoped():
     assert set(MODULE.ALL_COMPONENT_ROLES) == {"CORE", "MINIAPP", "EROS"}
     assert not any("AGATA" in role or "RELAY" in role for role in MODULE.ROLE_REPOSITORIES)

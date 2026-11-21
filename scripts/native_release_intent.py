@@ -198,6 +198,15 @@ def eros_e2e_required(repo: Path, baseline: str, candidate: str) -> bool:
         return True
 
 
+def require_live_eros_e2e_success(repo: Path, live_baseline: str, candidate: str,
+                                 step_outcome: str) -> bool:
+    """Fail closed when live Eros changes lack a successful workspace E2E step."""
+    required = eros_e2e_required(repo, live_baseline, candidate)
+    if required and step_outcome != "success":
+        raise ValueError("live Eros baseline requires successful Eros E2E")
+    return required
+
+
 def is_infrastructure_change(changed_paths: set[str] | frozenset[str]) -> bool:
     return any(path in PRODUCTION_KAMAL_CONFIGS | {".dockerignore"}
                or any(path.startswith(prefix) for prefix in INFRASTRUCTURE_PREFIXES)

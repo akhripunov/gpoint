@@ -58,7 +58,6 @@ jobs:
     outputs:
       mode: ${{ steps.intent.outputs.mode }}
       deploy: ${{ steps.intent.outputs.deploy }}
-      eros_e2e_required: ${{ steps.eros_scope.outputs.required }}
     # Playwright's --with-deps package list is not available on the moving
     # ubuntu-latest image; pin the test matrix to its supported Ubuntu image.
     runs-on: ubuntu-24.04
@@ -134,6 +133,7 @@ jobs:
           python3 scripts/native_release_intent.py "${args[@]}" >> "$GITHUB_OUTPUT"
       - name: Resolve whether cumulative changes require Eros E2E
         id: eros_scope
+        if: matrix.suite == 'workspace'
         env:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
@@ -912,6 +912,24 @@ jobs:
           set -euo pipefail
           python3 scripts/resolve_native_environment_deployment.py \
             --repository "$REPOSITORY" --latest-successful-native-sha >> "$GITHUB_OUTPUT"
+      - name: Read exact Tests workspace Eros E2E outcome
+        if: inputs.mode != 'rollback'
+        id: eros_e2e_evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          outcome="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" --jq '
+            [.jobs[] | select(.name == "Tests (workspace)")][0] as $workspace |
+            if $workspace == null then "missing_workspace_job"
+            elif $workspace.conclusion != "success" then "workspace_" + ($workspace.conclusion // "incomplete")
+            else
+              [$workspace.steps[] | select(.name == "Run stock Eros SQLx and synthetic conversation E2E")][0] as $e2e |
+              if $e2e == null then "missing_e2e_step" else ($e2e.conclusion // "incomplete") end
+            end')"
+          [[ "$outcome" =~ ^(success|skipped|failure|cancelled|missing_workspace_job|missing_e2e_step|workspace_[a-z]+|incomplete)$ ]]
+          echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
+          echo "GPOINT_TESTS_WORKSPACE_EROS_E2E_OUTCOME=$outcome" >> "$GITHUB_STEP_SUMMARY"
       - name: Plan exact component-scoped Kamal update from live baseline
         if: (inputs.mode != 'rollback')
         id: component_plan
@@ -920,7 +938,7 @@ jobs:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
           EROS_DIGEST: ${{ needs.build.outputs.eros_digest }}
-          E2E_REQUIRED: ${{ needs.tests.outputs.eros_e2e_required }}
+          E2E_OUTCOME: ${{ steps.eros_e2e_evidence.outputs.outcome }}
           EVENT_NAME: ${{ github.event_name }}
           INFRASTRUCTURE_BASELINE_SHA: ${{ steps.infrastructure_baseline.outputs.sha }}
         run: |
@@ -932,7 +950,7 @@ jobs:
           from native_release_intent import (ALL_COMPONENT_ROLES, ROLE_REPOSITORIES,
                                              classify_component_scope, expected_runtime_inventory_b64,
                                              changed_paths,
-                                             is_infrastructure_change, eros_e2e_required)
+                                             is_infrastructure_change, require_live_eros_e2e_success)
 
           candidate = os.environ["CANDIDATE_SHA"]
           baseline = json.loads(os.environ["BASELINE_ROLE_INVENTORY"])
@@ -940,10 +958,8 @@ jobs:
           scope_components = set(scope["scope"].split("+")) - {"NONE"}
           live_eros = baseline["roles"].get("gpoint-eros-pilot-engine")
           live_eros_source = live_eros.get("source_sha", "") if live_eros else ""
-          live_eros_e2e_required = (True if not re.fullmatch(r"[0-9a-f]{40}", live_eros_source)
-                                    else eros_e2e_required(Path.cwd(), live_eros_source, candidate))
-          if live_eros_e2e_required and os.environ["E2E_REQUIRED"] != "true":
-              raise SystemExit("live Eros baseline requires Eros E2E, but Tests did not run it; refusing Deploy")
+          live_eros_e2e_required = require_live_eros_e2e_success(
+              Path.cwd(), live_eros_source, candidate, os.environ["E2E_OUTCOME"])
           print("live_eros_e2e_required=" + str(live_eros_e2e_required).lower())
           if os.environ["EVENT_NAME"] == "push":
               infrastructure_baseline = os.environ["INFRASTRUCTURE_BASELINE_SHA"]

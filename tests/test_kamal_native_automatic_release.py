@@ -121,11 +121,16 @@ def test_build_unconditionally_publishes_all_three_images_and_live_inventory_sco
     assert 'no prebuilt candidate Core image' not in migration_plan["run"]
 
     tests = workflow["jobs"]["tests"]
-    assert tests["outputs"]["eros_e2e_required"] == "${{ steps.eros_scope.outputs.required }}"
+    assert "eros_e2e_required" not in tests["outputs"]
     eros_scope = next(step for step in tests["steps"] if step.get("id") == "eros_scope")
-    assert "matrix.suite == 'workspace'" not in eros_scope.get("if", "")
-    assert component_plan["env"]["E2E_REQUIRED"] == "${{ needs.tests.outputs.eros_e2e_required }}"
-    assert "eros_e2e_required" in plan_run
+    assert eros_scope["if"] == "matrix.suite == 'workspace'"
+    evidence = next(step for step in deploy_steps if step.get("id") == "eros_e2e_evidence")
+    assert evidence["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert 'select(.name == "Tests (workspace)")' in evidence["run"]
+    assert 'select(.name == "Run stock Eros SQLx and synthetic conversation E2E")' in evidence["run"]
+    assert component_plan["env"]["E2E_OUTCOME"] == "${{ steps.eros_e2e_evidence.outputs.outcome }}"
+    assert "require_live_eros_e2e_success" in plan_run
+    assert "E2E_REQUIRED" not in plan_run
 
 
 def test_merge_bot_can_deploy_exact_current_main_sha_automatically(tmp_path):
