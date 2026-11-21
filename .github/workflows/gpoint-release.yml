@@ -1,4 +1,4 @@
-name: GPoint Native Release
+name: GPoint Release Pipeline
 
 on:
   push:
@@ -52,6 +52,8 @@ jobs:
     permissions:
       contents: read
       deployments: read
+      actions: read
+      pull-requests: read
     # Both required suites compute identical release intent outputs.
     outputs:
       mode: ${{ steps.intent.outputs.mode }}
@@ -94,52 +96,9 @@ jobs:
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-          token: ''
+          token: ${{ github.token }}
           predicate-quantifier: 'some-with-excludes'
-          filters: |
-            core:
-              - 'apps/api/**'
-              - 'apps/bot/**'
-              - 'apps/worker/**'
-              - 'config/deploy.yml'
-              - 'config/deploy.eros-api.yml'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - 'pnpm-workspace.yaml'
-              - 'tsconfig.base.json'
-              - 'packages/**'
-              - 'infra/production/Gpoint.Dockerfile'
-            miniapp:
-              - 'apps/miniapp/**'
-              - 'apps/api/package.json'
-              - 'apps/bot/package.json'
-              - 'apps/worker/package.json'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - 'pnpm-workspace.yaml'
-              - 'tsconfig.base.json'
-              - 'packages/**'
-              - 'infra/production/Gpoint.Dockerfile'
-              - 'infra/production/nginx-miniapp.conf'
-            eros_engine:
-              - 'services/eros-engine/**'
-              - '!services/eros-engine/*.toml'
-              - '!services/eros-engine/eros-pilot-embedding-relay*'
-              - '!services/eros-engine/open-mac-ollama-tunnel.sh'
-            database:
-              - 'packages/db/prisma/schema.prisma'
-              - 'packages/db/prisma/migrations/**'
-            infrastructure:
-              - '.github/**'
-              - '.kamal/**'
-              - 'config/deploy.yml'
-              - 'config/deploy.eros-api.yml'
-              - 'config/deploy.ollama.yml'
-              - 'config/deploy.eros.yml'
-              - 'config/deploy.miniapp.yml'
-              - 'infra/production/**'
-              - 'scripts/**'
-              - 'systemd/**'
+          filters: .github/filters/native-release.json
       - name: Read pinned Eros upstream source
         shell: bash
         run: |
@@ -147,25 +106,6 @@ jobs:
           upstream="$(cat services/eros-engine/upstream.sha)"
           [[ "$upstream" =~ ^[0-9a-f]{40}$ ]]
           echo "EROS_UPSTREAM_SHA=$upstream" >> "$GITHUB_ENV"
-      - name: Resolve verified production baseline for accumulated infrastructure scope
-        id: infrastructure_baseline
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          CANDIDATE_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          plan="$RUNNER_TEMP/gpoint-infrastructure-baseline.json"
-          python3 scripts/resolve_native_build_scope.py \
-            --candidate-sha "$CANDIDATE_SHA" --repository "$REPOSITORY" > "$plan"
-          python3 - "$plan" >> "$GITHUB_OUTPUT" <<'PY'
-          import json, sys
-          with open(sys.argv[1], encoding="utf-8") as stream:
-              plan = json.load(stream)
-          print("sha=" + (plan["baseline_sha"] if plan["status"] == "VERIFIED" else ""))
-          print("eros_engine=" + str("EROS" in plan["build_components"]).lower())
-          PY
       - name: Fail closed unless the event and complete path set allow a release
         id: intent
         env:
@@ -179,7 +119,6 @@ jobs:
           EVENT_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           MODE: ${{ inputs.mode || 'deploy' }}
-          INFRASTRUCTURE_BASELINE_SHA: ${{ steps.infrastructure_baseline.outputs.sha }}
           APPROVE_PRODUCTION: ${{ inputs.approve_production || false }}
         run: |
           set -euo pipefail
@@ -191,28 +130,45 @@ jobs:
           [[ -n "$EVENT_COMMIT_MESSAGE" ]] && args+=(--commit-message "$EVENT_COMMIT_MESSAGE")
           [[ "$MODE" == rollback ]] && args+=(--rollback)
           [[ "$APPROVE_PRODUCTION" == true ]] && args+=(--approve-production)
-          [[ -n "$INFRASTRUCTURE_BASELINE_SHA" ]] && args+=(--infrastructure-baseline-sha "$INFRASTRUCTURE_BASELINE_SHA")
           python3 scripts/native_release_intent.py "${args[@]}" >> "$GITHUB_OUTPUT"
-      - name: Resolve exact production component scope for manual Deploy
-        id: dispatch_build_scope
-        if: github.event_name == 'workflow_dispatch' && matrix.suite == 'workspace' && steps.intent.outputs.mode == 'DEPLOY'
+      - name: Resolve whether cumulative changes require Eros E2E
+        id: eros_scope
+        if: matrix.suite == 'workspace'
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+          RELEASE_MODE: ${{ inputs.mode || 'deploy' }}
+          PR_EROS_FILTER: ${{ steps.filter.outputs.eros_e2e || 'false' }}
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         run: |
           set -euo pipefail
-          plan="$RUNNER_TEMP/gpoint-dispatch-build-scope.json"
-          python3 scripts/resolve_native_build_scope.py \
-            --candidate-sha "$CANDIDATE_SHA" --repository "$REPOSITORY" > "$plan"
-          python3 - "$plan" >> "$GITHUB_OUTPUT" <<'PY'
-          import json, sys
-          with open(sys.argv[1], encoding="utf-8") as stream:
-              plan = json.load(stream)
-          if plan.get("status") not in {"VERIFIED", "BOOTSTRAP_FULL"}:
-              raise SystemExit("production component baseline is unknown for manual Deploy")
-          print("eros_engine=" + str("EROS" in plan["build_components"]).lower())
+          required=false
+          if [[ "$EVENT_NAME" == pull_request ]]; then
+            required="$PR_EROS_FILTER"
+          elif [[ "$RELEASE_MODE" == rollback ]]; then
+            required=false
+          else
+            baseline="$(python3 scripts/resolve_native_environment_deployment.py \
+              --repository "$REPOSITORY" --latest-successful-native-sha 2>/dev/null \
+              | sed -n 's/^eros_source_sha=//p' || true)"
+            if [[ ! "$baseline" =~ ^[0-9a-f]{40}$ ]]; then
+              echo 'Eros baseline is unavailable; requiring Eros E2E as the fail-safe.'
+              required=true
+            else
+              required="$(python3 - "$baseline" "$EVENT_SHA" <<'PY'
+          from pathlib import Path
+          import sys
+          sys.path.insert(0, str(Path.cwd() / "scripts"))
+          from native_release_intent import eros_e2e_required
+          print(str(eros_e2e_required(Path.cwd(), sys.argv[1], sys.argv[2])).lower())
           PY
+              )"
+            fi
+          fi
+          [[ "$required" == true || "$required" == false ]]
+          echo "required=$required" >> "$GITHUB_OUTPUT"
+          echo "GPOINT_EROS_E2E_REQUIRED=$required" >> "$GITHUB_STEP_SUMMARY"
       - name: Seed pinned Go 1.25.3 in Actions tool cache
         if: matrix.suite == 'workspace'
         env:
@@ -239,7 +195,7 @@ jobs:
         if: matrix.suite == 'workspace'
         run: >-
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-          .github/workflows/gpoint-native-release.yml
+          .github/workflows/gpoint-release.yml
       - name: Validate pinned Kamal configs and shared proxy routing
         if: matrix.suite == 'workspace'
         env:
@@ -249,12 +205,12 @@ jobs:
           ./scripts/check-kamal-configs.sh
           ./scripts/test-kamal-proxy-integration.sh
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-        if: matrix.suite == 'workspace' && (steps.filter.outputs.eros_engine == 'true' || steps.infrastructure_baseline.outputs.eros_engine == 'true' || steps.dispatch_build_scope.outputs.eros_engine == 'true' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'me-62-full-build')) || github.event.before == '0000000000000000000000000000000000000000')
+        if: matrix.suite == 'workspace' && steps.eros_scope.outputs.required == 'true'
         with:
           platforms: linux/amd64
       - name: Build stock Eros test image
         id: eros_test_image
-        if: matrix.suite == 'workspace' && (steps.filter.outputs.eros_engine == 'true' || steps.infrastructure_baseline.outputs.eros_engine == 'true' || steps.dispatch_build_scope.outputs.eros_engine == 'true' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'me-62-full-build')) || github.event.before == '0000000000000000000000000000000000000000')
+        if: matrix.suite == 'workspace' && steps.eros_scope.outputs.required == 'true'
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
           context: https://github.com/etherfunlab/eros-engine.git#${{ env.EROS_UPSTREAM_SHA }}
@@ -276,7 +232,7 @@ jobs:
           cache-to: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && 'type=gha,scope=gpoint-eros-test,mode=max,timeout=45s,ignore-error=true' || '' }}
       - name: Run stock Eros SQLx and synthetic conversation E2E
         id: eros_e2e
-        if: matrix.suite == 'workspace' && (steps.filter.outputs.eros_engine == 'true' || steps.infrastructure_baseline.outputs.eros_engine == 'true' || steps.dispatch_build_scope.outputs.eros_engine == 'true' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'me-62-full-build')) || github.event.before == '0000000000000000000000000000000000000000')
+        if: matrix.suite == 'workspace' && steps.eros_scope.outputs.required == 'true'
         run: |
           set -euo pipefail
           image="gpoint-eros:stock-$EROS_UPSTREAM_SHA"
@@ -411,7 +367,8 @@ jobs:
           unset DATABASE_URL SHADOW_DATABASE_URL; python -m pytest -q
           tests/test_simple_release_architecture.py
           tests/test_native_build_boundary.py
-          tests/test_native_build_scope.py
+          tests/test_native_change_surface.py
+          tests/test_docker_dependency_manifests.py
           tests/test_prepush_runner.py
           tests/test_release_scope_consistency.py
           tests/test_release_routing_matrix.py
@@ -445,23 +402,18 @@ jobs:
       ((github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)) ||
-       (github.event_name != 'pull_request' && needs.tests.outputs.mode == 'DEPLOY'))
+       (github.event_name != 'pull_request' && needs.tests.outputs.mode == 'DEPLOY' &&
+        needs.tests.outputs.deploy == 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       contents: read
       packages: write
-      deployments: read
-      actions: read
     outputs:
       app_digest: ${{ steps.app.outputs.digest }}
       miniapp_digest: ${{ steps.miniapp.outputs.digest }}
       eros_digest: ${{ steps.eros.outputs.digest }}
       image_version: ${{ steps.image_version.outputs.image_version }}
-      build_components: ${{ steps.build_scope.outputs.build_components }}
-      baseline_mode: ${{ steps.build_scope.outputs.status }}
-      baseline_sources: ${{ steps.build_scope.outputs.baseline_sources }}
-      deploy_scope: ${{ steps.build_scope.outputs.deploy_scope }}
       app_image_bytes: ${{ steps.image_readback.outputs.app_image_bytes }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -475,32 +427,6 @@ jobs:
           upstream="$(cat services/eros-engine/upstream.sha)"
           [[ "$upstream" =~ ^[0-9a-f]{40}$ ]]
           echo "EROS_UPSTREAM_SHA=$upstream" >> "$GITHUB_ENV"
-      - name: Resolve exact production component build scope
-        id: build_scope
-        env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-          FULL_BUILD_VALIDATION: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'me-62-full-build') }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          python3 scripts/resolve_native_build_scope.py \
-            --candidate-sha "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY" \
-            | tee "$RUNNER_TEMP/gpoint-build-scope.json"
-          python3 - "$RUNNER_TEMP/gpoint-build-scope.json" >> "$GITHUB_OUTPUT" <<'PY'
-          import json, os, sys
-          value = json.load(open(sys.argv[1], encoding="utf-8"))
-          if value.get("status") not in {"VERIFIED", "BOOTSTRAP_FULL"}:
-              raise SystemExit("production component build scope is not verified")
-          if (os.environ["GITHUB_EVENT_NAME"] == "pull_request"
-                  and os.environ["FULL_BUILD_VALIDATION"] == "true"
-                  and not value.get("build_components")):
-              value["build_components"] = ["CORE", "EROS", "MINIAPP"]
-              print("PR_BUILD_VALIDATION=ALL_THREE_IMAGES")
-          print("status=" + value["status"])
-          print("build_components=" + json.dumps(value["build_components"], separators=(",", ":")))
-          print("deploy_scope=" + value["deploy_scope"])
-          print("baseline_sources=" + json.dumps(value.get("baseline_sources", {}), sort_keys=True, separators=(",", ":")))
-          PY
       - name: Select exact immutable image version
         id: image_version
         env:
@@ -515,20 +441,16 @@ jobs:
           image_version="${CANDIDATE_SHA}-${CURRENT_RUN_ID}-${CURRENT_RUN_ATTEMPT}"
           printf 'image_version=%s\n' "$image_version" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-        if: steps.build_scope.outputs.build_components != '[]'
         with:
           platforms: linux/amd64
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
-        if: steps.build_scope.outputs.build_components != '[]'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Create dependency-manifest build context
-        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'CORE') || contains(fromJSON(steps.build_scope.outputs.build_components), 'MINIAPP')
         run: python3 scripts/docker_dependency_manifests.py "$RUNNER_TEMP/dependency-manifests"
       - name: Build and publish immutable runtime image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'CORE')
         id: app
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -551,7 +473,6 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Build and publish immutable Mini App image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'MINIAPP')
         id: miniapp
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -574,7 +495,6 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Build and publish stock Eros image
-        if: contains(fromJSON(steps.build_scope.outputs.build_components), 'EROS')
         id: eros
         uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
         with:
@@ -599,43 +519,37 @@ jobs:
           sbom: true
           provenance: mode=max
       - name: Validate immutable image identity and expose digests
-        if: steps.build_scope.outputs.build_components != '[]'
         env:
           CANDIDATE_SHA: ${{ github.sha }}
           APP_DIGEST: ${{ steps.app.outputs.digest }}
           MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}
           EROS_DIGEST: ${{ steps.eros.outputs.digest }}
-          BUILD_COMPONENTS: ${{ steps.build_scope.outputs.build_components }}
         run: |
           python3 - <<'PY'
           import os, re
           sha = os.environ['CANDIDATE_SHA']
           if not re.fullmatch(r'[0-9a-f]{40}', sha):
               raise SystemExit('candidate SHA is not exact')
-          components = set(__import__('json').loads(os.environ['BUILD_COMPONENTS']))
           for component, name in {'CORE': 'APP_DIGEST', 'MINIAPP': 'MINIAPP_DIGEST', 'EROS': 'EROS_DIGEST'}.items():
-              if component in components and not re.fullmatch(r'sha256:[0-9a-f]{64}', os.environ[name]):
+              if not re.fullmatch(r'sha256:[0-9a-f]{64}', os.environ[name]):
                   raise SystemExit(f'{name} is not an immutable OCI digest')
           for component, name in {'CORE': 'APP_DIGEST', 'MINIAPP': 'MINIAPP_DIGEST', 'EROS': 'EROS_DIGEST'}.items():
-              if component in components:
-                  image = "ghcr.io/akhripunov/" + ("gpoint-runtime" if component == "CORE" else "gpoint-miniapp" if component == "MINIAPP" else "gpoint-eros") + "@" + os.environ[name]
-                  line = f"GPOINT_IMAGE_DIGEST {component} {image}"
-                  print(line)
-                  print(f"{component}_IMAGE={image}", file=open(os.environ['GITHUB_STEP_SUMMARY'], 'a'))
+              image = "ghcr.io/akhripunov/" + ("gpoint-runtime" if component == "CORE" else "gpoint-miniapp" if component == "MINIAPP" else "gpoint-eros") + "@" + os.environ[name]
+              line = f"GPOINT_IMAGE_DIGEST {component} {image}"
+              print(line)
+              print(f"{component}_IMAGE={image}", file=open(os.environ['GITHUB_STEP_SUMMARY'], 'a'))
           PY
       - name: Read back exact published images and verify candidate identity
         id: image_readback
-        if: steps.build_scope.outputs.build_components != '[]'
         env:
           CANDIDATE_SHA: ${{ github.sha }}
           IMAGE_VERSION: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           APP_DIGEST: ${{ steps.app.outputs.digest }}
           MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}
           EROS_DIGEST: ${{ steps.eros.outputs.digest }}
-          BUILD_COMPONENTS: ${{ steps.build_scope.outputs.build_components }}
         run: |
           set -euo pipefail
-          for role in $(python3 -c 'import json,sys; print(" ".join({"CORE":"app","MINIAPP":"miniapp","EROS":"eros"}[x] for x in json.loads(sys.argv[1])) )' "$BUILD_COMPONENTS"); do
+          for role in app miniapp eros; do
             case "$role" in
               app) image=ghcr.io/akhripunov/gpoint-runtime; digest="$APP_DIGEST"; expected_service=gpoint-core ;;
               miniapp) image=ghcr.io/akhripunov/gpoint-miniapp; digest="$MINIAPP_DIGEST"; expected_service=gpoint-miniapp ;;
@@ -662,14 +576,9 @@ jobs:
                 "$CANDIDATE_SHA" https://github.com/akhripunov/gpoint.git
             fi
           done
-          for role in $(python3 -c 'import json,sys; print(" ".join({"CORE":"app"}[x] for x in json.loads(sys.argv[1]) if x == "CORE"))' "$BUILD_COMPONENTS"); do
-            case "$role" in
-              app) image=ghcr.io/akhripunov/gpoint-runtime; digest="$APP_DIGEST" ;;
-            esac
-            image_bytes="$(docker image inspect "$image@$digest" --format '{{.Size}}')"
-            [[ "$image_bytes" =~ ^[0-9]+$ ]]
-            echo "${role}_image_bytes=$image_bytes" >> "$GITHUB_OUTPUT"
-          done
+          image_bytes="$(docker image inspect "ghcr.io/akhripunov/gpoint-runtime@$APP_DIGEST" --format '{{.Size}}')"
+          [[ "$image_bytes" =~ ^[0-9]+$ ]]
+          echo "app_image_bytes=$image_bytes" >> "$GITHUB_OUTPUT"
 
   deploy:
     name: Kamal production Deploy and Verify
@@ -679,13 +588,12 @@ jobs:
       (
         (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
          needs.tests.result == 'success' && needs.tests.outputs.deploy == 'true' &&
-         needs.build.result == 'success' && needs.build.outputs.deploy_scope != 'NONE') ||
+         needs.build.result == 'success') ||
         (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
          github.actor == github.repository_owner && needs.tests.result == 'success' &&
          (
            (inputs.mode == 'deploy' && needs.tests.outputs.mode == 'DEPLOY' &&
-            needs.tests.outputs.deploy == 'true' && needs.build.result == 'success' &&
-            needs.build.outputs.deploy_scope != 'NONE') ||
+            needs.tests.outputs.deploy == 'true' && needs.build.result == 'success') ||
            (inputs.mode == 'rollback' && needs.tests.outputs.mode == 'ROLLBACK' &&
             needs.tests.outputs.deploy == 'true' &&
             (needs.build.result == 'success' || needs.build.result == 'skipped'))
@@ -730,15 +638,15 @@ jobs:
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
             test "$APPROVE_PRODUCTION" = true
+            test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY" || {
+              echo 'production release actor must match the repository owner' >&2; exit 1;
+            }
+            test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY" || {
+              echo 'production release triggering actor must match the repository owner' >&2; exit 1;
+            }
           elif [[ "$GITHUB_EVENT_NAME" != push ]]; then
             echo 'unsupported production release event' >&2; exit 1
           fi
-          test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY" || {
-            echo 'production release actor must match the repository owner' >&2; exit 1;
-          }
-          test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY" || {
-            echo 'production release triggering actor must match the repository owner' >&2; exit 1;
-          }
           test "$REQUESTED_SHA" = "$WORKFLOW_SHA"
           if ! [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo 'candidate SHA must be exactly 40 lowercase hexadecimal characters' >&2; exit 1;
@@ -994,6 +902,32 @@ jobs:
               *) echo 'unexpected topology fact' >&2; exit 1 ;;
             esac
           done <<< "$facts"
+      - name: Resolve last successful Native deployment as infrastructure approval baseline
+        if: github.event_name == 'push'
+        id: infrastructure_baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 scripts/resolve_native_environment_deployment.py \
+            --repository "$REPOSITORY" --latest-successful-native-sha >> "$GITHUB_OUTPUT"
+      - name: Read exact Tests workspace Eros E2E outcome
+        if: inputs.mode != 'rollback'
+        id: eros_e2e_evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          outcome="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" --jq '
+            .jobs[] | select(.name == "Tests (workspace)") |
+            if .conclusion != "success" then "workspace_" + (.conclusion // "incomplete")
+            else
+              ([.steps[] | select(.name == "Run stock Eros SQLx and synthetic conversation E2E")][0].conclusion // "missing_e2e_step")
+            end')"
+          [[ "$outcome" =~ ^(success|skipped|failure|cancelled|missing_workspace_job|missing_e2e_step|workspace_[a-z]+|incomplete)$ ]]
+          echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
+          echo "GPOINT_TESTS_WORKSPACE_EROS_E2E_OUTCOME=$outcome" >> "$GITHUB_STEP_SUMMARY"
       - name: Plan exact component-scoped Kamal update from live baseline
         if: (inputs.mode != 'rollback')
         id: component_plan
@@ -1002,47 +936,43 @@ jobs:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
           EROS_DIGEST: ${{ needs.build.outputs.eros_digest }}
-          BUILD_COMPONENTS: ${{ needs.build.outputs.build_components }}
-          BASELINE_MODE: ${{ needs.build.outputs.baseline_mode }}
-          BUILD_BASELINE_SOURCES: ${{ needs.build.outputs.baseline_sources }}
-          BUILD_DEPLOY_SCOPE: ${{ needs.build.outputs.deploy_scope }}
+          E2E_OUTCOME: ${{ steps.eros_e2e_evidence.outputs.outcome }}
+          EVENT_NAME: ${{ github.event_name }}
+          INFRASTRUCTURE_BASELINE_SHA: ${{ steps.infrastructure_baseline.outputs.sha }}
         run: |
           set -euo pipefail
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import base64, json, os, re, sys
           from pathlib import Path
           sys.path.insert(0, str(Path.cwd() / "scripts"))
-          from native_release_intent import (ALL_COMPONENT_ROLES, COMPONENT_IMAGES, ROLE_REPOSITORIES,
+          from native_release_intent import (ALL_COMPONENT_ROLES, ROLE_REPOSITORIES,
                                              classify_component_scope, expected_runtime_inventory_b64,
-                                             installed_component_sources)
+                                             changed_paths,
+                                             is_infrastructure_change, require_live_eros_e2e_success)
 
           candidate = os.environ["CANDIDATE_SHA"]
           baseline = json.loads(os.environ["BASELINE_ROLE_INVENTORY"])
           scope = classify_component_scope(Path.cwd(), candidate, baseline)
-          builds = set(json.loads(os.environ["BUILD_COMPONENTS"]))
           scope_components = set(scope["scope"].split("+")) - {"NONE"}
-          if not {COMPONENT_IMAGES[component] for component in scope_components}.issubset(builds):
-              raise SystemExit("fresh live component scope is missing a prebuilt candidate image")
-          live_sources = installed_component_sources(baseline)
-          mode = os.environ["BASELINE_MODE"]
-          if mode == "VERIFIED":
-              expected_sources = json.loads(os.environ["BUILD_BASELINE_SOURCES"])
-              if live_sources != expected_sources:
-                  raise SystemExit("live production component sources changed after Build")
-              if scope["scope"] != os.environ["BUILD_DEPLOY_SCOPE"]:
-                  raise SystemExit("live production deploy scope differs from pre-build scope")
-          elif mode == "BOOTSTRAP_FULL":
-              if not set(COMPONENT_IMAGES.values()).issubset(builds):
-                  raise SystemExit("bootstrap release must build every GPoint runtime image")
-          else:
-              raise SystemExit("production component baseline mode is unsupported")
+          live_eros = baseline["roles"].get("gpoint-eros-pilot-engine")
+          live_eros_source = live_eros.get("source_sha", "") if live_eros else ""
+          live_eros_e2e_required = require_live_eros_e2e_success(
+              Path.cwd(), live_eros_source, candidate, os.environ["E2E_OUTCOME"])
+          print("live_eros_e2e_required=" + str(live_eros_e2e_required).lower())
+          if os.environ["EVENT_NAME"] == "push":
+              infrastructure_baseline = os.environ["INFRASTRUCTURE_BASELINE_SHA"]
+              if not re.fullmatch(r"[0-9a-f]{40}", infrastructure_baseline):
+                  raise SystemExit("last verified Native production deployment SHA is unavailable")
+              accumulated_paths = changed_paths(infrastructure_baseline, candidate, repo=Path.cwd())
+              if is_infrastructure_change(accumulated_paths):
+                  raise SystemExit("accumulated production infrastructure changes require approved workflow_dispatch")
           effective = {}
           image_inputs = {"CORE": "APP_DIGEST", "MINIAPP": "MINIAPP_DIGEST", "EROS": "EROS_DIGEST"}
           outputs = {"CORE": "app_digest", "MINIAPP": "miniapp_digest", "EROS": "eros_digest"}
           for component, roles in ALL_COMPONENT_ROLES.items():
               role = roles[0]
               if component in scope_components:
-                  digest = os.environ[image_inputs[COMPONENT_IMAGES[component]]]
+                  digest = os.environ[image_inputs[component]]
               elif role not in baseline["roles"]:
                   effective[outputs[component]] = ""
                   continue
@@ -1065,26 +995,24 @@ jobs:
           print("expected_role_identities_b64=" + expected)
           expected_roles = json.loads(base64.b64decode(expected))["roles"]
           print("deploy_bot=" + str("gpoint-core-bot" in expected_roles).lower())
-          print("migration_app_digest=" + (os.environ["APP_DIGEST"] if "CORE" in builds else effective["app_digest"]))
+          print("migration_app_digest=" + os.environ["APP_DIGEST"])
           core_api = json.loads(base64.b64decode(expected))["roles"]["gpoint-core-api"]
           print("core_api_version=" + core_api["version"])
           print("core_api_source_sha=" + core_api["sourceSha"])
           for output, digest in effective.items():
               print(output + "=" + digest)
-          print("build_components=" + json.dumps(sorted(builds), separators=(",", ":")))
           PY
       - name: Verify immutable candidate images selected for the live scope
-        if: ((steps.component_plan.outputs.build_components != '[]') && inputs.mode != 'rollback')
+        if: inputs.mode != 'rollback'
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
           EROS_DIGEST: ${{ needs.build.outputs.eros_digest }}
-          BUILD_COMPONENTS: ${{ steps.component_plan.outputs.build_components }}
         run: |
           set -euo pipefail
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          for item in $(python3 -c 'import json,sys; names={"CORE":"app","MINIAPP":"miniapp","EROS":"eros"}; print(" ".join(names[x] for x in json.loads(sys.argv[1])))' "$BUILD_COMPONENTS"); do
+          for item in app miniapp eros; do
             case "$item" in
               app) repository=ghcr.io/akhripunov/gpoint-runtime; digest="$APP_DIGEST" ;;
               miniapp) repository=ghcr.io/akhripunov/gpoint-miniapp; digest="$MINIAPP_DIGEST" ;;
@@ -1167,7 +1095,6 @@ jobs:
         env:
           LIVE_MIGRATIONS: ${{ steps.migration_baseline.outputs.prisma_migrations }}
           LIVE_CHECKSUMS: ${{ steps.migration_baseline.outputs.prisma_checksums }}
-          BUILD_COMPONENTS: ${{ needs.build.outputs.build_components }}
           BASELINE_SOURCE_SHA: ${{ steps.topology.outputs.GPOINT_BASELINE_ROLE_SOURCE_SHA }}
           CANDIDATE_SHA: ${{ github.sha }}
         run: |
@@ -1185,10 +1112,6 @@ jobs:
           pending_checksums="$(sed -n 's/^pending_checksums=//p' <<< "$plan")"
           source_head="$(sed -n 's/^source_head=//p' <<< "$plan")"
           [[ "$apply" == true || "$apply" == false ]]
-          if [[ "$BUILD_COMPONENTS" == "[]" && "$apply" == true ]]; then
-            echo 'release with pending Prisma migrations has no prebuilt candidate Core image; refusing database mutation' >&2
-            exit 1
-          fi
           [[ "$source_head" =~ ^[0-9]{14}_[a-z0-9_]+$ ]]
           if [[ "$apply" == true ]]; then
             test -n "$pending" && test -n "$pending_checksums"
@@ -1577,7 +1500,8 @@ jobs:
           fi
           curl --retry 12 --retry-connrefused --retry-delay 5 --fail --silent --show-error https://gpoint.one/api/health/live | grep -F '"status":"ok"' >/dev/null
           for path in / /creators; do
-            curl --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" | grep -F '<div id="root">' >/dev/null
+            curl --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" \
+              | grep -F '<title>GPoint</title>' >/dev/null
           done
           media_body="$RUNNER_TEMP/gpoint-media-route-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
           media_status="$(curl --retry 6 --retry-connrefused --retry-delay 2 --silent --show-error \
@@ -1705,7 +1629,8 @@ jobs:
           docker exec "gpoint-core-api-$core_version" node -e "fetch('http://127.0.0.1:3000/health/live').then(async r => { if (!r.ok || (await r.json()).status !== 'ok') process.exit(1) }).catch(() => process.exit(1))"
           docker top "gpoint-core-worker-$core_version" -eo pid,args | grep -F "apps/worker/dist/main.js"
           if grep -q '^gpoint-core-bot|' <<< "$runtime_rows"; then
-            docker top "gpoint-core-bot-$core_version" -eo pid,args | grep -F "apps/bot/dist/main.js"
+            docker exec "gpoint-core-bot-$core_version" node -e 'fetch("http://127.0.0.1:9091/health/ready").then(async r=>{const b=await r.json();if(!r.ok||b.status!=="ready")process.exit(1)}).catch(()=>process.exit(1))'
+            echo GPOINT_BOT_READY=PASS
           fi
           docker exec "gpoint-miniapp-web-$miniapp_version" wget --spider --quiet http://127.0.0.1/
           if grep -q '^gpoint-eros-pilot-engine|' <<< "$runtime_rows"; then
@@ -2220,7 +2145,10 @@ jobs:
         run: |
           set -euo pipefail
           curl --retry 8 --retry-connrefused --retry-delay 3 --fail --silent --show-error https://gpoint.one/api/health/live | grep -F '"status":"ok"' >/dev/null
-          for path in / /creators; do curl --retry 5 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" | grep -F '<div id="root">' >/dev/null; done
+          for path in / /creators; do
+            curl --retry 5 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" \
+              | grep -F '<title>GPoint</title>' >/dev/null
+          done
           media_body="$RUNNER_TEMP/gpoint-rollback/media-route.json"
           media_status="$(curl --retry 5 --retry-connrefused --retry-delay 2 --silent --show-error --output "$media_body" --write-out '%{http_code}' https://gpoint.one/media/assets/kamal-route-verification-missing)"
           test "$media_status" = 404 && grep -Fq '"message":"media not found"' "$media_body"
@@ -2258,7 +2186,7 @@ jobs:
           docker top "gpoint-core-worker-$core_version" -eo pid,args | grep -F "apps/worker/dist/main.js"
           if [[ "$bot_enabled" == true ]]; then
             test "$(docker exec "gpoint-core-bot-$core_version" node -p 'process.env.RELEASE_SHA || ""')" = "$core_sha"
-            docker top "gpoint-core-bot-$core_version" -eo pid,args | grep -F "apps/bot/dist/main.js"
+            docker exec "gpoint-core-bot-$core_version" node -e 'fetch("http://127.0.0.1:9091/health/ready").then(async r=>{const b=await r.json();if(!r.ok||b.status!=="ready")process.exit(1)}).catch(()=>process.exit(1))'
           fi
           docker exec "gpoint-miniapp-web-$miniapp_version" wget --spider --quiet http://127.0.0.1/
           docker exec "gpoint-core-api-$core_version" node -e 'const fs=require("node:fs");const p="/data/media/.gpoint-rollback-"+require("node:crypto").randomUUID();let created=false;try{fs.writeFileSync(p,"ok",{flag:"wx"});created=true;if(fs.readFileSync(p,"utf8")!=="ok")process.exit(1)}finally{if(created)fs.unlinkSync(p)}'

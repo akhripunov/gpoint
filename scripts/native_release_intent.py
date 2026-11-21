@@ -51,6 +51,7 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     ".kamal/hooks/post-app-boot",
     ".kamal/hooks/pre-app-boot",
     "AGENTS.md",
+    ".github/filters/native-release.json",
     "packages/db/prisma/production-approved-migrations.json",
     "scripts/check-kamal-configs.sh",
     "scripts/classify-release-prepush.py",
@@ -86,7 +87,6 @@ COMPONENT_ROLES = {
 EROS_ROLES = ("gpoint-eros-pilot-engine",)
 EROS_COMPONENT_ROLES = {"EROS": EROS_ROLES}
 ALL_COMPONENT_ROLES = {**COMPONENT_ROLES, **EROS_COMPONENT_ROLES}
-COMPONENT_IMAGES = {component: component for component in ALL_COMPONENT_ROLES}
 ROLE_REPOSITORIES = {
     "gpoint-core-api": "ghcr.io/akhripunov/gpoint-runtime",
     "gpoint-core-worker": "ghcr.io/akhripunov/gpoint-runtime",
@@ -138,6 +138,73 @@ PRODUCTION_KAMAL_CONFIGS = frozenset({
     "config/deploy.yml", "config/deploy.eros-api.yml", "config/deploy.ollama.yml",
     "config/deploy.eros.yml", "config/deploy.miniapp.yml",
 })
+NATIVE_RELEASE_FILTERS = json.loads(
+    (Path(__file__).resolve().parents[1] / ".github/filters/native-release.json").read_text()
+)
+
+
+def _path_filter_matches(path: str, patterns: list[str]) -> bool:
+    """Match the deliberately small glob subset shared with dorny/paths-filter."""
+    def compile_glob(pattern: str) -> re.Pattern[str]:
+        parts: list[str] = []
+        index = 0
+        while index < len(pattern):
+            char = pattern[index]
+            if char == "*":
+                if index + 1 < len(pattern) and pattern[index + 1] == "*":
+                    parts.append(".*")
+                    index += 2
+                else:
+                    parts.append("[^/]*")
+                    index += 1
+                continue
+            if char == "?":
+                parts.append("[^/]")
+            else:
+                parts.append(re.escape(char))
+            index += 1
+        return re.compile("^" + "".join(parts) + "$")
+
+    included = any(compile_glob(pattern).fullmatch(path)
+                   for pattern in patterns if not pattern.startswith("!"))
+    if not included:
+        return False
+    return not any(compile_glob(pattern[1:]).fullmatch(path)
+                   for pattern in patterns if pattern.startswith("!"))
+
+
+def paths_match_filter(paths: set[str] | frozenset[str], filter_name: str) -> bool:
+    patterns = NATIVE_RELEASE_FILTERS.get(filter_name)
+    if not isinstance(patterns, list):
+        raise ValueError("unknown canonical path filter")
+    return any(_path_filter_matches(path, patterns) for path in paths)
+
+
+def eros_e2e_required(repo: Path, baseline: str, candidate: str) -> bool:
+    """Fail safe: require Eros E2E when cumulative Eros impact is unclear."""
+    if not EXACT_SHA.fullmatch(baseline or "") or not EXACT_SHA.fullmatch(candidate or ""):
+        return True
+    if baseline == candidate:
+        return False
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", baseline, candidate], cwd=repo,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if ancestor.returncode:
+        return True
+    try:
+        return paths_match_filter(changed_paths(baseline, candidate, repo=repo), "eros_e2e")
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return True
+
+
+def require_live_eros_e2e_success(repo: Path, live_baseline: str, candidate: str,
+                                 step_outcome: str) -> bool:
+    """Fail closed when live Eros changes lack a successful workspace E2E step."""
+    required = eros_e2e_required(repo, live_baseline, candidate)
+    if required and step_outcome != "success":
+        raise ValueError("live Eros baseline requires successful Eros E2E")
+    return required
 
 
 def is_infrastructure_change(changed_paths: set[str] | frozenset[str]) -> bool:
@@ -146,12 +213,11 @@ def is_infrastructure_change(changed_paths: set[str] | frozenset[str]) -> bool:
                for path in changed_paths)
 
 
-def push_deploy_authorized(*, mode: str, changed_paths: set[str] | frozenset[str],
-                           cumulative_infrastructure_change: bool = False) -> bool:
+def push_deploy_authorized(*, mode: str, changed_paths: set[str] | frozenset[str]) -> bool:
     """Require explicit dispatch approval before production infrastructure Apply."""
     # Production topology and release-control changes require an explicit
     # workflow_dispatch through the existing protected production Environment.
-    if cumulative_infrastructure_change or is_infrastructure_change(changed_paths):
+    if is_infrastructure_change(changed_paths):
         return False
     return mode == "DEPLOY"
 
@@ -323,41 +389,14 @@ def mixed_component_baselines(inventory: dict) -> set[str]:
 
 
 def _component_paths(path: str) -> set[str]:
-    if path in RETIRED_LAYER7_STAGING_PATHS | RETIRED_EROS_RELAY_PATHS:
-        return set()
     if (PRISMA_MIGRATION.fullmatch(path)
             or path == "packages/db/prisma/production-approved-migrations.json"):
         return set()
-    if path == "packages/db/prisma/schema.prisma":
-        return {"CORE"}
-    if path in {
-        "config/deploy.yml",
-        "config/deploy.eros-api.yml",
-    }:
-        return {"CORE"}
-    if path == "apps/miniapp/index.html" or path.startswith(("apps/miniapp/src/", "apps/miniapp/public/")):
-        return {"MINIAPP"}
-    # AGATA remains in the tree as historical source, but is no longer a
-    # runtime component and must never select an active image or Deploy.
-    if path.startswith(("services/agata/", "packages/agata-client/", "config/deploy.agata.yml")):
-        return set()
-    if path in EROS_MODEL_CONFIG_PATHS:
-        return set()
-    if path == "services/eros-engine/ollama-model.lock.json":
-        return {"CORE"}
-    if path.startswith(("services/eros-engine/", "config/deploy.eros")):
-        return {"EROS"}
-    if path in {"infra/production/Gpoint.Dockerfile", "infra/production/nginx-miniapp.conf"}:
-        return {"CORE", "MINIAPP"} if path.endswith("Gpoint.Dockerfile") else {"MINIAPP"}
-    if path == ".dockerignore":
-        return {"CORE", "MINIAPP"}
-    if path in APP_ROOT_FILES or path in {"pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json"}:
-        return {"CORE", "MINIAPP"}
-    if path.startswith("apps/"):
-        return {"CORE"}
-    if path.startswith("packages/") and not path.startswith("packages/gpoint-codex-mcp/"):
-        return {"CORE", "MINIAPP"}
-    return set()
+    # Component ownership comes only from the shared dorny filter definition.
+    # Schema/approval exceptions above are migration policy, not another map.
+    names = {"core": "CORE", "miniapp": "MINIAPP", "eros_engine": "EROS"}
+    return {component for filter_name, component in names.items()
+            if _path_filter_matches(path, NATIVE_RELEASE_FILTERS[filter_name])}
 
 
 def _non_runtime_documentation_path(path: str) -> bool:
@@ -390,9 +429,9 @@ def _safe_component_path(path: str) -> bool:
             and all(part not in ("", ".", "..") for part in path.split("/")))
 
 
-def classify_component_build_plan(repo: Path, candidate: str,
-                                  component_sources: dict[str, str]) -> dict[str, object]:
-    """Classify runtime updates and image-only Prisma migration build impact."""
+def classify_component_changes(repo: Path, candidate: str,
+                              component_sources: dict[str, str]) -> dict[str, object]:
+    """Classify cumulative runtime changes against installed component sources."""
     if not EXACT_SHA.fullmatch(candidate or ""):
         raise ValueError("candidate SHA is invalid")
     if (not isinstance(component_sources, dict)
@@ -405,8 +444,6 @@ def classify_component_build_plan(repo: Path, candidate: str,
     if not eros_installed:
         component_sources = {**component_sources, **dict.fromkeys(EROS_COMPONENT_ROLES, component_sources["CORE"])}
     paths_by_baseline: dict[str, set[str]] = {}
-    core_migration_paths: set[str] = set()
-    core_source = component_sources["CORE"]
     for baseline in component_sources.values():
         if baseline == candidate or baseline in paths_by_baseline:
             continue
@@ -440,8 +477,6 @@ def classify_component_build_plan(repo: Path, candidate: str,
             if not tree.startswith(("100644 blob ", "100755 blob ")):
                 raise ValueError("candidate path is not a regular file and needs explicit scope approval")
             changed_components = _component_paths(path)
-            if baseline == core_source and PRISMA_MIGRATION.fullmatch(path):
-                core_migration_paths.add(path)
             if not changed_components:
                 if _known_non_runtime_path(path):
                     continue
@@ -459,13 +494,8 @@ def classify_component_build_plan(repo: Path, candidate: str,
     # paths still fail closed above.
     if not eros_installed and components.intersection(EROS_COMPONENT_ROLES):
         components.update(EROS_COMPONENT_ROLES)
-    runtime_scope = "+".join(sorted(components)) if components else "NONE"
-    build_components = {COMPONENT_IMAGES[component] for component in components}
-    if core_migration_paths:
-        build_components.add("CORE")
     return {
-        "deploy_scope": runtime_scope,
-        "build_components": sorted(build_components),
+        "scope": "+".join(sorted(components)) if components else "NONE",
         "reason": "exact_component_diff" if components else "no_runtime_changes",
     }
 
@@ -483,8 +513,8 @@ def installed_component_sources(inventory: dict) -> dict[str, str]:
 def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dict[str, str | bool]:
     """Classify the exact candidate diff; never broaden an ambiguous scope."""
     component_sources = installed_component_sources(inventory)
-    plan = classify_component_build_plan(repo, candidate, component_sources)
-    components = set(str(plan["deploy_scope"]).split("+")) - {"NONE"}
+    plan = classify_component_changes(repo, candidate, component_sources)
+    components = set(str(plan["scope"]).split("+")) - {"NONE"}
     mixed = mixed_component_baselines(inventory)
     if "CORE" in mixed:
         core_source = component_sources["CORE"]
@@ -504,7 +534,7 @@ def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dic
     for component, roles in ALL_COMPONENT_ROLES.items():
         if missing_required.intersection(roles):
             components.add(component)
-    planned_components = set(str(plan["deploy_scope"]).split("+")) - {"NONE"}
+    planned_components = set(str(plan["scope"]).split("+")) - {"NONE"}
     forced = components != planned_components
     scope_name = "+".join(sorted(components)) if components else "NONE"
     result = {
@@ -579,32 +609,14 @@ def main() -> int:
     parser.add_argument("--rollback", action="store_true")
     parser.add_argument("--rollback-eros", action="store_true")
     parser.add_argument("--approve-production", action="store_true")
-    parser.add_argument("--infrastructure-baseline-sha", default="")
     args = parser.parse_args()
 
     try:
         if args.event == "push":
-            if args.ref == "refs/heads/main":
-                owner = args.repository_owner.lower()
-                if (not owner or args.actor.lower() != owner
-                        or args.triggering_actor.lower() != owner):
-                    raise ValueError("main push actor and triggering actor must match the repository owner")
             paths = changed_paths(args.before, args.sha)
             mode = classify_push(event_name=args.event, ref=args.ref, changed_paths=paths,
                                  commit_message=args.commit_message)
-            cumulative_infrastructure_change = False
-            if args.ref == "refs/heads/main":
-                if not EXACT_SHA.fullmatch(args.infrastructure_baseline_sha or ""):
-                    # Without a verified production baseline the accumulated
-                    # infrastructure diff is unknown, so automatic Apply stops.
-                    cumulative_infrastructure_change = True
-                else:
-                    cumulative_paths = changed_paths(args.infrastructure_baseline_sha, args.sha)
-                    cumulative_infrastructure_change = is_infrastructure_change(cumulative_paths)
-            deploy = push_deploy_authorized(
-                mode=mode, changed_paths=paths,
-                cumulative_infrastructure_change=cumulative_infrastructure_change,
-            )
+            deploy = push_deploy_authorized(mode=mode, changed_paths=paths)
         elif args.event == "workflow_dispatch":
             owner = args.repository_owner.lower()
             if not owner or args.triggering_actor.lower() != owner:

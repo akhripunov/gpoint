@@ -31,7 +31,7 @@
 ### Task 1: Establish exact current candidate and pin the workflow boundary tests
 
 **Files:**
-- Modify: `.github/workflows/gpoint-native-release.yml`
+- Modify: `.github/workflows/gpoint-release.yml`
 - Test: `tests/test_native_build_boundary.py`
 - Test: `tests/test_deploy_evidence_workflow.py`
 
@@ -45,7 +45,7 @@
 ### Task 2: Separate one-time Compose cutover from ordinary Kamal release
 
 **Files:**
-- Modify: `.github/workflows/gpoint-native-release.yml`
+- Modify: `.github/workflows/gpoint-release.yml`
 - Create or modify: `.github/workflows/gpoint-first-kamal-cutover.yml` (use the repository's established workflow naming convention if one exists)
 - Test: `tests/test_native_build_boundary.py`
 - Test: `tests/test_deploy_evidence_workflow.py`
@@ -62,7 +62,7 @@
 ### Task 3: Restrict ordinary immutable builds to the three NEW release components
 
 **Files:**
-- Modify: `.github/workflows/gpoint-native-release.yml`
+- Modify: `.github/workflows/gpoint-release.yml`
 - Test: `tests/test_native_build_boundary.py`
 - Test: `tests/test_native_image_attestation.py`
 - Test: `tests/test_native_image_readback.py`

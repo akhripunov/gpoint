@@ -89,7 +89,7 @@ def test_kamal_app_components_use_three_images_and_ollama_is_infrastructure():
     assert accessory["options"]["network-alias"] == "ollama"
     assert accessory["image"].startswith("ollama/ollama@sha256:")
     assert accessory["volumes"] == ["ollama-layer7-models:/root/.ollama"]
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     assert "id: miniapp" in workflow and "target: miniapp-runtime" in workflow
     assert "ghcr.io/akhripunov/gpoint-miniapp:${{ github.sha }}" in workflow
     assert "MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}" in workflow
@@ -97,7 +97,7 @@ def test_kamal_app_components_use_three_images_and_ollama_is_infrastructure():
 
 
 def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
     jobs = workflow["jobs"]
     assert {"tests", "build", "deploy"} == set(jobs)
     assert not ({"workspace", "python"} & set(jobs))
@@ -118,7 +118,7 @@ def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
 
 
 def test_kamal_uses_attempt_scoped_tag_with_buildkit_digest_verification():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
     assert "IMAGE_VERSION: ${{ needs.build.outputs.image_version }}" in deploy
     assert "image_version: ${{ steps.image_version.outputs.image_version }}" in workflow
@@ -259,7 +259,7 @@ def test_miniapp_post_boot_checks_independent_core_identity(tmp_path, wrong_sha,
 
 
 def test_ssh_heredoc_commands_keep_stdin_available():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     hook = (ROOT / ".kamal/hooks/post-app-boot").read_text()
     assert 'ssh -n -T root@${GPOINT_PRODUCTION_HOST} bash -s <<\'REMOTE\'' not in workflow
     assert 'ssh -n -T root@${GPOINT_PRODUCTION_HOST} bash -s --' not in workflow
@@ -267,7 +267,7 @@ def test_ssh_heredoc_commands_keep_stdin_available():
 
 
 def test_production_host_comes_from_exact_environment_and_known_hosts():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     configs = "\n".join((ROOT / f"config/{name}").read_text()
                          for name in ("deploy.yml", "deploy.eros-api.yml", "deploy.miniapp.yml"))
     assert "38.180.110.92" not in workflow + configs
@@ -275,13 +275,13 @@ def test_production_host_comes_from_exact_environment_and_known_hosts():
     assert 'ssh-keygen -F "$GPOINT_PRODUCTION_HOST" -f "$HOME/.ssh/known_hosts"' in workflow
     assert 'ENV.fetch("GPOINT_PRODUCTION_HOST")' in configs
     assert "--env GPOINT_PRODUCTION_HOST" in workflow
-    native_workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    native_workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     assert "GPOINT_APP_SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}" in native_workflow
     assert "--env GPOINT_APP_SOURCE_SHA" in native_workflow
 
 
 def test_native_release_rejects_non_layer7_ssh_target_before_remote_setup():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
     deploy = workflow["jobs"]["deploy"]
     assert deploy["needs"] == ["tests", "build"]
     assert deploy["environment"]["name"] == "production"
@@ -345,7 +345,7 @@ def test_native_release_rejects_non_layer7_ssh_target_before_remote_setup():
 
 
 def test_deploy_recheck_rejects_malformed_sha_before_github_api_access():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
     recheck = next(step for step in workflow["jobs"]["deploy"]["steps"]
                    if step.get("name") == "Recheck exact SHA, current main and owner approval")
     script = recheck["run"]
@@ -373,7 +373,7 @@ def test_deploy_recheck_rejects_malformed_sha_before_github_api_access():
 
 
 def test_kamal_pre_app_boot_checks_the_pulled_digest_before_boot():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     hook = (ROOT / ".kamal/hooks/pre-app-boot").read_text()
     assert 'expected_digest="${GPOINT_KAMAL_EXPECTED_DIGEST:?GPOINT_KAMAL_EXPECTED_DIGEST is required}"' in hook
     assert 'docker image inspect --format' in hook and '"$image"' in hook
@@ -754,7 +754,7 @@ def test_kamal_schema_compatibility_accepts_divergent_live_source_only_when_tree
 
 
 def test_manifest_writer_behavior_tests_run_in_python_ci():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     tests_job = workflow.split("  tests:\n", 1)[1].split("  build:\n", 1)[0]
     assert "tests/test_kamal_ordinary_manifest.py" in tests_job
     oras_setup = tests_job.index("name: Install pinned ORAS for release evidence round-trip test")
@@ -769,7 +769,7 @@ def test_manifest_writer_behavior_tests_run_in_python_ci():
 
 
 def test_pinned_setup_go_uses_official_digest_pinned_tool_cache_seed():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
     steps = workflow["jobs"]["tests"]["steps"]
     seed_index = next(i for i, step in enumerate(steps)
                       if step.get("name") == "Seed pinned Go 1.25.3 in Actions tool cache")
@@ -789,7 +789,7 @@ def test_pinned_setup_go_uses_official_digest_pinned_tool_cache_seed():
 
 
 def test_native_release_runs_kamal_after_successful_main_push():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
     deploy = workflow["jobs"]["deploy"]
     assert "always()" in deploy["if"] and "needs.build.result == 'success'" in deploy["if"]
     assert deploy["environment"] == {
@@ -802,7 +802,7 @@ def test_native_release_runs_kamal_after_successful_main_push():
     assert "Resolve exact GitHub environment Deployment ID" in [step.get("name") for step in deploy["steps"]]
     assert 'repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses' not in deploy_script
 
-    rollback_workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    rollback_workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
     rollback = rollback_workflow["jobs"]["deploy"]
     assert rollback["environment"] == {
         "name": "production", "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
@@ -813,7 +813,7 @@ def test_native_release_runs_kamal_after_successful_main_push():
 
 
 def test_native_migration_parity_runs_prisma_from_api_workspace():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     step = workflow.split("name: Verify candidate compatibility with the live database baseline", 1)[1].split(
         "name: Create exact-SHA in-progress GitHub Deployment", 1)[0]
     assert "--workdir /app/apps/api" in step
@@ -824,7 +824,7 @@ def test_native_migration_parity_runs_prisma_from_api_workspace():
 
 
 def test_native_runtime_verify_compares_live_database_to_its_predeploy_baseline():
-    workflow = (ROOT / ".github/workflows/gpoint-native-release.yml").read_text()
+    workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1].split("  backup_maintenance:\n", 1)[0]
     verify = deploy.split("name: Verify public routes and exact running services", 1)[1].split(
         "name: Record GitHub Deployment result against the same attempt", 1
@@ -1000,7 +1000,7 @@ def test_core_hook_binds_component_source_to_release_candidate_before_ssh(tmp_pa
 
 
 def test_component_identity_regression_is_in_mandatory_test_job_before_deploy():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
     tests_job = workflow["jobs"]["tests"]
     assert tests_job["strategy"]["matrix"]["suite"] == ["workspace", "python"]
     assert workflow["jobs"]["build"]["needs"] == ["tests"]
@@ -1073,7 +1073,7 @@ def test_core_api_has_internal_ollama_network_before_process_start():
 
 def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
     import re
-    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-release.yml').read_text())
     step = next(s for j in workflow['jobs'].values() for s in j.get('steps', [])
                 if s.get('name') == 'Verify public routes and exact running services')
     match = re.search(r'facts="\$\(ssh([^\n]+)<<\x27REMOTE\x27\n(.*?)\nREMOTE\n', step['run'], re.S)
@@ -1136,19 +1136,18 @@ def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
 
 
 def test_consumer_process_checks_do_not_require_ps_inside_slim_images():
-    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-native-release.yml').read_text())
+    workflow = yaml.safe_load((ROOT / '.github/workflows/gpoint-release.yml').read_text())
     deploy = "\n".join(step.get("run", "") for step in workflow["jobs"]["deploy"]["steps"])
-    rollback_workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
-    rollback = "\n".join(step.get("run", "") for step in rollback_workflow["jobs"]["deploy"]["steps"])
-    for role in ['worker', 'bot']:
-        assertion = f'docker top "gpoint-core-{role}-$core_version" -eo pid,args | grep -F "apps/{role}/dist/main.js"'
-        # The job now carries the ordinary and the rollback branch: one each.
-        assert deploy.count(assertion) == 2
+    worker_assertion = 'docker top "gpoint-core-worker-$core_version" -eo pid,args | grep -F "apps/worker/dist/main.js"'
+    assert deploy.count(worker_assertion) == 2
+    bot_readiness = 'docker exec "gpoint-core-bot-$core_version" node -e \'fetch("http://127.0.0.1:9091/health/ready")'
+    assert deploy.count(bot_readiness) == 2
+    assert 'docker top "gpoint-core-bot-$core_version"' not in deploy
     assert "sh -ec 'ps aux" not in workflow
 
 
 def test_proxy_route_probe_drains_docker_output_under_pipefail():
-    workflow = (ROOT / '.github/workflows/gpoint-native-release.yml').read_text()
+    workflow = (ROOT / '.github/workflows/gpoint-release.yml').read_text()
     probe = next(line.strip() for line in workflow.splitlines()
                  if 'docker exec kamal-proxy kamal-proxy list |' in line and 'gpoint-core' in line)
     producer = '''docker() { python3 -c 'import sys; sys.stdout.write("gpoint-core\\n" + "x" * 1048576)'; }; '''
@@ -1159,7 +1158,7 @@ def test_proxy_route_probe_drains_docker_output_under_pipefail():
 
 
 def test_runtime_prisma_readbacks_resolve_the_api_workspace_dependencies():
-    workflow = (ROOT / '.github/workflows/gpoint-native-release.yml').read_text()
+    workflow = (ROOT / '.github/workflows/gpoint-release.yml').read_text()
     rollback_text = (ROOT / '.github/workflows/gpoint-operations.yml').read_text()
     calls = [line for line in (workflow + rollback_text).splitlines()
              if 'docker exec' in line and 'require("@prisma/client")' in line]

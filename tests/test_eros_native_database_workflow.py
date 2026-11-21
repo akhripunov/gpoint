@@ -7,9 +7,9 @@ import tempfile
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
 TRIGGERS = WORKFLOW.get("on", WORKFLOW.get(True, {}))
-ROLLBACK_WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+ROLLBACK_WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
 ROLLBACK_TRIGGERS = ROLLBACK_WORKFLOW.get("on", ROLLBACK_WORKFLOW.get(True, {}))
 
 

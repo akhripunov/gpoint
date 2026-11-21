@@ -47,7 +47,7 @@ def evidence(*, include_bot=True):
         "log_url": f"https://github.com/akhripunov/gpoint/actions/runs/{RUN_ID}",
     }
     run = {"id": RUN_ID, "run_attempt": 1, "head_sha": SHA, "head_branch": "main",
-           "event": "push", "path": ".github/workflows/gpoint-native-release.yml", "conclusion": "success"}
+           "event": "push", "path": ".github/workflows/gpoint-release.yml", "conclusion": "success"}
     jobs = [{"name": "Build and publish immutable images", "conclusion": "success"}]
     return deployment, [status], run, jobs, raw
 

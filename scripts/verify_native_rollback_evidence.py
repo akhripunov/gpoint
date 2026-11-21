@@ -89,7 +89,7 @@ def verify_rollback_evidence(*, deployment: dict[str, Any], statuses: list[dict[
         _fail("successful Deployment status is not linked to a repository workflow run")
     if (str(run.get("id")) != run_match.group(2) or run.get("head_sha") != expected_sha
             or run.get("head_branch") != "main" or run.get("event") not in {"push", "workflow_dispatch"}
-            or run.get("path") != ".github/workflows/gpoint-native-release.yml"
+            or run.get("path") != ".github/workflows/gpoint-release.yml"
             or run.get("conclusion") != "success"):
         _fail("linked run is not a successful Native Release for the target SHA")
     build_jobs = [job for job in jobs if job.get("name") == "Build and publish immutable images"]

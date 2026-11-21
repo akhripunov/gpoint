@@ -5,7 +5,9 @@ import { fileURLToPath } from 'node:url';
 
 test('production build emits the JavaScript helper imported by the bot entrypoint', async () => {
   const compiledHelper = fileURLToPath(new URL('../dist/telegram-api-url.js', import.meta.url));
+  const readinessHelper = fileURLToPath(new URL('../dist/bot-readiness.js', import.meta.url));
   await assert.doesNotReject(access(compiledHelper));
+  await assert.doesNotReject(access(readinessHelper));
 
   const { telegramInternalUrl } = await import('../dist/telegram-api-url.js');
   assert.equal(

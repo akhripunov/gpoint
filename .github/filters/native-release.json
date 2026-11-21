@@ -1,0 +1,86 @@
+{
+  "core": [
+    "apps/api/**",
+    "apps/bot/**",
+    "apps/worker/**",
+    "services/eros-engine/ollama-model.lock.json",
+    "config/deploy.yml",
+    "config/deploy.eros-api.yml",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "tsconfig.base.json",
+    "packages/**",
+    "infra/production/Gpoint.Dockerfile",
+    ".dockerignore",
+    "!packages/agata-client/**",
+    "!packages/gpoint-codex-mcp/**",
+    "!packages/db/prisma/migrations/**",
+    "!packages/db/prisma/production-approved-migrations.json"
+  ],
+  "miniapp": [
+    "apps/miniapp/**",
+    "config/deploy.miniapp.yml",
+    "apps/api/package.json",
+    "apps/bot/package.json",
+    "apps/worker/package.json",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "tsconfig.base.json",
+    "packages/**",
+    "infra/production/Gpoint.Dockerfile",
+    "infra/production/nginx-miniapp.conf",
+    ".dockerignore",
+    "!packages/agata-client/**",
+    "!packages/gpoint-codex-mcp/**",
+    "!packages/db/prisma/migrations/**",
+    "!packages/db/prisma/production-approved-migrations.json"
+  ],
+  "eros_engine": [
+    "config/deploy.eros.yml",
+    "services/eros-engine/**",
+    "!services/eros-engine/*.toml",
+    "!services/eros-engine/eros-pilot-embedding-relay*",
+    "!services/eros-engine/open-mac-ollama-tunnel.sh",
+    "!services/eros-engine/ollama-model.lock.json"
+  ],
+  "eros_config": [
+    "services/eros-engine/*.toml",
+    "services/eros-engine/ollama-model.lock.json"
+  ],
+  "eros_e2e": [
+    "services/eros-engine/**",
+    "!services/eros-engine/eros-pilot-embedding-relay*",
+    "!services/eros-engine/open-mac-ollama-tunnel.sh",
+    "config/deploy.eros.yml",
+    "config/deploy.eros-api.yml",
+    "config/deploy.ollama.yml",
+    "scripts/eros-native-database.py",
+    "scripts/eros-production-secrets.py",
+    "scripts/verify-eros-runtime-labels.py",
+    "scripts/verify_native_eros_image.py",
+    "scripts/verify-kamal-migration-parity.py",
+    "scripts/verify-kamal-production-baseline.py",
+    "scripts/native_release_intent.py",
+    ".github/filters/native-release.json",
+    ".github/workflows/gpoint-release.yml",
+    ".kamal/**"
+  ],
+  "database": [
+    "packages/db/prisma/schema.prisma",
+    "packages/db/prisma/migrations/**"
+  ],
+  "infrastructure": [
+    ".github/**",
+    ".kamal/**",
+    "config/deploy.yml",
+    "config/deploy.eros-api.yml",
+    "config/deploy.ollama.yml",
+    "config/deploy.eros.yml",
+    "config/deploy.miniapp.yml",
+    "infra/production/**",
+    "scripts/**",
+    "systemd/**"
+  ]
+}

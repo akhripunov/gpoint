@@ -77,8 +77,7 @@ def test_active_architecture_has_five_roles_and_three_images():
         "gpoint-core-api", "gpoint-core-worker", "gpoint-core-bot",
         "gpoint-miniapp-web", "gpoint-eros-pilot-engine",
     }
-    assert set(MODULE.COMPONENT_IMAGES) == {"CORE", "MINIAPP", "EROS"}
-    assert set(MODULE.COMPONENT_IMAGES.values()) == {"CORE", "MINIAPP", "EROS"}
+    assert set(MODULE.ALL_COMPONENT_ROLES) == {"CORE", "MINIAPP", "EROS"}
 
 
 @pytest.mark.parametrize("path,component", [
@@ -117,17 +116,11 @@ def test_retired_agata_and_relay_paths_do_not_select_an_image(path):
     ("services/eros-engine/eros-pilot-embedding-relay.mjs", "NONE"),
     ("config/deploy.ollama.yml", "NONE"),
 ])
-def test_component_build_scope_uses_exact_component_diff(tmp_path, path, expected):
+def test_live_deploy_scope_uses_exact_component_diff(tmp_path, path, expected):
     repo, baseline = component_repo(tmp_path)
     candidate = commit_change(repo, path, "changed\n")
-    plan = MODULE.classify_component_build_plan(
-        repo, candidate, {"CORE": baseline, "MINIAPP": baseline, "EROS": baseline},
-    )
-    assert plan["deploy_scope"] == expected
-    if expected == "NONE":
-        assert plan["build_components"] == []
-    else:
-        assert plan["build_components"] == [expected]
+    scope = MODULE.classify_component_scope(repo, candidate, make_inventory(baseline))
+    assert scope["scope"] == expected
 
 
 def test_runtime_inventory_pins_updated_images_and_preserves_untouched_baselines():
@@ -187,10 +180,6 @@ def test_historical_layer7_mixed_core_baseline_forces_full_core_and_keeps_bot_di
     })
     inventory["roles"].pop("gpoint-core-bot")
     inventory["missing_roles"] = ["gpoint-core-bot"]
-    monkeypatch.setattr(MODULE, "classify_component_build_plan", lambda *_args, **_kwargs: {
-        "deploy_scope": "NONE", "reason": "no_runtime_changes",
-    })
-
     scope = MODULE.classify_component_scope(repo, candidate, inventory)
 
     assert scope["scope"] == "CORE"
@@ -244,8 +233,65 @@ def test_infrastructure_requires_protected_dispatch_and_exact_owner_sha():
     assert result == "INVALID_DEPLOY" and not approved
 
 
-def test_bootstrap_builds_the_three_active_application_images_only():
-    assert MODULE.COMPONENT_IMAGES == {"CORE": "CORE", "MINIAPP": "MINIAPP", "EROS": "EROS"}
+def test_accumulated_infrastructure_uses_the_successful_deploy_sha_marker(tmp_path):
+    repo, baseline = component_repo(tmp_path)
+    infra = commit_change(repo, "infra/production/nginx-miniapp.conf", "proxy change\n")
+    candidate = commit_change(repo, "apps/api/src/main.ts", "export const api = 2;\n")
+
+    pending = MODULE.changed_paths(baseline, candidate, repo=repo)
+    applied = MODULE.changed_paths(infra, candidate, repo=repo)
+
+    assert "infra/production/nginx-miniapp.conf" in pending
+    assert MODULE.is_infrastructure_change(pending)
+    assert not MODULE.is_infrastructure_change(applied)
+
+
+def test_eros_e2e_is_skipped_for_independent_components_and_required_for_eros_or_related_infra(tmp_path):
+    repo, baseline = component_repo(tmp_path)
+    miniapp = commit_change(repo, "apps/miniapp/src/page.tsx", "export const page = 2;\n")
+    assert not MODULE.eros_e2e_required(repo, baseline, miniapp)
+    core = commit_change(repo, "apps/api/src/main.ts", "export const api = 2;\n")
+    assert not MODULE.eros_e2e_required(repo, baseline, core)
+    eros = commit_change(repo, "services/eros-engine/src/main.rs", "fn main() { println!(\"v2\"); }\n")
+    assert MODULE.eros_e2e_required(repo, baseline, eros)
+    eros_config = commit_change(repo, "config/deploy.eros.yml", "service: gpoint-eros-pilot\n")
+    assert MODULE.eros_e2e_required(repo, baseline, eros_config)
+
+
+def test_eros_e2e_accumulates_after_failed_release_and_fails_safe_on_unknown_baseline(tmp_path):
+    repo, baseline = component_repo(tmp_path)
+    failed_eros_release = commit_change(repo, "services/eros-engine/src/main.rs", "fn main() {}\n// changed\n")
+    next_push = commit_change(repo, "apps/miniapp/src/page.tsx", "export const page = 3;\n")
+    assert failed_eros_release != baseline
+    assert MODULE.eros_e2e_required(repo, baseline, next_push)
+    assert MODULE.eros_e2e_required(repo, "f" * 40, next_push)
+
+
+@pytest.mark.parametrize("outcome", ["skipped", "failure", "missing"])
+def test_live_eros_baseline_divergence_blocks_without_successful_workspace_e2e(tmp_path, outcome):
+    repo, live_eros_sha = component_repo(tmp_path)
+    candidate = commit_change(repo, "services/eros-engine/src/main.rs", "fn main() {}\n// changed\n")
+    github_deployment_eros_sha = candidate
+
+    # The successful Deployment manifest claims the candidate Eros SHA, so the
+    # test planner alone would skip. The actual installed Docker/Kamal Eros SHA
+    # still has cumulative Eros changes and must require a successful E2E step.
+    assert not MODULE.eros_e2e_required(repo, github_deployment_eros_sha, candidate)
+    assert MODULE.eros_e2e_required(repo, live_eros_sha, candidate)
+    with pytest.raises(ValueError, match="live Eros baseline requires successful Eros E2E"):
+        MODULE.require_live_eros_e2e_success(repo, live_eros_sha, candidate, outcome)
+
+
+def test_live_eros_baseline_divergence_allows_successful_workspace_e2e(tmp_path):
+    repo, live_eros_sha = component_repo(tmp_path)
+    candidate = commit_change(repo, "services/eros-engine/src/main.rs", "fn main() {}\n// changed\n")
+
+    assert MODULE.require_live_eros_e2e_success(
+        repo, live_eros_sha, candidate, "success",
+    ) is True
+
+
+def test_live_deploy_components_are_independently_scoped():
     assert set(MODULE.ALL_COMPONENT_ROLES) == {"CORE", "MINIAPP", "EROS"}
     assert not any("AGATA" in role or "RELAY" in role for role in MODULE.ROLE_REPOSITORIES)
 

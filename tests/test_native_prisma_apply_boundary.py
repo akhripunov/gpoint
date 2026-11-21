@@ -4,7 +4,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = ROOT / ".github/workflows/gpoint-native-release.yml"
+WORKFLOW = ROOT / ".github/workflows/gpoint-release.yml"
 
 
 def test_approved_prisma_apply_is_inside_the_protected_deploy_before_kamal():

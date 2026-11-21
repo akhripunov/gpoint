@@ -1,27 +1,20 @@
 # GPoint production release flow
 
-> **Current model (ME-42, OWNER addendum):** GHCR is the only build-artifact
-> store. Prepare publishes a small immutable OCI receipt artifact bound to exact
-> source SHA, trusted Prepare run/attempt, provenance and image digests. Deploy
-> verifies that artifact by digest, pulls images by immutable digest, and checks
-> labels, platform, image/config identities and effective configuration against
-> read-only VPS facts. A separately approved V3/V4 UI-only scope may use a
-> standalone Mini App OCI artifact without building all runtime images when the
-> change is independent. GitHub Releases and Actions Artifact Storage are not
-> operational transports. Production attempt status is tracked through the same
-> GitHub Deployment record; read-only VPS/database evidence is authoritative for
-> installed state. GHCR outage, missing/tampered receipt, bad digest, or mismatch
-> blocks before Apply. Never use arbitrary old VPS images or build replacement
-> images on the VPS. Do not put database backups, secrets or `.env` files in
-> GHCR. Provenance is bound to exact successful workflow job/step logs and the
-> digest-addressed OCI readback; it is not a GitHub Artifact Attestation. The procedures below are historical only; see the current model at the
-> top of [automation.md](automation.md).
+> **Current model (Native First V3 + Kamal 2):** the single
+> `gpoint-release.yml` workflow runs required Tests, Buildx, immutable GHCR
+> publication, protected Deploy, Runtime Verify and smoke. Every eligible PR
+> validates all three Core/MiniApp/Eros images; the long Eros SQLx and synthetic
+> dialogue E2E runs only when the shared path map finds Eros impact or a safe
+> cumulative check cannot be made. Deploy selection comes from live Kamal/Docker
+> inventory. Preserve migration, backup, rollback and production approval gates.
+> The procedures below are historical only; see the current model at the top of
+> [automation.md](automation.md).
 
 ## Historical design (superseded; do not run)
 
 `scripts/release-gpoint.mjs` was the legacy release gate. It was **removed on
 2026-11-12** together with the legacy Prepare/Deploy workflows; the ordinary
-release path is `gpoint-native-release.yml` (Tests → Build → protected Kamal 2
+release path is `gpoint-release.yml` (Tests → Build → protected Kamal 2
 Deploy → Runtime Verify). The commands below are shown only as history.
 
 ```sh

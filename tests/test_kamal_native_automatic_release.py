@@ -6,9 +6,9 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = ROOT / ".github/workflows/gpoint-native-release.yml"
+WORKFLOW = ROOT / ".github/workflows/gpoint-release.yml"
 
-_ROLLBACK = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+_ROLLBACK = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
 _REHEARSAL = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())
 
 
@@ -92,41 +92,48 @@ def test_eros_builds_share_layers_without_publishing_the_test_image():
     assert release_inputs["provenance"] == "mode=max"
 
 
-def test_build_never_claims_a_noop_release_from_the_push_diff_alone():
-    """Build scope must come from the production baseline, not the pushed diff.
-
-    Run 43148553035 failed because Build trusted the push diff (tooling-only) and
-    skipped every image, while Deploy's fresh live inventory still required a
-    candidate Core/Mini App image. Without a proven component baseline the only
-    safe plan is a whole-image bootstrap build.
-    """
+def test_build_unconditionally_publishes_all_three_images_and_live_inventory_scopes_apply():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     build = workflow["jobs"]["build"]
     steps = build["steps"]
-    resolver = next(step for step in steps if step.get("id") == "build_scope")
-    run = resolver["run"]
-    assert "--push-before" not in run
-    assert "VERIFY_ONLY" not in run
-    assert '"BOOTSTRAP_FULL"' in run
-    assert "EVENT_BEFORE" not in resolver.get("env", {})
+    assert "build_components" not in build["outputs"]
+    assert "deploy_scope" not in build["outputs"]
+    assert not any(step.get("id") == "build_scope" for step in steps)
     for step in steps:
         if step.get("uses", "").startswith(("docker/setup-buildx-action@", "docker/login-action@")):
-            assert "build_components != '[]'" in step["if"]
+            assert "if" not in step
+    image_steps = [step for step in steps
+                   if step.get("uses", "").startswith("docker/build-push-action@")]
+    assert {step.get("id") for step in image_steps} == {"app", "miniapp", "eros"}
+    assert all("if" not in step for step in image_steps)
 
     deploy_steps = workflow["jobs"]["deploy"]["steps"]
     component_plan = next(step for step in deploy_steps if step.get("id") == "component_plan")
     plan_run = component_plan["run"]
     assert "VERIFY_ONLY" not in plan_run
-    assert 'raise SystemExit("fresh live component scope is missing a prebuilt candidate image")' in plan_run
-    assert 'bootstrap release must build every GPoint runtime image' in plan_run
+    assert "classify_component_scope" in plan_run
+    assert "COMPONENT_IMAGES" not in plan_run
+    assert "BUILD_COMPONENTS" not in plan_run
 
     migration_plan = next(step for step in deploy_steps if step.get("id") == "migration_plan")
-    assert "BUILD_COMPONENTS" in migration_plan["env"]
+    assert "BUILD_COMPONENTS" not in migration_plan["env"]
     assert "VERIFY_ONLY" not in migration_plan["run"]
-    assert 'no prebuilt candidate Core image' in migration_plan["run"]
+    assert 'no prebuilt candidate Core image' not in migration_plan["run"]
+
+    tests = workflow["jobs"]["tests"]
+    assert "eros_e2e_required" not in tests["outputs"]
+    eros_scope = next(step for step in tests["steps"] if step.get("id") == "eros_scope")
+    assert eros_scope["if"] == "matrix.suite == 'workspace'"
+    evidence = next(step for step in deploy_steps if step.get("id") == "eros_e2e_evidence")
+    assert evidence["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert 'select(.name == "Tests (workspace)")' in evidence["run"]
+    assert 'select(.name == "Run stock Eros SQLx and synthetic conversation E2E")' in evidence["run"]
+    assert component_plan["env"]["E2E_OUTCOME"] == "${{ steps.eros_e2e_evidence.outputs.outcome }}"
+    assert "require_live_eros_e2e_success" in plan_run
+    assert "E2E_REQUIRED" not in plan_run
 
 
-def test_rerun_by_non_owner_cannot_deploy_a_main_push(tmp_path):
+def test_merge_bot_can_deploy_exact_current_main_sha_automatically(tmp_path):
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     deploy = workflow["jobs"]["deploy"]
     gate = next(step for step in deploy["steps"]
@@ -155,8 +162,7 @@ def test_rerun_by_non_owner_cannot_deploy_a_main_push(tmp_path):
             capture_output=True, text=True, check=False,
         )
 
-        assert result.returncode != 0
-        assert "triggering actor" in result.stderr.lower()
+        assert result.returncode == 0, result.stderr
     finally:
         fake_gh.unlink(missing_ok=True)
 
@@ -264,9 +270,27 @@ def test_runtime_verify_rechecks_public_routes_and_five_target_roles_after_deplo
         "verify-layer7-ollama.py",
     ):
         assert expected in verify
+    assert "'<title>GPoint</title>'" in verify
+    assert 'docker exec "gpoint-core-bot-$core_version" node -e' in verify
+    assert "http://127.0.0.1:9091/health/ready" in verify
+    assert "GPOINT_BOT_READY=PASS" in verify
+    assert "if grep -q '^gpoint-core-bot|' <<< \"$runtime_rows\"; then" in verify
+    assert "apps/bot/dist/main.js" not in verify
     helper = (ROOT / "scripts/verify-layer7-ollama.py").read_text(encoding="utf-8")
     assert 'BASE_URL = "http://ollama:11434"' in helper
     assert 'const base = "http://ollama:11434"' in helper
+
+
+def test_runtime_smokes_validate_the_public_miniapp_on_ordinary_and_rollback_paths():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    verify = next(step["run"] for step in workflow["jobs"]["deploy"]["steps"]
+                  if step.get("name") == "Verify public routes and exact running services")
+    rollback = next(step["run"] for step in workflow["jobs"]["deploy"]["steps"]
+                    if step.get("name") == "Verify rollback Runtime and preserve databases before SUCCESS")
+    for script in (verify, rollback):
+        assert 'for path in / /creators; do' in script
+        assert 'curl --retry' in script and '--fail --silent --show-error "https://gpoint.one$path"' in script
+        assert "<title>GPoint</title>" in script
 
 
 def test_verify_only_component_scope_runs_runtime_verification_without_kamal_replacements():
@@ -629,21 +653,18 @@ def test_deploy_publishes_release_timing_even_when_the_release_fails():
     assert 'jobs?per_page=100' in step["run"]
 
 
-def test_no_runtime_change_skips_the_whole_deploy_job():
-    """A docs-only candidate must not enter Deploy at all (criterion 4).
-
-    With a proven production baseline and no runtime change the build plan is
-    NONE; the workflow then skips the protected Deploy job instead of running an
-    empty Kamal transition. That is what keeps a UI/docs-only release short.
-    """
+def test_production_deploy_scope_is_resolved_only_from_live_inventory():
+    """Even an apparently no-op push reads installed roles before deciding Apply."""
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     condition = workflow["jobs"]["deploy"]["if"]
-    assert "needs.build.outputs.deploy_scope != 'NONE'" in condition
-    build_scope = next(
-        step for step in workflow["jobs"]["build"]["steps"]
-        if step.get("id") == "build_scope")
-    assert '"VERIFIED"' in build_scope["run"]
-    assert '"BOOTSTRAP_FULL"' in build_scope["run"]
+    assert "needs.build.outputs.deploy_scope" not in condition
+    assert "needs.tests.outputs.deploy == 'true'" in condition
+    assert "needs.build.result == 'success'" in condition
+    assert not any(step.get("id") == "build_scope"
+                   for step in workflow["jobs"]["build"]["steps"])
+    component_plan = next(step for step in workflow["jobs"]["deploy"]["steps"]
+                          if step.get("id") == "component_plan")
+    assert "classify_component_scope" in component_plan["run"]
 
 
 def test_release_apply_has_no_relay_component_or_role():
