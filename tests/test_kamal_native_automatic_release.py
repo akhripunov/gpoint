@@ -120,6 +120,13 @@ def test_build_unconditionally_publishes_all_three_images_and_live_inventory_sco
     assert "VERIFY_ONLY" not in migration_plan["run"]
     assert 'no prebuilt candidate Core image' not in migration_plan["run"]
 
+    tests = workflow["jobs"]["tests"]
+    assert tests["outputs"]["eros_e2e_required"] == "${{ steps.eros_scope.outputs.required }}"
+    eros_scope = next(step for step in tests["steps"] if step.get("id") == "eros_scope")
+    assert "matrix.suite == 'workspace'" not in eros_scope.get("if", "")
+    assert component_plan["env"]["E2E_REQUIRED"] == "${{ needs.tests.outputs.eros_e2e_required }}"
+    assert "eros_e2e_required" in plan_run
+
 
 def test_merge_bot_can_deploy_exact_current_main_sha_automatically(tmp_path):
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
