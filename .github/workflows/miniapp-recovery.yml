@@ -1,0 +1,216 @@
+name: MiniApp Recovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      approve_production:
+        description: I authorize this MiniApp-only production operation
+        required: true
+        default: false
+        type: boolean
+      operation:
+        description: Apply the verified image or restore the verified retained MiniApp image
+        required: true
+        default: deploy
+        type: choice
+        options: [deploy, rollback]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpoint-production-release
+  cancel-in-progress: false
+
+jobs:
+  miniapp:
+    name: MiniApp ${{ inputs.operation }} recovery
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner &&
+      inputs.approve_production == true
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://gpoint.one
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    env:
+      SOURCE_SHA: 5e9ba2256528494df033d73949b86e9976375ba8
+      MINIAPP_VERSION: 5e9ba2256528494df033d73949b86e9976375ba8-44922282589-1
+      MINIAPP_DIGEST: sha256:78f7f6c5ac6667eeadbb5df84f2841c613092f8dc4ae89683760887132d94d39
+      ROLLBACK_SOURCE_SHA: 145111f17b8f2cb94bfa5d1c266fabc5eb0e0952
+      ROLLBACK_VERSION: 145111f17b8f2cb94bfa5d1c266fabc5eb0e0952-43494016382-1
+      ROLLBACK_DIGEST: sha256:eef9fc8fd92d1296671d5ed20eabd03a322a325c0653d24df978923b6a5b99b6
+      KAMAL_IMAGE: ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625
+      KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 5e9ba2256528494df033d73949b86e9976375ba8
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify fixed workflow and checkout identity
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          test -f config/deploy.miniapp.yml
+
+      - name: Install existing Layer7 SSH credentials
+        env:
+          PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
+          SSH_PRIVATE_KEY: ${{ secrets.GPOINT_KAMAL_SSH_PRIVATE_KEY }}
+          VERIFIED_KNOWN_HOSTS: ${{ secrets.GPOINT_KAMAL_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test "$PRODUCTION_HOST" = 95.133.236.59
+          test -n "$SSH_PRIVATE_KEY" && test -n "$VERIFIED_KNOWN_HOSTS"
+          tmp_known_hosts="$(mktemp "$RUNNER_TEMP/known-hosts.XXXXXX")"
+          trap 'rm -f "$tmp_known_hosts"' EXIT
+          printf '%s\n' "$VERIFIED_KNOWN_HOSTS" > "$tmp_known_hosts"
+          chmod 600 "$tmp_known_hosts"
+          ssh-keygen -F "$PRODUCTION_HOST" -f "$tmp_known_hosts" >/dev/null
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          install -m 600 "$tmp_known_hosts" "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          cat > "$HOME/.ssh/config" <<EOF
+          Host $PRODUCTION_HOST
+            User root
+            IdentityFile $HOME/.ssh/id_ed25519
+            IdentitiesOnly yes
+            BatchMode yes
+            StrictHostKeyChecking yes
+            UserKnownHostsFile $HOME/.ssh/known_hosts
+          EOF
+          chmod 600 "$HOME/.ssh/config"
+          {
+            echo "GPOINT_PRODUCTION_HOST=$PRODUCTION_HOST"
+            echo 'GPOINT_SSH_KEY=/root/.ssh/id_ed25519'
+            echo 'GPOINT_KNOWN_HOSTS_FILE=/root/.ssh/known_hosts'
+          } >> "$GITHUB_ENV"
+
+      - name: Pull and verify immutable MiniApp image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin >/dev/null
+          image="ghcr.io/akhripunov/gpoint-miniapp:$MINIAPP_VERSION"
+          docker pull --platform linux/amd64 "$image" >/dev/null
+          docker image inspect "$image" --format '{{.Os}}/{{.Architecture}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{json .RepoDigests}}' |
+            python3 -c 'import json,sys; p=sys.stdin.read().split(" ",2); refs=json.loads(p[2]); raise SystemExit(0 if p[0]=="linux/amd64" and p[1]=="5e9ba2256528494df033d73949b86e9976375ba8" and "ghcr.io/akhripunov/gpoint-miniapp@sha256:78f7f6c5ac6667eeadbb5df84f2841c613092f8dc4ae89683760887132d94d39" in refs else "MiniApp OCI identity verification failed")'
+
+      - name: Capture current Core API identity for MiniApp hooks
+        run: |
+          set -euo pipefail
+          api_identity="$(ssh -T "root@$GPOINT_PRODUCTION_HOST" bash -s <<'REMOTE'
+          set -euo pipefail
+          name="$(docker ps --filter 'name=^/gpoint-core-api-' --format '{{.Names}}')"
+          test "$(printf '%s\n' "$name" | wc -l | tr -d ' ')" = 1
+          version="${name#gpoint-core-api-}"
+          source_sha="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$name")"
+          [[ "$version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ && "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$version" == "$source_sha-"* ]]
+          printf '%s %s\n' "$version" "$source_sha"
+          REMOTE
+          )"
+          read -r api_version api_source_sha <<< "$api_identity"
+          [[ "$api_version" == "${api_source_sha}-"* ]]
+          {
+            echo "GPOINT_KAMAL_CORE_API_VERSION=$api_version"
+            echo "GPOINT_KAMAL_CORE_API_SOURCE_SHA=$api_source_sha"
+          } >> "$GITHUB_ENV"
+
+      - name: Pull pinned Kamal CLI
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 "$KAMAL_IMAGE" >/dev/null
+          docker image inspect "$KAMAL_IMAGE" --format '{{.Os}}/{{.Architecture}}'
+
+      - name: Verify retained rollback image before any change
+        if: inputs.operation == 'rollback'
+        run: |
+          set -euo pipefail
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" bash -s -- "$ROLLBACK_VERSION" "$ROLLBACK_SOURCE_SHA" "$ROLLBACK_DIGEST" <<'REMOTE'
+          set -euo pipefail
+          version="$1"; source_sha="$2"; digest="$3"
+          name="gpoint-miniapp-web-$version"
+          docker inspect "$name" >/dev/null
+          test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$name")" = "$source_sha"
+          image="$(docker inspect --format '{{.Config.Image}}' "$name")"
+          refs="$(docker image inspect --format '{{json .RepoDigests}}' "$image")"
+          EXPECTED_REF="ghcr.io/akhripunov/gpoint-miniapp@$digest" python3 -c 'import json,os,sys; raise SystemExit(0 if os.environ["EXPECTED_REF"] in json.loads(sys.argv[1]) else "retained MiniApp image digest mismatch")' "$refs"
+          REMOTE
+
+      - name: Apply MiniApp image with stock Kamal
+        if: inputs.operation == 'deploy'
+        env:
+          GPOINT_COMMIT_SHA: ${{ env.SOURCE_SHA }}
+          GPOINT_APP_SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          GPOINT_KAMAL_SERVICE: gpoint-miniapp
+          KAMAL_ROLES: web
+          GPOINT_KAMAL_EXPECTED_DIGEST: ${{ env.MINIAPP_DIGEST }}
+        run: |
+          set -euo pipefail
+          docker run --rm --pull=never --platform linux/amd64 \
+            --volume "$GITHUB_WORKSPACE:/workdir" \
+            --volume "$HOME/.ssh:/root/.ssh:ro" \
+            --workdir /workdir \
+            --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA \
+            --env GPOINT_PRODUCTION_HOST --env GPOINT_SSH_KEY --env GPOINT_KNOWN_HOSTS_FILE \
+            --env KAMAL_REGISTRY_PASSWORD --env GPOINT_KAMAL_EXPECTED_DIGEST \
+            --env GPOINT_KAMAL_SERVICE --env KAMAL_ROLES \
+            --env GPOINT_KAMAL_CORE_API_VERSION --env GPOINT_KAMAL_CORE_API_SOURCE_SHA \
+            "$KAMAL_IMAGE" deploy --skip-push --version "$MINIAPP_VERSION" --roles web --config-file config/deploy.miniapp.yml
+
+      - name: Roll back MiniApp to verified retained image
+        if: inputs.operation == 'rollback'
+        env:
+          GPOINT_COMMIT_SHA: ${{ env.ROLLBACK_SOURCE_SHA }}
+          GPOINT_APP_SOURCE_SHA: ${{ env.ROLLBACK_SOURCE_SHA }}
+          GPOINT_KAMAL_SERVICE: gpoint-miniapp
+          KAMAL_ROLES: web
+          GPOINT_KAMAL_EXPECTED_DIGEST: ${{ env.ROLLBACK_DIGEST }}
+        run: |
+          set -euo pipefail
+          docker run --rm --pull=never --platform linux/amd64 \
+            --volume "$GITHUB_WORKSPACE:/workdir" \
+            --volume "$HOME/.ssh:/root/.ssh:ro" \
+            --workdir /workdir \
+            --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA \
+            --env GPOINT_PRODUCTION_HOST --env GPOINT_SSH_KEY --env GPOINT_KNOWN_HOSTS_FILE \
+            --env KAMAL_REGISTRY_PASSWORD --env GPOINT_KAMAL_EXPECTED_DIGEST \
+            --env GPOINT_KAMAL_SERVICE --env KAMAL_ROLES \
+            --env GPOINT_KAMAL_CORE_API_VERSION --env GPOINT_KAMAL_CORE_API_SOURCE_SHA \
+            "$KAMAL_IMAGE" rollback-miniapp rollback "$ROLLBACK_VERSION" --roles web --config-file config/deploy.miniapp.yml
+
+      - name: Verify MiniApp runtime, public HTTPS, API, Worker and Eros
+        env:
+          EXPECTED_VERSION: ${{ inputs.operation == 'rollback' && env.ROLLBACK_VERSION || env.MINIAPP_VERSION }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.operation == 'rollback' && env.ROLLBACK_SOURCE_SHA || env.SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" bash -s -- gpoint-miniapp-web "$EXPECTED_VERSION" "$EXPECTED_SOURCE_SHA" < scripts/verify-kamal-role.sh
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" bash -s <<'REMOTE'
+          set -euo pipefail
+          worker="$(docker ps --filter 'name=^/gpoint-core-worker-' --format '{{.Names}}')"
+          test "$(printf '%s\n' "$worker" | wc -l | tr -d ' ')" = 1
+          docker top "$worker" -eo pid,args | grep -F 'apps/worker/dist/main.js' >/dev/null
+          api="$(docker ps --filter 'name=^/gpoint-core-api-' --format '{{.Names}}')"
+          test "$(printf '%s\n' "$api" | wc -l | tr -d ' ')" = 1
+          docker exec "$api" node -e "fetch('http://127.0.0.1:3000/health/live').then(async r => { if (!r.ok || (await r.json()).status !== 'ok') process.exit(1) }).catch(() => process.exit(1))"
+          eros="$(docker ps --filter 'name=^/gpoint-eros-pilot-engine-' --format '{{.Names}}')"
+          test "$(printf '%s\n' "$eros" | wc -l | tr -d ' ')" = 1
+          docker exec "$eros" curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null
+          REMOTE
+          curl --retry 8 --retry-connrefused --retry-delay 3 --fail --silent --show-error https://gpoint.one/api/health/live | grep -F '"status":"ok"' >/dev/null
+          for path in / /creators; do
+            curl --retry 5 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" | grep -F '<div id="root">' >/dev/null
+          done
