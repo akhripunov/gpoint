@@ -486,6 +486,18 @@ def classify_component_scope(repo: Path, candidate: str, inventory: dict) -> dic
     plan = classify_component_build_plan(repo, candidate, component_sources)
     components = set(str(plan["deploy_scope"]).split("+")) - {"NONE"}
     mixed = mixed_component_baselines(inventory)
+    if "CORE" in mixed:
+        core_source = component_sources["CORE"]
+        for role in ALL_COMPONENT_ROLES["CORE"]:
+            row = inventory["roles"].get(role)
+            if row is None or row["source_sha"] in {core_source, candidate}:
+                continue
+            ancestor = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", row["source_sha"], candidate],
+                cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            if ancestor.returncode:
+                raise ValueError(f"{role} production source is not an ancestor of the candidate")
     components.update(mixed)
     # The production topology has five required runtime roles.
     missing_required = BASELINE_ROLES - set(inventory["roles"])

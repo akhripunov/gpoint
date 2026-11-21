@@ -166,9 +166,8 @@ def test_missing_core_bot_stays_disabled_without_forcing_a_release(tmp_path):
 
 
 def test_historical_layer7_mixed_core_baseline_forces_full_core_and_keeps_bot_disabled(tmp_path, monkeypatch):
-    api_sha = "3d680fa153fd6aebf786455d6f36d3b1a67cc78f"
-    worker_sha = "145111f17b8f2cb94bfa5d1c266fabc5eb0e0952"
-    repo, _ = component_repo(tmp_path)
+    repo, worker_sha = component_repo(tmp_path)
+    api_sha = commit_change(repo, "README.md", "historical API release\n")
     candidate = commit_change(repo, "README.md", "docs only\n")
     inventory = make_inventory(api_sha)
     api = inventory["roles"]["gpoint-core-api"]
@@ -249,3 +248,19 @@ def test_bootstrap_builds_the_three_active_application_images_only():
     assert MODULE.COMPONENT_IMAGES == {"CORE": "CORE", "MINIAPP": "MINIAPP", "EROS": "EROS"}
     assert set(MODULE.ALL_COMPONENT_ROLES) == {"CORE", "MINIAPP", "EROS"}
     assert not any("AGATA" in role or "RELAY" in role for role in MODULE.ROLE_REPOSITORIES)
+
+
+def test_mixed_core_rejects_worker_source_outside_candidate_history(tmp_path):
+    repo, source = component_repo(tmp_path)
+    candidate = commit_change(repo, "README.md", "candidate\n")
+    subprocess.run(["git", "checkout", "--detach", source], cwd=repo, check=True, capture_output=True)
+    worker = commit_change(repo, "README.md", "unrelated deployed worker\n")
+    inventory = make_inventory(source)
+    inventory["roles"]["gpoint-core-worker"].update(
+        source_sha=worker,
+        version=f"{worker}-8-1",
+        name=f"gpoint-core-worker-{worker}-8-1",
+    )
+
+    with pytest.raises(ValueError, match="gpoint-core-worker.*not an ancestor"):
+        MODULE.classify_component_scope(repo, candidate, inventory)
