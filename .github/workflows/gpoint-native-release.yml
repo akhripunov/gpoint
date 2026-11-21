@@ -1448,27 +1448,40 @@ jobs:
               test "$legacy_image" = 'ollama/ollama@sha256:a717bfc1c56acfc2e85d3109bd40a7646258ec9062c40cea83b9ed0927eb4223' || {
                 echo 'Legacy Ollama accessory image differs from the pinned model server' >&2; exit 1;
               }
-              legacy_mounts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{json .Mounts}}' "$legacy_container")"
+              legacy_mounts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format "'{{json .Mounts}}'" "$legacy_container")"
               python3 - "$legacy_mounts" <<'PY'
           import json,sys
           mounts=json.loads(sys.argv[1])
           if not any(m.get('Name')=='ollama-layer7-models' and m.get('Destination')=='/root/.ollama' and m.get('RW') is True for m in mounts):
               raise SystemExit('legacy Ollama model volume is not the approved persistent volume')
           PY
-              if [[ "$legacy_state" == running ]]; then
-                legacy_networks="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{json .NetworkSettings.Networks}}' "$legacy_container")"
-                python3 - "$legacy_networks" <<'PY'
-          import json,sys
-          network=json.loads(sys.argv[1]).get('gpoint_ollama_internal',{})
-          if not network or 'ollama' not in network.get('Aliases',[]):
-              raise SystemExit('legacy Ollama is not on the expected private network')
+              legacy_binding="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format "'{{json .HostConfig.PortBindings}}'" "$legacy_container")"
+              python3 - "$legacy_binding" <<'PY'
+          import json, sys
+          if json.loads(sys.argv[1]) != {"11434/tcp": [{"HostIp": "127.0.0.1", "HostPort": "11435"}]}:
+              raise SystemExit("legacy Ollama loopback binding differs from the approved configuration")
           PY
+              legacy_networks="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format "'{{json .NetworkSettings.Networks}}'" "$legacy_container")"
+              network_action="$(python3 - "$legacy_networks" "$legacy_state" <<'PY'
+          import json, sys
+          networks = json.loads(sys.argv[1])
+          private = networks.get("gpoint_ollama_internal")
+          if private and set(networks) <= {"gpoint_ollama_internal", "kamal"} and "ollama" in (private.get("Aliases") or []):
+              print("retain")
+          elif set(networks) == {"kamal"} and sys.argv[2] == "running":
+              print("attach")
+          else:
+              raise SystemExit("legacy Ollama network topology is not recognized")
+          PY
+              )"
+              if [[ "$network_action" == attach ]]; then
+                ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker network connect --alias ollama gpoint_ollama_internal "$legacy_container"
               fi
               ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker rename "$legacy_container" "$ollama_container"
               accessory_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{.State.Status}}' "$ollama_container")"
             fi
             if [[ "$accessory_state" == running ]]; then
-              on_network="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{json .NetworkSettings.Networks}}' "$ollama_container")"
+              on_network="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format "'{{json .NetworkSettings.Networks}}'" "$ollama_container")"
               if ! python3 -c 'import json,sys; n=json.loads(sys.argv[1]).get("gpoint_ollama_internal",{}); raise SystemExit(0 if "ollama" in n.get("Aliases",[]) else 1)' "$on_network"; then
                 echo 'Ollama accessory is missing its required private network alias' >&2
                 exit 1
@@ -1510,6 +1523,19 @@ jobs:
             if [[ "$EROS_INSTALLED" == true || "$DEPLOY_EROS" == true ]]; then
               EROS_OLLAMA_MODEL_DIGEST="$(python3 -c 'import json; print(json.load(open("services/eros-engine/ollama-model.lock.json"))["digest"])')"
               ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - "$EROS_OLLAMA_MODEL_DIGEST" < scripts/verify-layer7-ollama.py
+              accessory_networks="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format "'{{json .NetworkSettings.Networks}}'" "$ollama_container")"
+              detach_legacy="$(python3 - "$accessory_networks" <<'PY'
+          import json, sys
+          networks = set(json.loads(sys.argv[1]))
+          if networks not in ({"gpoint_ollama_internal"}, {"gpoint_ollama_internal", "kamal"}):
+              raise SystemExit("Ollama accessory network isolation cannot be confirmed")
+          print(str("kamal" in networks).lower())
+          PY
+              )"
+              if [[ "$detach_legacy" == true ]]; then
+                ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker network disconnect kamal "$ollama_container"
+                ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - "$EROS_OLLAMA_MODEL_DIGEST" < scripts/verify-layer7-ollama.py
+              fi
             fi
           fi
           if [[ "$DEPLOY_MINIAPP" == true ]]; then

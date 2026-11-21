@@ -249,3 +249,59 @@ def test_hosted_stock_eros_e2e_uses_the_policy_approved_upstream_tag():
     assert build["with"]["tags"] == "gpoint-eros:stock-${{ env.EROS_UPSTREAM_SHA }}"
     assert "#${{ env.EROS_UPSTREAM_SHA }}" in build["with"]["context"]
     assert 'image="gpoint-eros:stock-$EROS_UPSTREAM_SHA"' in e2e
+
+
+def test_ssh_preserves_docker_inspect_templates_with_spaces():
+    import shlex
+
+    apply = next(step["run"] for step in steps_for("deploy") if step.get("id") == "kamal_apply")
+    formats = {
+        "legacy_mounts": "{{json .Mounts}}",
+        "legacy_binding": "{{json .HostConfig.PortBindings}}",
+        "accessory_networks": "{{json .NetworkSettings.Networks}}",
+        "legacy_networks": "{{json .NetworkSettings.Networks}}",
+        "on_network": "{{json .NetworkSettings.Networks}}",
+    }
+    for variable, expected in formats.items():
+        line = next(line for line in apply.splitlines() if line.strip().startswith(variable + "="))
+        remote_command = line.split('GPOINT_PRODUCTION_HOST}" ', 1)[1].rsplit(')"', 1)[0]
+        ssh_arguments = shlex.split(remote_command)
+        assert shlex.split(" ".join(ssh_arguments))[3] == expected
+
+
+def test_legacy_ollama_network_is_migrated_without_restarting_it():
+    apply = next(step["run"] for step in steps_for("deploy") if step.get("id") == "kamal_apply")
+    legacy = apply.index('legacy_container=gpoint-eros-relay-ollama')
+    verify_port = apply.index("legacy Ollama loopback binding differs", legacy)
+    attach = apply.index('docker network connect --alias ollama gpoint_ollama_internal', legacy)
+    rename = apply.index('docker rename "$legacy_container" "$ollama_container"', legacy)
+    probe = apply.index("scripts/verify-layer7-ollama.py", rename)
+    detach = apply.index('docker network disconnect kamal "$ollama_container"', probe)
+    assert legacy < verify_port < attach < rename < probe < detach
+    assert "docker restart" not in apply[legacy:detach]
+
+
+def test_legacy_ollama_network_plan_accepts_only_known_topologies():
+    import json
+    import subprocess
+    import sys
+
+    apply = next(step["run"] for step in steps_for("deploy") if step.get("id") == "kamal_apply")
+    check = apply.split("network_action=", 1)[1].split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+    private = {"Aliases": ["ollama"]}
+    for networks, state, expected in (
+        ({"kamal": {"Aliases": None}}, "running", "attach"),
+        ({"kamal": {}, "gpoint_ollama_internal": private}, "running", "retain"),
+        ({"gpoint_ollama_internal": private}, "exited", "retain"),
+        ({"kamal": {}, "unrelated": {}}, "running", None),
+        ({"gpoint_ollama_internal": {"Aliases": None}}, "running", None),
+        ({"kamal": {}}, "exited", None),
+    ):
+        result = subprocess.run([sys.executable, "-c", check, json.dumps(networks), state],
+                                text=True, capture_output=True)
+        if expected is None:
+            assert result.returncode != 0
+            assert "topology is not recognized" in result.stderr
+        else:
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.strip() == expected
