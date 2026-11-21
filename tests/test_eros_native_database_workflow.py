@@ -220,12 +220,9 @@ def test_eros_database_changes_do_not_run_for_core_only_deploy_or_rollback():
     assert "(inputs.rollback_eros == true) && inputs.mode == 'rollback'" in compat["if"]
 
 
-def test_eros_topology_inventory_shell_loop_has_no_unused_read_variable():
-    deploy = steps_for("deploy")
-    topology = next(step["run"] for step in deploy
-                    if step.get("name") == "Verify installed Kamal topology before ordinary release")
-    assert '"config/deploy.eros.yml|gpoint-eros-pilot-engine"' in topology
-    assert 'IFS=\'|\' read -r config expected <<< "$pair"' in topology
+def test_eros_topology_consumes_the_kamal_inventory_version():
+    topology = next(step for step in steps_for("deploy") if step.get("id") == "topology")
+    assert topology["env"]["KAMAL_EROS_VERSION"] == "${{ steps.kamal_inventory.outputs.eros_version }}"
 
 
 def test_kamal_roles_share_the_private_eros_network_with_stable_service_aliases():
