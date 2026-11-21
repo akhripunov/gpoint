@@ -781,15 +781,10 @@ jobs:
             echo 'production release triggering actor must match the repository owner' >&2; exit 1;
           }
           test "$REQUESTED_SHA" = "$WORKFLOW_SHA"
-          [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if ! [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'candidate SHA must be exactly 40 lowercase hexadecimal characters' >&2; exit 1;
+          fi
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$REQUESTED_SHA"
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: '3.12'
-          cache: pip
-          cache-dependency-path: services/agata/pyproject.toml
-      - name: Install pinned AGATA Alembic graph dependencies
-        run: python -m pip install ./services/agata
       - name: Install verified Kamal SSH credentials
         env:
           GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
@@ -797,13 +792,24 @@ jobs:
           VERIFIED_KNOWN_HOSTS: ${{ secrets.GPOINT_KAMAL_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-          test -n "$SSH_PRIVATE_KEY" && test -n "$VERIFIED_KNOWN_HOSTS"
-          [[ "$GPOINT_PRODUCTION_HOST" == "95.133.236.59" && "$GPOINT_PRODUCTION_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || { echo 'production target must be the canonical Layer7 VPS' >&2; exit 1; }
+          test -n "$GPOINT_PRODUCTION_HOST" || { echo 'GPOINT_KAMAL_HOST is required' >&2; exit 1; }
+          test -n "$SSH_PRIVATE_KEY" && test -n "$VERIFIED_KNOWN_HOSTS" || {
+            echo 'required production SSH credentials are missing' >&2; exit 1;
+          }
+          [[ "$GPOINT_PRODUCTION_HOST" == "95.133.236.59" ]] || {
+            echo 'production target must match the verified Layer7 address' >&2; exit 1;
+          }
+          GPOINT_KNOWN_HOSTS_PREFLIGHT="$(mktemp "$RUNNER_TEMP/gpoint-known-hosts.XXXXXX")"
+          trap 'rm -f "$GPOINT_KNOWN_HOSTS_PREFLIGHT"' EXIT
+          printf '%s\n' "$VERIFIED_KNOWN_HOSTS" > "$GPOINT_KNOWN_HOSTS_PREFLIGHT"
+          chmod 600 "$GPOINT_KNOWN_HOSTS_PREFLIGHT"
+          if ! ssh-keygen -F "$GPOINT_PRODUCTION_HOST" -f "$GPOINT_KNOWN_HOSTS_PREFLIGHT" >/dev/null; then
+            echo 'Layer7 SSH host key is not pinned for the production target' >&2; exit 1;
+          fi
           install -d -m 700 "$HOME/.ssh"
           printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
-          printf '%s\n' "$VERIFIED_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          ssh-keygen -F "$GPOINT_PRODUCTION_HOST" -f "$HOME/.ssh/known_hosts" >/dev/null
-          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
+          install -m 600 "$GPOINT_KNOWN_HOSTS_PREFLIGHT" "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/id_ed25519"
           cat > "$HOME/.ssh/config" <<EOF
           Host ${GPOINT_PRODUCTION_HOST}
             User root
@@ -819,6 +825,13 @@ jobs:
             echo "GPOINT_SSH_KEY=/root/.ssh/id_ed25519"
             echo "GPOINT_KNOWN_HOSTS_FILE=/root/.ssh/known_hosts"
           } >> "$GITHUB_ENV"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: services/agata/pyproject.toml
+      - name: Install pinned AGATA Alembic graph dependencies
+        run: python -m pip install ./services/agata
       - name: Pull and verify pinned Kamal CLI image
         env:
           KAMAL_IMAGE: ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625

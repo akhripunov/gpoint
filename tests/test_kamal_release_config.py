@@ -280,8 +280,13 @@ def test_production_host_comes_from_exact_environment_and_known_hosts():
 
 def test_native_release_rejects_non_layer7_ssh_target_before_remote_setup():
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
-    credentials = next(step for step in workflow["jobs"]["deploy"]["steps"]
-                       if step.get("name") == "Install verified Kamal SSH credentials")
+    deploy = workflow["jobs"]["deploy"]
+    assert deploy["needs"] == ["tests", "build"]
+    assert deploy["environment"]["name"] == "production"
+    steps = deploy["steps"]
+    credentials_index = next(i for i, step in enumerate(steps)
+                             if step.get("name") == "Install verified Kamal SSH credentials")
+    credentials = steps[credentials_index]
     script = credentials["run"]
     guard = next((line.strip() for line in script.splitlines()
                   if "GPOINT_PRODUCTION_HOST" in line and "95.133.236.59" in line), None)
@@ -289,15 +294,81 @@ def test_native_release_rejects_non_layer7_ssh_target_before_remote_setup():
     assert guard is not None, "the release must reject a host other than the documented Layer7 VPS"
     assert "ssh-keygen -F" in script
     assert script.index(guard) < script.index('ssh-keygen -F "$GPOINT_PRODUCTION_HOST"')
+    assert credentials_index < next(i for i, step in enumerate(steps)
+                                    if step.get("uses", "").startswith("actions/setup-python@"))
+    assert credentials_index < next(i for i, step in enumerate(steps)
+                                    if step.get("name") == "Install pinned AGATA Alembic graph dependencies")
 
-    valid = subprocess.run(["bash", "-c", guard],
-                           env={**os.environ, "GPOINT_PRODUCTION_HOST": "95.133.236.59"},
-                           text=True, capture_output=True)
-    invalid = subprocess.run(["bash", "-c", guard],
-                             env={**os.environ, "GPOINT_PRODUCTION_HOST": "old-host.example"},
-                             text=True, capture_output=True)
-    assert valid.returncode == 0
-    assert invalid.returncode != 0
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        generated_key = root / "fixture-host-key"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(generated_key)],
+                       check=True, text=True, capture_output=True)
+        key_type, key_data, *_ = generated_key.with_suffix(".pub").read_text().split()
+        pinned_known_hosts = f"95.133.236.59 {key_type} {key_data}\n"
+        wrong_known_hosts = f"unknown.example {key_type} {key_data}\n"
+        private_key = generated_key.read_text()
+
+        def run_preflight(name, host="95.133.236.59", ssh_key=private_key,
+                          known_hosts=pinned_known_hosts):
+            home = root / name
+            home.mkdir()
+            github_env = root / f"{name}.github-env"
+            result = subprocess.run(
+                ["bash", "-c", script],
+                env={**os.environ, "HOME": str(home), "GITHUB_ENV": str(github_env),
+                     "RUNNER_TEMP": str(root),
+                     "GPOINT_PRODUCTION_HOST": host, "SSH_PRIVATE_KEY": ssh_key,
+                     "VERIFIED_KNOWN_HOSTS": known_hosts},
+                text=True, capture_output=True,
+            )
+            return result, home
+
+        valid, valid_home = run_preflight("valid")
+        assert valid.returncode == 0, valid.stderr
+        ssh_config = (valid_home / ".ssh/config").read_text()
+        assert "StrictHostKeyChecking yes" in ssh_config
+        assert "UserKnownHostsFile" in ssh_config
+
+        cases = (
+            ("wrong-host", "old-host.example", private_key, pinned_known_hosts),
+            ("empty-host", "", private_key, pinned_known_hosts),
+            ("empty-key", "95.133.236.59", "", pinned_known_hosts),
+            ("empty-known-hosts", "95.133.236.59", private_key, ""),
+            ("unknown-host-key", "95.133.236.59", private_key, wrong_known_hosts),
+        )
+        for name, host, ssh_key, known_hosts in cases:
+            result, home = run_preflight(name, host, ssh_key, known_hosts)
+            assert result.returncode != 0, name
+            assert not (home / ".ssh/id_ed25519").exists(), name
+
+
+def test_deploy_recheck_rejects_malformed_sha_before_github_api_access():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-native-release.yml").read_text())
+    recheck = next(step for step in workflow["jobs"]["deploy"]["steps"]
+                   if step.get("name") == "Recheck exact SHA, current main and owner approval")
+    script = recheck["run"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        gh = bin_dir / "gh"
+        gh.write_text("#!/bin/sh\nprintf called > \"$GH_API_CALLS\"\necho " + "a" * 40 + "\n")
+        gh.chmod(0o755)
+        calls = root / "gh-calls"
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                 "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REPOSITORY": "owner/repo",
+                 "APPROVE_PRODUCTION": "true", "OWNER_APPROVAL_ACTOR": "owner",
+                 "OWNER_TRIGGERING_ACTOR": "owner", "OWNER_REPOSITORY": "owner",
+                 "REQUESTED_SHA": "not-a-sha", "WORKFLOW_SHA": "not-a-sha",
+                 "GH_API_CALLS": str(calls)},
+            text=True, capture_output=True,
+        )
+        assert result.returncode != 0
+        assert not calls.exists()
 
 
 def test_kamal_pre_app_boot_checks_the_pulled_digest_before_boot():

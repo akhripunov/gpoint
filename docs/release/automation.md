@@ -17,8 +17,14 @@
 >
 > Native production SSH принимает только документированный адрес Layer7
 > `95.133.236.59`; устаревший или ошибочный `GPOINT_KAMAL_HOST` блокируется
-> до записи SSH credentials и до любой удалённой команды. Изменение адреса
-> требует согласованного обновления guard и matching host-key конфигурации.
+> до записи SSH credentials и до любой удалённой команды. `GPOINT_KAMAL_HOST`
+> читается из защищённого GitHub Environment `production`, а не из repository
+> secret. Exact-address и matching `GPOINT_KAMAL_KNOWN_HOSTS` checks выполняются
+> сразу после проверки exact SHA/OWNER — до Python setup, migration dependency
+> installation и Kamal setup. Секреты остаются только в Deploy job: переносить
+> их в Tests/Build ради более раннего preflight нельзя. Изменение адреса требует
+> согласованного обновления guard и matching host-key конфигурации; DNS lookup
+> сам по себе не подтверждает production identity.
 >
 > Same-repository PR от `OWNER`, `MEMBER` или `COLLABORATOR` может собрать
 > только выбранные компоненты и проверить GHCR readback без production secrets
