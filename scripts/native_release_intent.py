@@ -47,6 +47,7 @@ PRISMA_MIGRATION = re.compile(
 )
 # Explicitly reviewed non-runtime inputs that do not change an application image.
 KNOWN_NON_RUNTIME_FILES = frozenset({
+    ".release-authorizations/gpoint-prod-recovery-20261122-001.json",
     ".github/actionlint.yaml",
     ".kamal/hooks/post-app-boot",
     ".kamal/hooks/pre-app-boot",
