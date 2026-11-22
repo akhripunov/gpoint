@@ -42,7 +42,7 @@ def test_core_deploy_prepares_and_verifies_stable_worker_tunnel_with_stock_kamal
     apply = next(step for step in steps if step.get("id") == "kamal_apply")["run"]
     verify = next(step for step in steps if step.get("id") == "verify")["run"]
     accessory = apply.index("kamal accessory boot worker-proxy")
-    core_api = apply.index("kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles api")
+    core_api = apply.index("kamal redeploy --skip-push --version \"$IMAGE_VERSION\" --roles api")
 
     assert core_api < accessory
     assert "current_proxy_service=\"$(ssh -T" not in apply
@@ -410,7 +410,7 @@ def test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails
     assert core.index("KAMAL_ROLES=worker") < core.index("KAMAL_ROLES=bot")
     for block, role in ((core, "worker"), (core, "bot")):
         stop = block.index(f"kamal app stop --roles {role}")
-        deploy_call = block.index(f"kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles {role}")
+        deploy_call = block.index(f"kamal redeploy --skip-push --version \"$IMAGE_VERSION\" --roles {role}")
         assert stop < deploy_call
     assert "KAMAL_ROLES=worker,bot" not in apply
     assert "verify_single_running_role gpoint-core-worker" in apply

@@ -131,13 +131,21 @@ def test_native_eros_deploy_uses_stock_kamal_accessory_and_verifies_direct_route
     eros = body.index('if [[ "$DEPLOY_EROS" == true ]]; then')
     accessory = body.index("kamal accessory boot ollama --config-file config/deploy.ollama.yml")
     model_pull = body.index("kamal accessory exec ollama ollama pull qwen3-embedding:0.6b", accessory)
-    engine = body.index("kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles engine", eros)
+    engine = body.index("kamal redeploy --skip-push --version \"$IMAGE_VERSION\" --roles engine", eros)
     assert accessory < model_pull < engine
     assert "config/deploy.eros-relay.yml" not in body
     assert "restore_legacy_ollama" not in body
     assert "verify-layer7-ollama.py" in body
     assert "--prepare" in body
     assert "--verify-and-detach" in body
+
+
+def test_component_deploys_use_stock_kamal_redeploy_without_automatic_prune():
+    deploy = steps_for("deploy")
+    kamal = next(step for step in deploy if step.get("name") == "Deploy exact immutable images with stock Kamal")
+    body = kamal["run"]
+    assert body.count("kamal redeploy --skip-push --version \"$IMAGE_VERSION\"") == 5
+    assert "kamal deploy --skip-push" not in body
 
 
 def test_runtime_verify_sends_512_dimension_embedding_from_inside_eros_container():

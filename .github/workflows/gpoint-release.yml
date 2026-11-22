@@ -1366,7 +1366,7 @@ jobs:
           fi
           if [[ "$DEPLOY_EROS" == true ]]; then
             GPOINT_KAMAL_EXPECTED_DIGEST="$EROS_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
-              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles engine --config-file config/deploy.eros.yml
+              kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles engine --config-file config/deploy.eros.yml
             verify_single_running_role gpoint-eros-pilot-engine "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
           fi
           if [[ "$DEPLOY_CORE" == true ]]; then
@@ -1375,7 +1375,7 @@ jobs:
               core_api_config=config/deploy.eros-api.yml
             fi
             GPOINT_WORKER_PROXY_DIGEST="$APP_DIGEST" GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
-              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file "$core_api_config"
+              kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file "$core_api_config"
             if [[ "$core_api_config" == config/deploy.eros-api.yml ]]; then
               proxy_name=gpoint-core-worker-proxy
               proxy_image="ghcr.io/akhripunov/gpoint-runtime@$APP_DIGEST"
@@ -1433,14 +1433,14 @@ jobs:
             running_workers="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker ps -q --filter label=service=gpoint-core-worker --filter status=running)"
             [[ -z "$running_workers" ]] || { echo 'Old Core Worker is still running after Kamal stop' >&2; exit 1; }
             GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker \
-              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker --config-file config/deploy.yml
+              kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles worker --config-file config/deploy.yml
             verify_single_running_role gpoint-core-worker "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
             if [[ "$DEPLOY_BOT" == true ]]; then
               GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot kamal app stop --roles bot --config-file config/deploy.yml
               running_bots="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker ps -q --filter label=service=gpoint-core-bot --filter status=running)"
               [[ -z "$running_bots" ]] || { echo 'Old Core Bot is still running after Kamal stop' >&2; exit 1; }
               GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot \
-                kamal deploy --skip-push --version "$IMAGE_VERSION" --roles bot --config-file config/deploy.yml
+                kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles bot --config-file config/deploy.yml
               verify_single_running_role gpoint-core-bot "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
             fi
             if [[ "$EROS_INSTALLED" == true || "$DEPLOY_EROS" == true ]]; then
@@ -1450,7 +1450,7 @@ jobs:
           fi
           if [[ "$DEPLOY_MINIAPP" == true ]]; then
             GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
-              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
+              kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
           fi
       - name: Verify Eros SQLx ledger after the candidate boots
         id: eros_database_verify
