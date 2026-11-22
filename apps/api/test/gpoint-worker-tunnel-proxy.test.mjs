@@ -15,7 +15,7 @@ async function close(server) {
   await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
-test('tunnels only worker routes through the existing Kamal Proxy', async (t) => {
+test('tunnels only worker routes through the stable Kamal Core API alias', async (t) => {
   let upstreamRequest;
   const upstream = http.createServer(async (request, response) => {
     const chunks = [];
@@ -51,7 +51,7 @@ test('tunnels only worker routes through the existing Kamal Proxy', async (t) =>
   assert.deepEqual(await response.json(), { status: 'ok' });
   assert.deepEqual(upstreamRequest, {
     method: 'POST',
-    url: '/api/gpoint-worker/claim',
+    url: '/gpoint-worker/claim',
     host: 'gpoint.one',
     authorization: 'Bearer worker-test-token',
     body: JSON.stringify({ worker_id: 'mac-product-worker' }),
@@ -82,7 +82,7 @@ test('rejects unrelated routes and methods without contacting the upstream', asy
 test('allows only the read-only queue status GET endpoint', async (t) => {
   const upstream = http.createServer((request, response) => {
     assert.equal(request.method, 'GET');
-    assert.equal(request.url, '/api/gpoint-worker/queue-status');
+    assert.equal(request.url, '/gpoint-worker/queue-status');
     assert.equal(request.headers.host, 'gpoint.one');
     response.writeHead(200, { 'content-type': 'application/json' }).end('{"status":"ok"}');
   });
@@ -101,9 +101,9 @@ test('allows only the read-only queue status GET endpoint', async (t) => {
 
 test('keeps the Worker tunnel online across two Core API updates and rollback', async (t) => {
   let activeApiVersion = 'core-v1';
-  const kamalProxy = http.createServer((request, response) => {
+  const coreApi = http.createServer((request, response) => {
     assert.equal(request.headers.host, 'gpoint.one');
-    assert.equal(request.url, '/api/gpoint-worker/health');
+    assert.equal(request.url, '/gpoint-worker/health');
     if (request.headers.authorization !== 'Bearer worker-test-token') {
       response.writeHead(401, { 'content-type': 'application/json' }).end('{"status":"unauthorized"}');
       return;
@@ -111,12 +111,12 @@ test('keeps the Worker tunnel online across two Core API updates and rollback', 
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(JSON.stringify({ status: 'ok', core: activeApiVersion }));
   });
-  const upstreamPort = await listen(kamalProxy);
+  const upstreamPort = await listen(coreApi);
   const workerProxy = createWorkerTunnelProxy({ upstreamHost: '127.0.0.1', upstreamPort });
   const workerProxyPort = await listen(workerProxy);
   t.after(async () => {
     await close(workerProxy);
-    await close(kamalProxy);
+    await close(coreApi);
   });
 
   async function workerHealth(expectedVersion) {

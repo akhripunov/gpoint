@@ -10,8 +10,8 @@ const WORKER_PATHS = new Map([
 ]);
 
 export function createWorkerTunnelProxy({
-  upstreamHost = 'kamal-proxy',
-  upstreamPort = 80,
+  upstreamHost = 'gpoint-core-api',
+  upstreamPort = 3000,
   requestTimeoutMs = 18_000,
 } = {}) {
   if (!Number.isInteger(upstreamPort) || upstreamPort < 1 || upstreamPort > 65_535) {
@@ -47,7 +47,7 @@ export function createWorkerTunnelProxy({
       hostname: upstreamHost,
       port: upstreamPort,
       method: request.method,
-      path: `/api${url.pathname}${url.search}`,
+      path: `${url.pathname}${url.search}`,
       headers,
       timeout: requestTimeoutMs,
     }, (upstreamResponse) => {

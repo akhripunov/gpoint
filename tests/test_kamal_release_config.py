@@ -43,6 +43,7 @@ def test_eros_api_uses_a_stable_loopback_worker_accessory_instead_of_api_port_pu
     accessory = config["accessories"]["worker-proxy"]
 
     assert "publish" not in api_options
+    assert api_options["network-alias"] == "gpoint-core-api"
     assert accessory["image"] == (
         "ghcr.io/akhripunov/gpoint-runtime@"
         "<%= ENV.fetch(\"GPOINT_WORKER_PROXY_DIGEST\", \"sha256:0000000000000000000000000000000000000000000000000000000000000000\") %>"
@@ -53,6 +54,10 @@ def test_eros_api_uses_a_stable_loopback_worker_accessory_instead_of_api_port_pu
     assert accessory["options"]["read-only"] is True
     assert accessory["options"]["cap-drop"] == "ALL"
     assert accessory["options"]["security-opt"] == "no-new-privileges:true"
+    tunnel_proxy = (ROOT / "apps/api/src/gpoint-worker-tunnel-proxy.mjs").read_text()
+    assert "upstreamHost = 'gpoint-core-api'" in tunnel_proxy
+    assert "upstreamPort = 3000" in tunnel_proxy
+    assert "path: `${url.pathname}${url.search}`" in tunnel_proxy
 
 
 def test_kamal_core_config_uses_public_tls_proxy_and_only_core_roles():

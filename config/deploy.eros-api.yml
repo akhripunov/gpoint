@@ -28,9 +28,9 @@ servers:
       healthcheck:
         path: /health/live
 
-# Keep the Mac Product Worker tunnel endpoint independent of the replaceable
-# API container. This forwards only the authenticated GPoint worker routes
-# through the existing Kamal Proxy and binds only to VPS loopback.
+# Keep the Mac Product Worker tunnel endpoint stable across API replacements.
+# It reaches the current Core API through Kamal's private service alias,
+# forwards only authenticated GPoint worker routes, and binds to VPS loopback.
 accessories:
   worker-proxy:
     image: ghcr.io/akhripunov/gpoint-runtime@<%= ENV.fetch("GPOINT_WORKER_PROXY_DIGEST", "sha256:0000000000000000000000000000000000000000000000000000000000000000") %>
