@@ -1645,7 +1645,7 @@ jobs:
               test "$image_id" = "$baseline_image_id" || { echo "untouched role image ID changed: $prefix" >&2; exit 1; }
             fi
             docker image inspect "$image_id" --format '{{json .RepoDigests}}' | grep -F "$repository_digest" >/dev/null
-            running_count="$(docker ps -q --filter "name=^/${prefix}-" | wc -l | tr -d ' ')"
+            running_count="$(docker ps --no-trunc --format '{{.Names}}' | grep -Ec "^${prefix}-[0-9a-f]{40}-[0-9]+-[0-9]+$" || true)"
             test "$running_count" = 1 || { echo "duplicate running Kamal role: $prefix" >&2; exit 1; }
           done <<< "$runtime_rows"
           core_version="$(sed -n 's/^gpoint-core-api|\([^|]*\).*/\1/p' <<< "$runtime_rows")"
@@ -2055,7 +2055,7 @@ jobs:
           fi
           for item in "${rollback_roles[@]}"; do
             IFS='|' read -r prefix expected_image version source_sha <<< "$item"
-            current="$(docker ps -q --filter "name=^/${prefix}-")"
+            current="$(docker ps --no-trunc --format '{{.Names}}' | grep -E "^${prefix}-[0-9a-f]{40}-[0-9]+-[0-9]+$" || true)"
             current_running=false
             if [[ -n "$current" ]]; then
               [[ "$current" != *$'\n'* ]] || { echo "multiple running rollback roles: $prefix" >&2; exit 1; }
@@ -2241,7 +2241,7 @@ jobs:
           for item in "${rollback_roles[@]}"; do
             IFS='|' read -r prefix expected version source_sha <<< "$item"
             name="$prefix-$version"
-            test "$(docker ps -q --filter "name=^/${prefix}-" | wc -l | tr -d ' ')" = 1
+            test "$(docker ps --no-trunc --format '{{.Names}}' | grep -Ec "^${prefix}-[0-9a-f]{40}-[0-9]+-[0-9]+$" || true)" = 1
             test "$(docker ps -q --filter "name=^/$name$" | wc -l | tr -d ' ')" = 1
             test "$(docker inspect --format '{{.State.Running}}' "$name")" = true
             test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$name")" = "$source_sha"

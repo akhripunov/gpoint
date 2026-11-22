@@ -202,7 +202,7 @@ jobs:
           ssh -T "root@$GPOINT_PRODUCTION_HOST" bash -s -- gpoint-miniapp-web "$EXPECTED_VERSION" "$EXPECTED_SOURCE_SHA" < scripts/verify-kamal-role.sh
           ssh -T "root@$GPOINT_PRODUCTION_HOST" bash -s <<'REMOTE'
           set -euo pipefail
-          worker="$(docker ps --filter 'name=^/gpoint-core-worker-' --format '{{.Names}}')"
+          worker="$(docker ps --no-trunc --format '{{.Names}}' | grep -E '^gpoint-core-worker-[0-9a-f]{40}-[0-9]+-[0-9]+$' || true)"
           test "$(printf '%s\n' "$worker" | wc -l | tr -d ' ')" = 1
           docker top "$worker" -eo pid,args | grep -F 'apps/worker/dist/main.js' >/dev/null
           api="$(docker ps --filter 'name=^/gpoint-core-api-' --format '{{.Names}}')"

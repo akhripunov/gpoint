@@ -755,12 +755,12 @@ miniapp="$core"
 bot_enabled=false
 docker() {
     case "$1 $2" in
-      "ps -q")
-        case "$4" in
-          'name=^/gpoint-core-worker-') printf '%s' "$MOCK_WORKER" ;;
-          'name=^/gpoint-core-bot-') ;;
-          *) printf 'current\n' ;;
-        esac ;;
+      "ps --no-trunc")
+        if [[ "$prefix" == gpoint-core-worker ]]; then
+          printf '%s' "$MOCK_WORKER"
+        else
+          printf '%s\n' "$prefix-$core_version"
+        fi ;;
       "ps -aq")
         if [[ "$4" != *gpoint-core-worker* || "$MOCK_RETAINED" == true ]]; then
           printf 'retained\n'
@@ -781,7 +781,8 @@ docker() {
     assert result.returncode == 0, result.stderr
     assert "ROLLBACK_WORKER_RUNNING=false" in result.stdout
 
-    for changes in ({"MOCK_RETAINED": "false"}, {"MOCK_WORKER": "first\nsecond\n"}):
+    for changes in ({"MOCK_RETAINED": "false"},
+                    {"MOCK_WORKER": f"gpoint-core-worker-{'a' * 40}-91-1\ngpoint-core-worker-{'b' * 40}-92-1\n"}):
         result = subprocess.run(["bash", "-c", script], env={**env, **changes}, capture_output=True)
         assert result.returncode != 0
 
