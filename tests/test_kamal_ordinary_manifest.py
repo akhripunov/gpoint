@@ -207,7 +207,15 @@ def test_remote_copied_manifest_writer_loads_transferred_release_intent_and_filt
     helper = ROOT / "scripts/native_release_intent.py"
     helper_copy = scripts / "native_release_intent.py"
     shutil.copy2(helper, helper_copy)
-    assert helper_copy.read_bytes() == helper.read_bytes()
+    release_filter = ROOT / ".github/filters/native-release.json"
+    filter_copy = filters / "native-release.json"
+    writer_sha = hashlib.sha256(WRITER.read_bytes()).hexdigest()
+    remote_writer_sha = hashlib.sha256(writer.read_bytes()).hexdigest()
+    helper_sha = hashlib.sha256(helper.read_bytes()).hexdigest()
+    remote_helper_sha = hashlib.sha256(helper_copy.read_bytes()).hexdigest()
+    filter_sha = hashlib.sha256(release_filter.read_bytes()).hexdigest()
+    assert writer_sha == remote_writer_sha
+    assert helper_sha == remote_helper_sha
 
     output = remote_root / "ordinary-manifest.json"
     args = ordinary_args(output)
@@ -225,7 +233,9 @@ def test_remote_copied_manifest_writer_loads_transferred_release_intent_and_filt
     assert without_filter.returncode != 0
     assert "native-release.json" in without_filter.stderr
 
-    shutil.copy2(ROOT / ".github/filters/native-release.json", filters / "native-release.json")
+    shutil.copy2(release_filter, filter_copy)
+    remote_filter_sha = hashlib.sha256(filter_copy.read_bytes()).hexdigest()
+    assert filter_sha == remote_filter_sha
     passed = subprocess.run([sys.executable, str(writer), *args],
                             capture_output=True, text=True, env=env)
     assert passed.returncode == 0, passed.stderr
