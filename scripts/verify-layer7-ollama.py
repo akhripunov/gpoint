@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 
 
 BASE_URL = "http://ollama:11434"
@@ -180,27 +181,37 @@ def verify(expected_digest: str, base_url: str = BASE_URL, docker_inspect=None,
         raise ValueError("expected exactly one running Core API for the embedding route probe")
     probe = r'''const base = "http://ollama:11434";
 const expected = process.argv[1];
-const fail = () => { console.error("OLLAMA_PRIVATE_ROUTE_VERIFY=FAIL"); process.exit(1); };
+const fail = (reason) => { console.error(`OLLAMA_PRIVATE_ROUTE_VERIFY=FAIL reason=${reason}`); process.exit(1); };
 try {
   const tags = await fetch(`${base}/api/tags`, { signal: AbortSignal.timeout(10000) });
-  if (!tags.ok) fail();
+  if (!tags.ok) fail(`tags_http_${tags.status}`);
   const models = (await tags.json()).models;
-  if (!Array.isArray(models) || !models.some((m) => m.name === "qwen3-embedding:0.6b" && m.digest === expected)) fail();
+  if (!Array.isArray(models) || !models.some((m) => m.name === "qwen3-embedding:0.6b" && m.digest === expected)) fail("model_digest_mismatch");
   const response = await fetch(`${base}/api/embed`, { method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ model: "qwen3-embedding:0.6b", input: "Synthetic Layer7 embedding readiness probe.", dimensions: 512, truncate: false }),
     signal: AbortSignal.timeout(60000) });
-  if (!response.ok) fail();
+  if (!response.ok) fail(`embed_http_${response.status}`);
   const rows = (await response.json()).embeddings;
   if (!Array.isArray(rows) || rows.length !== 1 || !Array.isArray(rows[0]) || rows[0].length !== 512 ||
-      !rows[0].every((v) => typeof v === "number" && Number.isFinite(v)) || !rows[0].some((v) => Math.abs(v) > 1e-8)) fail();
+      !rows[0].every((v) => typeof v === "number" && Number.isFinite(v)) || !rows[0].some((v) => Math.abs(v) > 1e-8)) fail("embedding_shape");
   console.log("OLLAMA_PRIVATE_ROUTE_VERIFY=PASS model=qwen3-embedding:0.6b dimensions=512");
-} catch { fail(); }'''
-    result = inspect(
-        ["docker", "exec", api_containers[0], "node", "-e", probe, expected_digest],
-        check=True, capture_output=True, text=True,
+} catch (error) { fail(`request_${error?.name || "unknown"}`); }'''
+    probe_command = ["docker", "exec", api_containers[0], "node", "-e", probe, expected_digest]
+    retryable_probe_failure = re.compile(
+        r"(?:tags|embed)_http_(?:429|5[0-9]{2})|request_(?:AbortError|TimeoutError|TypeError)"
     )
-    if "OLLAMA_PRIVATE_ROUTE_VERIFY=PASS" not in result.stdout:
-        raise ValueError("Core API could not verify the private Ollama embedding route")
+    for attempt in range(1, 4):
+        result = inspect(probe_command, check=False, capture_output=True, text=True)
+        if result.returncode == 0 and "OLLAMA_PRIVATE_ROUTE_VERIFY=PASS" in result.stdout:
+            break
+        detail = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+        detail = detail or f"exit_{result.returncode}"
+        match = re.search(r"OLLAMA_PRIVATE_ROUTE_VERIFY=FAIL reason=([a-zA-Z0-9_]+)", detail)
+        reason = match.group(1) if match else f"exit_{result.returncode}"
+        if attempt == 3 or not retryable_probe_failure.fullmatch(reason):
+            raise ValueError(f"Core API private Ollama probe failed: {reason}")
+        print(f"OLLAMA_PRIVATE_ROUTE_VERIFY=RETRY attempt={attempt} reason={reason}", file=sys.stderr)
+        time.sleep(attempt)
 
 
 def verify_and_detach(expected_digest: str, docker_inspect=None, docker_mutate=None) -> bool:
@@ -241,7 +252,7 @@ def main() -> int:
             container_name = args[1] if len(args) == 2 else CONTAINER
             verify(args[0], container_name=container_name)
     except (OSError, ValueError, json.JSONDecodeError) as error:
-        print(f"LAYER7_OLLAMA_VERIFY=FAIL reason={type(error).__name__}", file=sys.stderr)
+        print(f"LAYER7_OLLAMA_VERIFY=FAIL reason={type(error).__name__} detail={error}", file=sys.stderr)
         return 1
     print(f"LAYER7_OLLAMA_VERIFY=PASS model={MODEL_NAME} dimensions=512")
     return 0
