@@ -45,6 +45,9 @@ TEST_DIRECTORY_NAMES = frozenset({"test", "tests"})
 PRISMA_MIGRATION = re.compile(
     r"^packages/db/prisma/migrations/[0-9]{14}_[a-z0-9_]+/migration\.sql$"
 )
+RELEASE_AUTHORIZATION_ADDENDUM = re.compile(
+    r"^\.release-authorizations/addenda/[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*\.json$"
+)
 RECOVERY_AUTHORIZATION_FILE = ".release-authorizations/gpoint-prod-recovery-20261122-001.json"
 # Explicitly reviewed non-runtime inputs that do not change an application image.
 KNOWN_NON_RUNTIME_FILES = frozenset({
@@ -416,6 +419,14 @@ def _known_non_runtime_path(path: str) -> bool:
         return True
     if path.startswith(("services/agata/", "packages/agata-client/", "config/deploy.agata.yml")):
         return True
+    addendum = RELEASE_AUTHORIZATION_ADDENDUM.fullmatch(path)
+    if addendum is not None:
+        repo_root = Path(__file__).resolve().parents[1]
+        authorization = repo_root / ".release-authorizations" / f"{path.split('/')[2]}.json"
+        metadata = repo_root / path
+        if (authorization.is_file() and not authorization.is_symlink()
+                and metadata.is_file() and not metadata.is_symlink()):
+            return True
     return (_non_runtime_documentation_path(path)
             or path == "config/deploy.ollama.yml"
             or path in EROS_MODEL_CONFIG_PATHS
