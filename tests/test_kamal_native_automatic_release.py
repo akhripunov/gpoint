@@ -331,6 +331,21 @@ def test_runtime_verify_rechecks_public_routes_and_five_target_roles_after_deplo
     assert 'const base = "http://ollama:11434"' in helper
 
 
+def test_runtime_verify_uses_actual_database_container_names_not_absent_compose_labels():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    verify = next(
+        step["run"]
+        for step in workflow["jobs"]["deploy"]["steps"]
+        if step.get("id") == "verify"
+    )
+
+    assert "--filter 'name=^/shared_postgres_1$'" in verify
+    assert "--filter 'name=^/shared_redis_1$'" in verify
+    assert "label=com.docker.compose.project=shared" not in verify
+    assert "label=com.docker.compose.service=postgres" not in verify
+    assert "label=com.docker.compose.service=redis" not in verify
+
+
 def test_runtime_smokes_validate_the_public_miniapp_on_ordinary_and_rollback_paths():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     verify = next(step["run"] for step in workflow["jobs"]["deploy"]["steps"]
