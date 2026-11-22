@@ -480,7 +480,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("needs.build.outputs.miniapp_digest", deploy_text)
         self.assertIn("needs.build.outputs.eros_digest", deploy_text)
         self.assertNotRegex(script, r"docker\s+compose\s+(up|down|pull|restart)")
-        self.assertIn("kamal deploy --skip-push", script)
+        self.assertIn("kamal redeploy --skip-push", script)
+        self.assertNotIn("kamal deploy --skip-push", script)
         self.assertIn("GPOINT_KAMAL_VERIFY=PASS", script)
 
     def test_eros_uses_exact_stock_artifact_and_existing_selective_kamal_chain(self):
