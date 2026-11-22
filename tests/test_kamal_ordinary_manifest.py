@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -189,6 +190,46 @@ def test_ordinary_manifest_accepts_documentation_only_no_runtime_scope(tmp_path)
     manifest = json.loads(output.read_bytes())
     assert manifest["deploymentScope"] == {"classification": "NONE", "updatedComponents": []}
     assert {service["revision"] for service in manifest["runtimeServices"]} == {"b" * 40}
+
+
+def test_remote_copied_manifest_writer_loads_transferred_release_intent_and_filter(tmp_path):
+    remote_root = tmp_path / "remote"
+    scripts = remote_root / "scripts"
+    filters = remote_root / ".github" / "filters"
+    bin_dir = tmp_path / "bin"
+    scripts.mkdir(parents=True)
+    filters.mkdir(parents=True)
+    bin_dir.mkdir()
+    setup_host_stubs(bin_dir)
+
+    writer = remote_root / "write-kamal-production-manifest.py"
+    shutil.copy2(WRITER, writer)
+    helper = ROOT / "scripts/native_release_intent.py"
+    helper_copy = scripts / "native_release_intent.py"
+    shutil.copy2(helper, helper_copy)
+    assert helper_copy.read_bytes() == helper.read_bytes()
+
+    output = remote_root / "ordinary-manifest.json"
+    args = ordinary_args(output)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+           "EXPECTED_ROLE_PLAN_B64": args[args.index("--expected-role-identities-b64") + 1]}
+    env.pop("PYTHONPATH", None)
+    without_module = subprocess.run([sys.executable, str(writer), *args],
+                                    capture_output=True, text=True, env=env)
+    assert without_module.returncode != 0
+    assert "ModuleNotFoundError: No module named 'native_release_intent'" in without_module.stderr
+
+    env["PYTHONPATH"] = str(scripts)
+    without_filter = subprocess.run([sys.executable, str(writer), *args],
+                                    capture_output=True, text=True, env=env)
+    assert without_filter.returncode != 0
+    assert "native-release.json" in without_filter.stderr
+
+    shutil.copy2(ROOT / ".github/filters/native-release.json", filters / "native-release.json")
+    passed = subprocess.run([sys.executable, str(writer), *args],
+                            capture_output=True, text=True, env=env)
+    assert passed.returncode == 0, passed.stderr
+    assert output.is_file()
 
 
 def test_ordinary_manifest_keeps_disabled_core_bot_absent_during_full_core_rollout(tmp_path):

@@ -414,9 +414,10 @@ def test_runtime_manifest_transfers_its_import_module_to_the_remote_python_path(
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     deploy = workflow["jobs"]["deploy"]["steps"]
     verify = next(step for step in deploy if step.get("id") == "verify")["run"]
-    assert 'writer_module_dir="${writer_remote%.py}.d"' in verify
-    assert 'scp -p scripts/native_release_intent.py "root@${GPOINT_PRODUCTION_HOST}:$writer_module_dir/native_release_intent.py"' in verify
-    assert 'PYTHONPATH="$writer_module_dir" python3 "$writer"' in verify
+    assert 'writer_support_root="${writer_remote%.py}.d"' in verify
+    assert 'scp -p scripts/native_release_intent.py "root@${GPOINT_PRODUCTION_HOST}:$writer_support_root/scripts/native_release_intent.py"' in verify
+    assert 'scp -p .github/filters/native-release.json "root@${GPOINT_PRODUCTION_HOST}:$writer_support_root/.github/filters/native-release.json"' in verify
+    assert 'PYTHONPATH="$writer_support_root/scripts" python3 "$writer"' in verify
 
 
 def test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails_closed():
