@@ -51,10 +51,12 @@ def test_core_deploy_prepares_and_verifies_stable_worker_tunnel_with_stock_kamal
     assert "docker run" not in apply[accessory:core_api]
     assert "127.0.0.1:13004" in apply
     assert "expected 401" in apply
+    assert "--request POST --data '{}'" in apply
     assert "gpoint-core-worker-proxy" in verify
     assert "GPOINT_WORKER_TUNNEL_PROXY=PASS" in verify
     assert "HostPort\": \"13004\"" in verify
     assert "set(networks) != {\"kamal\"}" in verify
+    assert "--request POST --data '{}'" in verify
 
 
 def test_core_rollback_keeps_the_worker_tunnel_accessory_and_checks_it_after_rollback():
@@ -69,6 +71,7 @@ def test_core_rollback_keeps_the_worker_tunnel_accessory_and_checks_it_after_rol
     assert "Worker tunnel accessory is missing after Core rollback" in rollback_verify
     assert "127.0.0.1:13004" in rollback_verify
     assert "WORKER_TUNNEL_PROXY=PASS" in rollback_verify
+    assert "--request POST --data '{}'" in rollback_verify
 
 
 def test_layer7_is_production_and_retired_staging_paths_cannot_deploy():

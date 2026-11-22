@@ -1465,7 +1465,7 @@ jobs:
           if set(networks) != {"kamal"}:
               raise SystemExit("Worker tunnel accessory must use only the Kamal network")
           PY
-          status="$(curl --connect-timeout 2 --max-time 5 --silent --show-error --output /dev/null --write-out '%{http_code}' http://127.0.0.1:13004/gpoint-worker/health)"
+          status="$(curl --connect-timeout 2 --max-time 5 --silent --show-error --output /dev/null --write-out '%{http_code}' --request POST --data '{}' http://127.0.0.1:13004/gpoint-worker/health)"
           test "$status" = 401 || { echo "Worker tunnel unauthenticated guard returned HTTP $status, expected 401" >&2; exit 1; }
           REMOTE_WORKER_PROXY_CHECK
               echo "GPOINT_WORKER_TUNNEL_PROXY_READY=PASS IMAGE=$proxy_image PORT=127.0.0.1:13004" >> "$GITHUB_STEP_SUMMARY"
@@ -1717,7 +1717,7 @@ jobs:
           if set(networks) != {"kamal"}:
               raise SystemExit("Worker tunnel accessory network isolation differs from Kamal")
           PY
-            worker_proxy_http="$(curl --connect-timeout 2 --max-time 5 --silent --show-error --output /dev/null --write-out '%{http_code}' http://127.0.0.1:13004/gpoint-worker/health)"
+            worker_proxy_http="$(curl --connect-timeout 2 --max-time 5 --silent --show-error --output /dev/null --write-out '%{http_code}' --request POST --data '{}' http://127.0.0.1:13004/gpoint-worker/health)"
             test "$worker_proxy_http" = 401 || { echo "Worker tunnel route returned HTTP $worker_proxy_http without credentials; expected 401" >&2; exit 1; }
             echo "GPOINT_WORKER_TUNNEL_PROXY_IMAGE=$worker_proxy_image"
             echo GPOINT_WORKER_TUNNEL_PROXY=PASS
@@ -2285,7 +2285,7 @@ jobs:
           if set(networks) != {"kamal"}:
               raise SystemExit("Worker tunnel rollback endpoint left the isolated Kamal network")
           PY
-            worker_proxy_http="$(curl --connect-timeout 2 --max-time 5 --silent --show-error --output /dev/null --write-out '%{http_code}' http://127.0.0.1:13004/gpoint-worker/health)"
+            worker_proxy_http="$(curl --connect-timeout 2 --max-time 5 --silent --show-error --output /dev/null --write-out '%{http_code}' --request POST --data '{}' http://127.0.0.1:13004/gpoint-worker/health)"
             test "$worker_proxy_http" = 401 || { echo "Worker tunnel rollback route returned HTTP $worker_proxy_http without credentials, expected 401" >&2; exit 1; }
             echo "WORKER_TUNNEL_PROXY_IMAGE=$worker_proxy_image"
             echo WORKER_TUNNEL_PROXY=PASS
