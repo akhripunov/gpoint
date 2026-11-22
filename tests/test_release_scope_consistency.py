@@ -55,6 +55,18 @@ def test_unknown_roots_stay_fail_closed():
     assert intent._known_non_runtime_path("somewhere/else.txt") is False
 
 
+def test_only_well_formed_release_authorization_addenda_are_non_runtime():
+    assert intent._known_non_runtime_path(
+        ".release-authorizations/addenda/gpoint-prod-recovery-20261122-001/"
+        "gpoint-prod-recovery-ollama-preflight-20261122-001.json")
+    assert not intent._known_non_runtime_path(
+        ".release-authorizations/addenda/unknown/metadata.json")
+    assert not intent._known_non_runtime_path(
+        ".release-authorizations/addenda/gpoint-prod-recovery-20261122-001/notes.txt")
+    assert not intent._known_non_runtime_path(
+        ".release-authorizations/unreviewed.json")
+
+
 def _git(repo, *args):
     return subprocess.check_output(
         ["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid", *args],

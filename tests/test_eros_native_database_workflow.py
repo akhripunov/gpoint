@@ -51,11 +51,12 @@ def test_ollama_network_and_eros_engine_start_before_core_api_uses_eros_config()
     assert eros < core
     assert core < miniapp
     assert body.index("verify_single_running_role gpoint-eros-pilot-engine", eros) < core
-    assert "legacy_container=gpoint-eros-relay-ollama" in body
-    assert 'docker rename "$legacy_container" "$ollama_container"' in body
+    helper = (ROOT / "scripts/verify-layer7-ollama.py").read_text()
+    assert 'LEGACY_CONTAINER = "gpoint-eros-relay-ollama"' in helper
+    assert '"docker", "rename", LEGACY_CONTAINER, CONTAINER' in helper
     assert "accessory boot ollama --config-file config/deploy.ollama.yml" in body
     assert "accessory reboot ollama" not in body
-    assert "gpoint_ollama_internal" in body
+    assert 'NETWORK = "gpoint_ollama_internal"' in helper
     assert "core_api_config=config/deploy.eros-api.yml" in body
 
 
@@ -135,6 +136,8 @@ def test_native_eros_deploy_uses_stock_kamal_accessory_and_verifies_direct_route
     assert "config/deploy.eros-relay.yml" not in body
     assert "restore_legacy_ollama" not in body
     assert "verify-layer7-ollama.py" in body
+    assert "--prepare" in body
+    assert "--verify-and-detach" in body
 
 
 def test_runtime_verify_sends_512_dimension_embedding_from_inside_eros_container():
@@ -251,57 +254,47 @@ def test_hosted_stock_eros_e2e_uses_the_policy_approved_upstream_tag():
     assert 'image="gpoint-eros:stock-$EROS_UPSTREAM_SHA"' in e2e
 
 
-def test_ssh_preserves_docker_inspect_templates_with_spaces():
-    import shlex
-
+def test_ollama_preflight_does_not_send_docker_templates_over_ssh():
     apply = next(step["run"] for step in steps_for("deploy") if step.get("id") == "kamal_apply")
-    formats = {
-        "legacy_mounts": "{{json .Mounts}}",
-        "legacy_binding": "{{json .HostConfig.PortBindings}}",
-        "accessory_networks": "{{json .NetworkSettings.Networks}}",
-        "legacy_networks": "{{json .NetworkSettings.Networks}}",
-        "on_network": "{{json .NetworkSettings.Networks}}",
-    }
-    for variable, expected in formats.items():
-        line = next(line for line in apply.splitlines() if line.strip().startswith(variable + "="))
-        remote_command = line.split('GPOINT_PRODUCTION_HOST}" ', 1)[1].rsplit(')"', 1)[0]
-        ssh_arguments = shlex.split(remote_command)
-        assert shlex.split(" ".join(ssh_arguments))[3] == expected
+    start = apply.index('if [[ "$DEPLOY_CORE" == true && ( "$EROS_INSTALLED" == true || "$DEPLOY_EROS" == true ) ]]; then')
+    end = apply.index('if [[ "$DEPLOY_EROS" == true ]]; then', start)
+    ollama_preflight = apply[start:end]
+    assert "verify-layer7-ollama.py" in ollama_preflight
+    assert "--prepare" in ollama_preflight
+    assert "docker inspect --format" not in ollama_preflight
+    assert "docker network inspect gpoint_ollama_internal --format" not in ollama_preflight
 
 
-def test_legacy_ollama_network_is_migrated_without_restarting_it():
-    apply = next(step["run"] for step in steps_for("deploy") if step.get("id") == "kamal_apply")
-    legacy = apply.index('legacy_container=gpoint-eros-relay-ollama')
-    verify_port = apply.index("legacy Ollama loopback binding differs", legacy)
-    attach = apply.index('docker network connect --alias ollama gpoint_ollama_internal', legacy)
-    rename = apply.index('docker rename "$legacy_container" "$ollama_container"', legacy)
-    probe = apply.index("scripts/verify-layer7-ollama.py", rename)
-    detach = apply.index('docker network disconnect kamal "$ollama_container"', probe)
-    assert legacy < verify_port < attach < rename < probe < detach
-    assert "docker restart" not in apply[legacy:detach]
+def test_release_forwards_ollama_helper_over_ssh_without_go_templates(tmp_path):
+    import re
 
+    deploy = steps_for("deploy")
+    kamal = next(step for step in deploy if step.get("name") == "Deploy exact immutable images with stock Kamal")
+    line = next(line.strip() for line in kamal["run"].splitlines()
+                if 'accessory_result="$(ssh -T' in line and "--prepare" in line)
+    assert "--format" not in line and "{{" not in line
+    assert re.search(r"< scripts/verify-layer7-ollama\.py\)\"$", line)
 
-def test_legacy_ollama_network_plan_accepts_only_known_topologies():
-    import json
-    import subprocess
-    import sys
-
-    apply = next(step["run"] for step in steps_for("deploy") if step.get("id") == "kamal_apply")
-    check = apply.split("network_action=", 1)[1].split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
-    private = {"Aliases": ["ollama"]}
-    for networks, state, expected in (
-        ({"kamal": {"Aliases": None}}, "running", "attach"),
-        ({"kamal": {}, "gpoint_ollama_internal": private}, "running", "retain"),
-        ({"gpoint_ollama_internal": private}, "exited", "retain"),
-        ({"kamal": {}, "unrelated": {}}, "running", None),
-        ({"gpoint_ollama_internal": {"Aliases": None}}, "running", None),
-        ({"kamal": {}}, "exited", None),
-    ):
-        result = subprocess.run([sys.executable, "-c", check, json.dumps(networks), state],
-                                text=True, capture_output=True)
-        if expected is None:
-            assert result.returncode != 0
-            assert "topology is not recognized" in result.stderr
-        else:
-            assert result.returncode == 0, result.stderr
-            assert result.stdout.strip() == expected
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    ssh = fake_bin / "ssh"
+    ssh.write_text("#!/bin/sh\n[ \"$1\" = -T ] && shift\nshift\nexec \"$@\"\n")
+    ssh.chmod(0o755)
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json,sys\n"
+        "a=sys.argv[1:]\n"
+        "if a[:3] == ['network','inspect','gpoint_ollama_internal']:\n"
+        " print(json.dumps([{'Internal':True,'Containers':{}}]))\n"
+        "elif a and a[0] == 'inspect':\n"
+        " print('Error: No such object: '+a[1], file=sys.stderr); raise SystemExit(1)\n"
+        "else: raise SystemExit('unexpected docker call')\n"
+    )
+    docker.chmod(0o755)
+    environment = dict(os.environ, PATH=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                       GPOINT_PRODUCTION_HOST="example.invalid", EROS_OLLAMA_MODEL_DIGEST="a" * 64)
+    result = subprocess.run(["bash", "-c", line + "; printf '%s\\n' \"$accessory_result\""], cwd=ROOT, env=environment,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "OLLAMA_PREPARE=PASS state=absent\n"

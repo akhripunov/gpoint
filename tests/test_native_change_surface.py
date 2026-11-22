@@ -102,7 +102,10 @@ def test_production_api_does_not_publish_ollama_to_public_networks():
     deploy = next(step for step in workflow()["jobs"]["deploy"]["steps"]
                   if step.get("name") == "Deploy exact immutable images with stock Kamal")
     body = deploy["run"]
-    assert "docker network create --internal gpoint_ollama_internal" in body
+    verifier = (ROOT / "scripts/verify-layer7-ollama.py").read_text()
+    assert "scripts/verify-layer7-ollama.py" in body
+    assert '"docker", "network", "create", "--internal", NETWORK' in verifier
+    assert "gpoint_ollama_internal" in verifier
     assert "config/deploy.ollama.yml" in body
     assert "config/deploy.eros-relay.yml" not in body
     assert "deploy --skip-push --version \"$IMAGE_VERSION\" --roles relay" not in body

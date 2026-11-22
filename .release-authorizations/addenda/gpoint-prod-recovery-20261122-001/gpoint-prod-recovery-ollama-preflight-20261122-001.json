@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "amendment_id": "gpoint-prod-recovery-ollama-preflight-20261122-001",
+  "project": "gpoint",
+  "authorization_id": "gpoint-prod-recovery-20261122-001",
+  "source_instruction_identifier": "OWNER_SCOPE_ADDENDUM_GPOINT_RELEASE_A889DF30_20261122",
+  "owner_decision": "OWNER authorizes preparing and publishing local fix a889df30c21fd852dbc0008124b20c1f97f6268b through the standard PR, including its four changed implementation/test files, hosted CI, and protected Deploy preparation after merge. Add the two exact paths below to the existing recovery scope. Do not modify production outside the existing protected release flow.",
+  "original_authorization_record_blob_sha": "bfb2064493a5dd77085805ddc7b675fe40e08f14",
+  "scope_additions": [
+    {
+      "path": "scripts/verify-layer7-ollama.py",
+      "source_commit_sha": "a889df30c21fd852dbc0008124b20c1f97f6268b",
+      "patch_sha256": "49fed537ab4e5b6adbbb60a081170b94a4530986865d1f059ef3700ad2419801",
+      "result_file_sha256": "81d0862610c2d262d1e0dea9d8a820293a2d1e9343dced5d3dfb010b213f3e9b",
+      "result_blob_sha": "dc916175759df767f2712b35fd53a07b70182bfa"
+    },
+    {
+      "path": "tests/test_layer7_ollama_verifier.py",
+      "source_commit_sha": "a889df30c21fd852dbc0008124b20c1f97f6268b",
+      "patch_sha256": "60b50ab2d5b5e6a5c173438fd55101aaad1696d4f2a7be379d7f0565594fef52",
+      "result_file_sha256": "e8c242cf6e331192138ae5619c25361a63d62ee0a3bb2c6c145ebf7ec1bf75e6",
+      "result_blob_sha": "17e129a65dfb8318d090625da35f4007f14dae2c"
+    }
+  ],
+  "release_infrastructure_risk_contract": {
+    "allowed_paths": [
+      "scripts/verify-layer7-ollama.py",
+      "tests/test_layer7_ollama_verifier.py"
+    ],
+    "allowed_operations": [
+      "integrate",
+      "prepare",
+      "preflight",
+      "publish_evidence"
+    ],
+    "baseline_sha": "69a80fbd178230c997c42d70474f067ce0726bd7",
+    "risk_description": "Move Layer7 Ollama accessory Docker inventory parsing out of brittle SSH-forwarded Go templates into the existing Python helper. The helper checks the pinned image, loopback binding, persistent volume and isolated Docker network before its narrowly scoped legacy accessory rename/network attachment; it verifies the Eros embedding route before and after detaching only the obsolete Kamal network.",
+    "required_gates": [
+      "exact_candidate",
+      "complete_scope",
+      "required_CI",
+      "immutable_image_digest",
+      "production_environment_approval",
+      "live_preflight",
+      "rollback_readiness",
+      "Runtime_Verify",
+      "public_smoke",
+      "Eros_embedding_route"
+    ],
+    "backup_plan": "No database mutation or migration is part of this change. Preserve current database backups, rollback images, containers, and Ollama model volume.",
+    "rollback_plan": "Use the existing protected Kamal rollback and Runtime Verify path. Do not remove the Ollama model volume or unrelated containers; reconcile partial Apply from read-only runtime inventory before any retry.",
+    "stop_conditions": [
+      "Stop for scope or baseline drift, failed CI, missing immutable provenance, ambiguous accessory topology, missing production approval, failed health/smoke, or uncertain/partial Apply."
+    ]
+  },
+  "amendment_commitment_sha256": "a119b3b5dbbe9dff8397fd2116558808715e40faa39d2ea5128c613070eebf5e"
+}
