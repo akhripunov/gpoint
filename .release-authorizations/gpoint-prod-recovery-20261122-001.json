@@ -1,0 +1,100 @@
+{
+  "schema_version": 3,
+  "project": "gpoint",
+  "authorization_id": "gpoint-prod-recovery-20261122-001",
+  "authorization_mode": "TASK_SCOPED_AUTO",
+  "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+  "source_instruction_identifier": "OWNER_GPOINT_PRODUCTION_RECOVERY_44952967975_2026-11-22",
+  "owner_task_reference": "GPoint — завершить Production Deploy; correct release errors and repeat protected CI → Build → Deploy → Verify for run 44952967975",
+  "task": "Recover the failed GPoint production release caused by the Core API fixed-port collision, within the exact listed scope.",
+  "environment": "production",
+  "production_baseline_sha": "69a80fbd178230c997c42d70474f067ce0726bd7",
+  "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+  "allowed_paths": [
+    ".github/workflows/gpoint-release.yml",
+    ".release-authorizations/gpoint-prod-recovery-20261122-001.json",
+    "apps/api/package.json",
+    "apps/api/src/gpoint-worker-tunnel-proxy.mjs",
+    "apps/api/test/gpoint-worker-tunnel-proxy.test.mjs",
+    "config/deploy.eros-api.yml",
+    "tests/test_eros_native_database_workflow.py",
+    "tests/test_kamal_native_automatic_release.py",
+    "tests/test_kamal_release_config.py"
+  ],
+  "allowed_operations": [
+    "integrate",
+    "prepare",
+    "preflight",
+    "deploy",
+    "verify",
+    "rollback",
+    "publish_evidence"
+  ],
+  "acceptance_criteria": [
+    "Fix the Kamal Core API port collision without stopping the old API before candidate health.",
+    "Provide a loopback-only stable Mac Worker tunnel endpoint routed through the existing Kamal Proxy.",
+    "Keep release on the existing protected GPoint Release Pipeline with exact SHA and immutable image provenance.",
+    "Pass Runtime Verify, public HTTPS/API/MiniApp/Eros smoke, and authenticated read-only Worker health.",
+    "Do not change databases, apply migrations, or touch Relay, Bot messages, or user data."
+  ],
+  "exclusions": [
+    "database",
+    "migrations",
+    "secrets",
+    "payments",
+    "ads",
+    "paid_traffic",
+    "Relay",
+    "MAXIBOT"
+  ],
+  "risk_contracts": {
+    "release_infrastructure": {
+      "allowed_operations": [
+        "integrate",
+        "prepare",
+        "preflight",
+        "deploy",
+        "verify",
+        "rollback",
+        "publish_evidence"
+      ],
+      "allowed_paths": [
+        ".github/workflows/gpoint-release.yml",
+        ".release-authorizations/gpoint-prod-recovery-20261122-001.json",
+        "apps/api/package.json",
+        "apps/api/src/gpoint-worker-tunnel-proxy.mjs",
+        "apps/api/test/gpoint-worker-tunnel-proxy.test.mjs",
+        "config/deploy.eros-api.yml",
+        "tests/test_eros_native_database_workflow.py",
+        "tests/test_kamal_native_automatic_release.py",
+        "tests/test_kamal_release_config.py"
+      ],
+      "baseline_sha": "69a80fbd178230c997c42d70474f067ce0726bd7",
+      "risk_description": "A loopback-only Worker tunnel endpoint and Core API Kamal config change remove a fixed host-port collision while keeping the API on stock Kamal rolling deployment and routing Worker requests through the existing Kamal Proxy.",
+      "required_gates": [
+        "exact_candidate",
+        "complete_scope",
+        "required_CI",
+        "immutable_image_digest",
+        "production_environment_approval",
+        "live_preflight",
+        "rollback_readiness",
+        "Runtime_Verify",
+        "public_smoke",
+        "Worker_health"
+      ],
+      "backup_plan": "No database mutation is authorized or expected. Preserve existing verified database backups and all current runtime containers/images until the candidate and Runtime Verify pass.",
+      "rollback_plan": "Use the existing protected Kamal rollback path to restore retained immutable application images; restore the prior local LaunchAgent tunnel plist from its timestamped local backup if its endpoint check fails.",
+      "stop_conditions": [
+        "Stop on changed live baseline, ambiguous topology, failed CI, digest/provenance mismatch, missing protected approval, failed health/smoke, or partial Apply requiring reconciliation."
+      ]
+    }
+  },
+  "preauthorized_commits": [
+    "31fb60b777d892f3b66346c7361fd7707b1f0025"
+  ],
+  "state": "ACTIVE",
+  "revoked": false,
+  "consumed": false,
+  "owner_task_commitment_sha256": "c4b62571dffe721bca4e5e2fc6057543818b607ba97e9130190a79d0786ba256"
+}
