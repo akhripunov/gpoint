@@ -72,6 +72,29 @@ def test_verifies_pinned_model_and_direct_private_api_embedding_route():
     assert calls[-1][1] == "exec"
 
 
+def test_retries_transient_private_embedding_probe_before_failing_closed(capsys):
+    module = load_module()
+    inspect, _ = fixture(module)
+    attempts = 0
+
+    def transient_probe(args, **kwargs):
+        nonlocal attempts
+        if args[:2] == ["docker", "exec"]:
+            attempts += 1
+            if attempts == 1:
+                return Result(
+                    "OLLAMA_PRIVATE_ROUTE_VERIFY=FAIL reason=embed_http_503\n",
+                    returncode=1,
+                    stderr="temporary upstream unavailable",
+                )
+        return inspect(args, **kwargs)
+
+    module.verify(EXPECTED_DIGEST, docker_inspect=transient_probe)
+
+    assert attempts == 2
+    assert "OLLAMA_PRIVATE_ROUTE_VERIFY=RETRY attempt=1 reason=embed_http_503" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("options, message", [
     ({"host_ip": "0.0.0.0"}, "loopback-only"),
     ({"internal": False}, "not internal"),
