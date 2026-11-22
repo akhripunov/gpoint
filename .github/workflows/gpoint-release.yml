@@ -1509,16 +1509,28 @@ jobs:
           test "$media_status" = 404
           grep -Fq '"message":"media not found"' "$media_body"
           writer_remote="/run/gpoint-ordinary-manifest-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.py"
-          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$writer_remote" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" <<'REMOTE_WRITER_CHECK'
+          writer_support_root="${writer_remote%.py}.d"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$writer_remote" "$writer_support_root" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" <<'REMOTE_WRITER_CHECK'
           set -euo pipefail
-          [[ "$1" == "/run/gpoint-ordinary-manifest-${2}-${3}.py" ]]
-          [[ "$2" =~ ^[0-9]+$ && "$3" =~ ^[0-9]+$ ]]
+          [[ "$1" == "/run/gpoint-ordinary-manifest-${3}-${4}.py" ]]
+          [[ "$2" == "/run/gpoint-ordinary-manifest-${3}-${4}.d" ]]
+          [[ "$3" =~ ^[0-9]+$ && "$4" =~ ^[0-9]+$ ]]
           test ! -e "$1"
+          test ! -e "$2"
+          install -d -o root -g root -m 0700 "$2/scripts" "$2/.github/filters"
           REMOTE_WRITER_CHECK
           scp -p scripts/write-kamal-production-manifest.py "root@${GPOINT_PRODUCTION_HOST}:$writer_remote"
+          scp -p scripts/native_release_intent.py "root@${GPOINT_PRODUCTION_HOST}:$writer_support_root/scripts/native_release_intent.py"
+          scp -p .github/filters/native-release.json "root@${GPOINT_PRODUCTION_HOST}:$writer_support_root/.github/filters/native-release.json"
           writer_sha="$(sha256sum scripts/write-kamal-production-manifest.py | awk '{print $1}')"
           remote_writer_sha="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" sha256sum "$writer_remote" | awk '{print $1}')"
           test "$writer_sha" = "$remote_writer_sha"
+          helper_sha="$(sha256sum scripts/native_release_intent.py | awk '{print $1}')"
+          remote_helper_sha="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" sha256sum "$writer_support_root/scripts/native_release_intent.py" | awk '{print $1}')"
+          test "$helper_sha" = "$remote_helper_sha"
+          filter_sha="$(sha256sum .github/filters/native-release.json | awk '{print $1}')"
+          remote_filter_sha="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" sha256sum "$writer_support_root/.github/filters/native-release.json" | awk '{print $1}')"
+          test "$filter_sha" = "$remote_filter_sha"
           eros_label_remote="/run/gpoint-eros-runtime-labels-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.py"
           [[ "$eros_label_remote" == "/run/gpoint-eros-runtime-labels-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.py" ]]
           scp -p scripts/verify-eros-runtime-labels.py "root@${GPOINT_PRODUCTION_HOST}:$eros_label_remote"
@@ -1544,9 +1556,13 @@ jobs:
           [[ "$pending_prisma_checksums" != "-" ]] || pending_prisma_checksums=""
           [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
           [[ "$writer" == "/run/gpoint-ordinary-manifest-${run_id}-${attempt}.py" ]]
+          writer_support_root="${writer%.py}.d"
+          [[ "$writer_support_root" == "/run/gpoint-ordinary-manifest-${run_id}-${attempt}.d" ]]
           eros_label_remote="/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py"
-          trap 'rm -f -- "$eros_label_remote"' EXIT
+          trap 'rm -f -- "$eros_label_remote" "$writer" "$writer_support_root/scripts/native_release_intent.py" "$writer_support_root/.github/filters/native-release.json"; rmdir "$writer_support_root/scripts" "$writer_support_root/.github/filters" "$writer_support_root/.github" "$writer_support_root" 2>/dev/null || true' EXIT
           test -s "$writer"
+          test -s "$writer_support_root/scripts/native_release_intent.py"
+          test -s "$writer_support_root/.github/filters/native-release.json"
           test "$(docker inspect --format '{{.Id}}' shared_postgres_1)" = "$db_id"
           test "$(docker inspect --format '{{.Id}}' shared_redis_1)" = "$redis_id"
           test "$(docker inspect --format '{{.State.Running}}' shared_postgres_1)" = true
@@ -1700,7 +1716,7 @@ jobs:
           install -d -o root -g root -m 0700 "$remote_manifest_dir"
           manifest="$remote_manifest_dir/kamal-production-${run_id}-${attempt}.json"
           test ! -e "$manifest"
-          writer_output="$(python3 "$writer" --mode ordinary --output "$manifest" \
+          writer_output="$(PYTHONPATH="$writer_support_root/scripts" python3 "$writer" --mode ordinary --output "$manifest" \
             --sha "$sha" --app-source-sha "$sha" --version "$version" \
             --app-digest "$app" \
             --miniapp-digest "$miniapp" --run-id "$run_id" --attempt "$attempt" \

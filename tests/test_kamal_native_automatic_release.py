@@ -410,6 +410,20 @@ def test_production_preflight_accepts_historical_version_source_sha_split_but_ch
     assert "find packages/db/prisma/migrations" not in verify
 
 
+def test_runtime_manifest_transfers_its_import_module_to_the_remote_python_path():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    deploy = workflow["jobs"]["deploy"]["steps"]
+    verify = next(step for step in deploy if step.get("id") == "verify")["run"]
+    assert 'writer_support_root="${writer_remote%.py}.d"' in verify
+    assert 'scp -p scripts/native_release_intent.py "root@${GPOINT_PRODUCTION_HOST}:$writer_support_root/scripts/native_release_intent.py"' in verify
+    assert 'scp -p .github/filters/native-release.json "root@${GPOINT_PRODUCTION_HOST}:$writer_support_root/.github/filters/native-release.json"' in verify
+    assert 'writer_sha="$(sha256sum scripts/write-kamal-production-manifest.py | awk \'{print $1}\')"' in verify
+    assert 'test "$writer_sha" = "$remote_writer_sha"' in verify
+    assert 'test "$helper_sha" = "$remote_helper_sha"' in verify
+    assert 'test "$filter_sha" = "$remote_filter_sha"' in verify
+    assert 'PYTHONPATH="$writer_support_root/scripts" python3 "$writer"' in verify
+
+
 def test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails_closed():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     deploy = workflow.split("  deploy:\n", 1)[1]
