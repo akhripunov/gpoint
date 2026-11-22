@@ -126,13 +126,14 @@ def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
     assert not ({"workspace", "python"} & set(jobs))
     assert jobs["build"]["needs"] == ["tests"]
     assert "needs.tests.result == 'success'" in jobs["build"]["if"]
-    assert "github.event_name == 'pull_request'" in jobs["build"]["if"]
+    assert "github.event_name == 'push'" in jobs["build"]["if"]
+    assert "pull_request" not in jobs["build"]["if"]
     assert "ARTIFACT_PREPARE" not in jobs["build"]["if"]
     build_steps = yaml.safe_dump(jobs["build"]["steps"])
     assert "cache-to: type=gha,scope=gpoint-runtime,mode=max" in build_steps
     assert "sbom: true" in build_steps
     assert "provenance: mode=max" in build_steps
-    assert jobs["deploy"]["needs"] == ["tests", "build"]
+    assert "needs" not in jobs["deploy"]
     assert jobs["deploy"]["environment"] == {
         "name": "production",
         "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
@@ -143,7 +144,9 @@ def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
 def test_kamal_uses_attempt_scoped_tag_with_buildkit_digest_verification():
     workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]
-    assert "IMAGE_VERSION: ${{ needs.build.outputs.image_version }}" in deploy
+    assert "IMAGE_VERSION: ${{ needs.build.outputs.image_version }}" not in deploy
+    assert "id: prepared" in deploy
+    assert "IMAGE_VERSION={version}" in deploy
     assert "image_version: ${{ steps.image_version.outputs.image_version }}" in workflow
     assert 'image_version="${CANDIDATE_SHA}-${CURRENT_RUN_ID}-${CURRENT_RUN_ATTEMPT}"' in workflow
     assert "ghcr.io/akhripunov/gpoint-runtime:${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}" in workflow
@@ -306,7 +309,7 @@ def test_production_host_comes_from_exact_environment_and_known_hosts():
 def test_native_release_rejects_non_layer7_ssh_target_before_remote_setup():
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
     deploy = workflow["jobs"]["deploy"]
-    assert deploy["needs"] == ["tests", "build"]
+    assert "needs" not in deploy
     assert deploy["environment"]["name"] == "production"
     steps = deploy["steps"]
     credentials_index = next(i for i, step in enumerate(steps)
@@ -320,8 +323,8 @@ def test_native_release_rejects_non_layer7_ssh_target_before_remote_setup():
     assert "ssh-keygen -F" in script
     assert 'if [[ -z "$SSH_PRIVATE_KEY" || -z "$VERIFIED_KNOWN_HOSTS" ]]; then' in script
     assert script.index(guard) < script.index('ssh-keygen -F "$GPOINT_PRODUCTION_HOST"')
-    assert credentials_index < next(i for i, step in enumerate(steps)
-                                    if step.get("uses", "").startswith("actions/setup-python@"))
+    prepared_index = next(i for i, step in enumerate(steps) if step.get("id") == "prepared")
+    assert prepared_index < credentials_index
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -814,7 +817,8 @@ def test_pinned_setup_go_uses_official_digest_pinned_tool_cache_seed():
 def test_native_release_runs_kamal_after_successful_main_push():
     workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
     deploy = workflow["jobs"]["deploy"]
-    assert "always()" in deploy["if"] and "needs.build.result == 'success'" in deploy["if"]
+    assert "workflow_dispatch" in deploy["if"] and "approve_production == true" in deploy["if"]
+    assert "needs" not in deploy
     assert deploy["environment"] == {
         "name": "production",
         "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
@@ -1028,8 +1032,9 @@ def test_component_identity_regression_is_in_mandatory_test_job_before_deploy():
     assert tests_job["strategy"]["matrix"]["suite"] == ["workspace", "python"]
     assert workflow["jobs"]["build"]["needs"] == ["tests"]
     assert "needs.tests.result == 'success'" in workflow["jobs"]["build"]["if"]
-    assert "tests" in workflow["jobs"]["deploy"]["needs"]
-    assert "needs.tests.result == 'success'" in workflow["jobs"]["deploy"]["if"]
+    assert "needs" not in workflow["jobs"]["deploy"]
+    assert "workflow_dispatch" in workflow["jobs"]["deploy"]["if"]
+    assert "approve_production == true" in workflow["jobs"]["deploy"]["if"]
     assert "tests/test_kamal_release_config.py" in " ".join(
         step.get("run", "") for step in tests_job["steps"]
     )

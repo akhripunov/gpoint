@@ -41,14 +41,14 @@ permissions:
   contents: read
 
 concurrency:
-  # Serialize production baseline reads, Build and Apply as one transaction.
-  # PR validation has its own group and cannot occupy the release queue.
-  group: gpoint-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'native-production-transaction' }}
+  # Keep PR validation, main preparation, and production Apply in independent queues.
+  group: gpoint-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && 'manual-production' || 'main-preparation' }}
   cancel-in-progress: false
 
 jobs:
   tests:
     name: Tests (${{ matrix.suite }})
+    if: github.event_name != 'workflow_dispatch'
     permissions:
       contents: read
       deployments: read
@@ -398,12 +398,9 @@ jobs:
     name: Build and publish immutable images
     needs: [tests]
     if: >-
-      !cancelled() && needs.tests.result == 'success' &&
-      ((github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)) ||
-       (github.event_name != 'pull_request' && needs.tests.outputs.mode == 'DEPLOY' &&
-        needs.tests.outputs.deploy == 'true'))
+      !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      needs.tests.result == 'success' && needs.tests.outputs.mode == 'DEPLOY' &&
+      needs.tests.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -579,26 +576,75 @@ jobs:
           image_bytes="$(docker image inspect "ghcr.io/akhripunov/gpoint-runtime@$APP_DIGEST" --format '{{.Size}}')"
           [[ "$image_bytes" =~ ^[0-9]+$ ]]
           echo "app_image_bytes=$image_bytes" >> "$GITHUB_OUTPUT"
+      - name: Create exact successful preparation manifest
+        id: release_manifest
+        env:
+          CANDIDATE_SHA: ${{ github.sha }}
+          IMAGE_VERSION: ${{ steps.image_version.outputs.image_version }}
+          APP_DIGEST: ${{ steps.app.outputs.digest }}
+          MINIAPP_DIGEST: ${{ steps.miniapp.outputs.digest }}
+          EROS_DIGEST: ${{ steps.eros.outputs.digest }}
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/gpoint-release-manifest.json"
+          python3 - "$manifest" <<'PY'
+          import json, os, re, sys
+          from datetime import datetime, timezone
+          sha=os.environ["CANDIDATE_SHA"]
+          run_id=os.environ["GITHUB_RUN_ID"]
+          attempt=os.environ["GITHUB_RUN_ATTEMPT"]
+          version=os.environ["IMAGE_VERSION"]
+          if not re.fullmatch(r"[0-9a-f]{40}", sha): raise SystemExit("release SHA is malformed")
+          if version != f"{sha}-{run_id}-{attempt}": raise SystemExit("image version is not bound to this preparation run")
+          def image(name, repository, source, upstream=None):
+              digest=os.environ[name]
+              if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest): raise SystemExit(f"{name} is not an OCI digest")
+              value={"repository": repository, "version": version, "digest": digest, "sourceRevision": source}
+              if upstream is not None: value["upstreamRevision"]=upstream
+              return value
+          manifest={
+              "schema": "gpoint-release-preparation/v1",
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "sha": sha,
+              "sourceRun": {"id": int(run_id), "attempt": int(attempt), "event": "push", "branch": "main", "conclusion": "success"},
+              "preparedAtUtc": datetime.now(timezone.utc).isoformat(),
+              "requiredChecks": [
+                  {"name": "Tests (workspace)", "conclusion": "success"},
+                  {"name": "Tests (python)", "conclusion": "success"},
+                  {"name": "Build and publish immutable images", "conclusion": "success"},
+              ],
+              "images": {
+                  "core": image("APP_DIGEST", "ghcr.io/akhripunov/gpoint-runtime", sha),
+                  "miniapp": image("MINIAPP_DIGEST", "ghcr.io/akhripunov/gpoint-miniapp", sha),
+                  "eros": image("EROS_DIGEST", "ghcr.io/akhripunov/gpoint-eros", sha, os.environ["EROS_UPSTREAM_SHA"]),
+              },
+              "imageVersion": version,
+              "readBack": "success",
+          }
+          with open(sys.argv[1], "w", encoding="utf-8") as out:
+              json.dump(manifest, out, sort_keys=True, separators=(",", ":"))
+              out.write("\n")
+          PY
+          shasum -a 256 "$manifest" | awk '{print $1 "  gpoint-release-manifest.json"}' > "$RUNNER_TEMP/gpoint-release-manifest.sha256"
+          echo "manifest_path=$manifest" >> "$GITHUB_OUTPUT"
+          echo "GPOINT_RELEASE_MANIFEST=CREATED SHA=$CANDIDATE_SHA IMAGE_VERSION=$IMAGE_VERSION" >> "$GITHUB_STEP_SUMMARY"
+      - name: Store immutable release manifest for later Deploy and rollback
+        id: release_manifest_upload
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: gpoint-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/gpoint-release-manifest.json
+            ${{ runner.temp }}/gpoint-release-manifest.sha256
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
 
   deploy:
     name: Kamal production Deploy and Verify
-    needs: [tests, build]
     if: >-
-      always() && !cancelled() &&
-      (
-        (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-         needs.tests.result == 'success' && needs.tests.outputs.deploy == 'true' &&
-         needs.build.result == 'success') ||
-        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
-         github.actor == github.repository_owner && needs.tests.result == 'success' &&
-         (
-           (inputs.mode == 'deploy' && needs.tests.outputs.mode == 'DEPLOY' &&
-            needs.tests.outputs.deploy == 'true' && needs.build.result == 'success') ||
-           (inputs.mode == 'rollback' && needs.tests.outputs.mode == 'ROLLBACK' &&
-            needs.tests.outputs.deploy == 'true' &&
-            (needs.build.result == 'success' || needs.build.result == 'skipped'))
-         ))
-      )
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+      github.actor == github.repository_owner && inputs.approve_production == true
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -614,7 +660,7 @@ jobs:
       deployments: write
     env:
       CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
-      IMAGE_VERSION: ${{ needs.build.outputs.image_version }}
+      # IMAGE_VERSION is loaded from the successful preparation artifact.
       GPOINT_COMMIT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
       GPOINT_APP_SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
       KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -652,6 +698,103 @@ jobs:
             echo 'candidate SHA must be exactly 40 lowercase hexadecimal characters' >&2; exit 1;
           fi
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$REQUESTED_SHA"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Find successful exact-SHA preparation run and immutable manifest
+        id: prepared_run
+        if: inputs.mode != 'rollback'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          runs="$(gh api "repos/$REPOSITORY/actions/workflows/gpoint-release.yml/runs?head_sha=$CANDIDATE_SHA&branch=main&event=push&status=completed&per_page=100")"
+          candidates="$(jq -r --arg sha "$CANDIDATE_SHA" '.workflow_runs[] | select(.head_sha == $sha and .head_branch == "main" and .event == "push" and .status == "completed" and .conclusion == "success") | [.id, .run_attempt] | @tsv' <<< "$runs")"
+          while IFS=$'\t' read -r run_id run_attempt; do
+            [[ -n "$run_id" && -n "$run_attempt" ]] || continue
+            jobs="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/jobs?per_page=100")"
+            jq -e 'def ok($name): any(.jobs[]; .name == $name and .conclusion == "success"); ok("Tests (workspace)") and ok("Tests (python)") and ok("Build and publish immutable images")' <<< "$jobs" >/dev/null || continue
+            artifacts="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/artifacts?per_page=100")"
+            artifact_name="gpoint-release-$run_id-$run_attempt"
+            artifact="$(jq -c --arg name "$artifact_name" '[.artifacts[] | select(.name == $name and .expired == false)] | if length == 1 then .[0] else empty end' <<< "$artifacts")"
+            [[ -n "$artifact" ]] || continue
+            artifact_id="$(jq -r '.id' <<< "$artifact")"
+            artifact_digest="$(jq -r '.digest // empty' <<< "$artifact")"
+            [[ "$artifact_id" =~ ^[0-9]+$ && "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || continue
+            printf 'run_id=%s\nrun_attempt=%s\nartifact_id=%s\nartifact_digest=%s\n' \
+              "$run_id" "$run_attempt" "$artifact_id" "$artifact_digest" >> "$GITHUB_OUTPUT"
+            exit 0
+          done <<< "$candidates"
+          echo "No unexpired successful Tests+Build manifest exists for exact main SHA $CANDIDATE_SHA" >&2
+          exit 1
+      - name: Download immutable release manifest from its preparation run
+        if: inputs.mode != 'rollback'
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3
+        with:
+          artifact-ids: ${{ steps.prepared_run.outputs.artifact_id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.prepared_run.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/gpoint-prepared
+          digest-mismatch: error
+      - name: Validate exact-SHA preparation manifest and expose immutable image refs
+        id: prepared
+        if: inputs.mode != 'rollback'
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          SOURCE_RUN_ID: ${{ steps.prepared_run.outputs.run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ steps.prepared_run.outputs.run_attempt }}
+          SOURCE_ARTIFACT_DIGEST: ${{ steps.prepared_run.outputs.artifact_digest }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/gpoint-prepared"
+          sha256sum --check --strict gpoint-release-manifest.sha256
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          manifest=json.loads(Path("gpoint-release-manifest.json").read_text())
+          sha=os.environ["CANDIDATE_SHA"]
+          run_id=int(os.environ["SOURCE_RUN_ID"])
+          attempt=int(os.environ["SOURCE_RUN_ATTEMPT"])
+          expected_checks={"Tests (workspace)", "Tests (python)", "Build and publish immutable images"}
+          if manifest.get("schema") != "gpoint-release-preparation/v1": raise SystemExit("unsupported preparation manifest")
+          if manifest.get("repository") != os.environ["REPOSITORY"] or manifest.get("sha") != sha: raise SystemExit("manifest repository or SHA mismatch")
+          source=manifest.get("sourceRun") or {}
+          if (source.get("id"), source.get("attempt"), source.get("event"), source.get("branch"), source.get("conclusion")) != (run_id, attempt, "push", "main", "success"):
+              raise SystemExit("manifest source run metadata mismatch")
+          checks=manifest.get("requiredChecks") or []
+          if {(item.get("name"), item.get("conclusion")) for item in checks} != {(name, "success") for name in expected_checks}:
+              raise SystemExit("required check evidence is incomplete or unsuccessful")
+          if manifest.get("readBack") != "success": raise SystemExit("prepared images were not read back")
+          version=manifest.get("imageVersion", "")
+          if version != f"{sha}-{run_id}-{attempt}": raise SystemExit("image version is not exact-SHA/run bound")
+          expected={"core": ("ghcr.io/akhripunov/gpoint-runtime", sha), "miniapp": ("ghcr.io/akhripunov/gpoint-miniapp", sha), "eros": ("ghcr.io/akhripunov/gpoint-eros", sha)}
+          images=manifest.get("images") or {}
+          if set(images) != set(expected): raise SystemExit("prepared component image set is incomplete")
+          outputs={"image_version": version}
+          for name, (repository, source_sha) in expected.items():
+              row=images[name]
+              digest=row.get("digest", "")
+              if row.get("repository") != repository or row.get("version") != version or row.get("sourceRevision") != source_sha or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                  raise SystemExit(f"prepared {name} image identity is malformed")
+              outputs[name + "_digest"] = digest
+          upstream=images["eros"].get("upstreamRevision", "")
+          if not re.fullmatch(r"[0-9a-f]{40}", upstream): raise SystemExit("prepared Eros upstream revision is malformed")
+          if Path("services/eros-engine/upstream.sha").read_text().strip() != upstream:
+              raise SystemExit("prepared Eros upstream revision differs from the candidate source pin")
+          outputs["eros_upstream_sha"] = upstream
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              for name, value in outputs.items(): print(f"{name}={value}", file=out)
+          with open(os.environ["GITHUB_ENV"], "a") as out:
+              print(f"IMAGE_VERSION={version}", file=out)
+              print(f"EROS_UPSTREAM_SHA={upstream}", file=out)
+          print(f"Prepared SHA {sha} from run {run_id}/{attempt}; artifact digest verified: {os.environ['SOURCE_ARTIFACT_DIGEST']}")
+          PY
       - name: Install verified Kamal SSH credentials
         env:
           GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
@@ -692,10 +835,6 @@ jobs:
             echo "GPOINT_SSH_KEY=/root/.ssh/id_ed25519"
             echo "GPOINT_KNOWN_HOSTS_FILE=/root/.ssh/known_hosts"
           } >> "$GITHUB_ENV"
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: '3.12'
-          cache: pip
       - name: Pull and verify pinned Kamal CLI image
         env:
           KAMAL_IMAGE: ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625
@@ -933,9 +1072,9 @@ jobs:
         id: component_plan
         env:
           BASELINE_ROLE_INVENTORY: ${{ steps.topology.outputs.GPOINT_BASELINE_ROLE_INVENTORY }}
-          APP_DIGEST: ${{ needs.build.outputs.app_digest }}
-          MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
-          EROS_DIGEST: ${{ needs.build.outputs.eros_digest }}
+          APP_DIGEST: ${{ steps.prepared.outputs.core_digest }}
+          MINIAPP_DIGEST: ${{ steps.prepared.outputs.miniapp_digest }}
+          EROS_DIGEST: ${{ steps.prepared.outputs.eros_digest }}
           E2E_OUTCOME: ${{ steps.eros_e2e_evidence.outputs.outcome }}
           EVENT_NAME: ${{ github.event_name }}
           INFRASTRUCTURE_BASELINE_SHA: ${{ steps.infrastructure_baseline.outputs.sha }}
@@ -1006,9 +1145,9 @@ jobs:
         if: inputs.mode != 'rollback'
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APP_DIGEST: ${{ needs.build.outputs.app_digest }}
-          MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
-          EROS_DIGEST: ${{ needs.build.outputs.eros_digest }}
+          APP_DIGEST: ${{ steps.prepared.outputs.core_digest }}
+          MINIAPP_DIGEST: ${{ steps.prepared.outputs.miniapp_digest }}
+          EROS_DIGEST: ${{ steps.prepared.outputs.eros_digest }}
         run: |
           set -euo pipefail
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
@@ -1138,7 +1277,7 @@ jobs:
           deployment_id="${resolved#deployment_id=}"
           echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
       - name: Apply approved Prisma migrations once before Kamal
-        if: needs.tests.outputs.mode == 'DEPLOY' && (inputs.mode != 'rollback')
+        if: inputs.mode == 'deploy' && (inputs.mode != 'rollback')
         id: migration_apply
         env:
           APPLY: ${{ steps.migration_plan.outputs.apply }}
@@ -1260,7 +1399,7 @@ jobs:
           echo "GPOINT_PRISMA_APPLY=PASS PENDING=$PENDING_MIGRATIONS" >> "$GITHUB_STEP_SUMMARY"
       - name: Rehearse exact Eros SQLx transition against protected backup restore
         id: eros_database
-        if: needs.tests.outputs.mode == 'DEPLOY' && ((steps.component_plan.outputs.deploy_eros == 'true') && inputs.mode != 'rollback')
+        if: inputs.mode == 'deploy' && ((steps.component_plan.outputs.deploy_eros == 'true') && inputs.mode != 'rollback')
         env:
           CANDIDATE_SHA: ${{ github.sha }}
           EROS_DIGEST: ${{ steps.component_plan.outputs.eros_digest }}
@@ -1316,7 +1455,7 @@ jobs:
           echo "EROS_DATABASE_LIFECYCLE=PASS IMAGE=$eros_image" >> "$GITHUB_STEP_SUMMARY"
       - name: Deploy exact immutable images with stock Kamal
         id: kamal_apply
-        if: needs.tests.outputs.mode == 'DEPLOY' && ((success()) && inputs.mode != 'rollback')
+        if: inputs.mode == 'deploy' && ((success()) && inputs.mode != 'rollback')
         env:
           APP_DIGEST: ${{ steps.component_plan.outputs.app_digest }}
           MINIAPP_DIGEST: ${{ steps.component_plan.outputs.miniapp_digest }}

@@ -19,15 +19,17 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert events["push"]["branches"] == ["main"]
     assert events["pull_request"]["branches"] == ["main"]
     deploy = workflow["jobs"]["deploy"]
-    assert deploy["needs"] == ["tests", "build"]
-    assert "push" in deploy["if"] and "refs/heads/main" in deploy["if"]
-    assert "workflow_dispatch" in deploy["if"]
+    assert "needs" not in deploy
+    assert "push" not in deploy["if"] and "refs/heads/main" in deploy["if"]
+    assert "workflow_dispatch" in deploy["if"] and "approve_production == true" in deploy["if"]
+    assert workflow["jobs"]["tests"]["if"] == "github.event_name != 'workflow_dispatch'"
     assert deploy["environment"]["name"] == "production"
     build = workflow["jobs"]["build"]
     assert set(workflow["jobs"]) == {"tests", "build", "deploy"}
     assert build["needs"] == ["tests"]
-    assert "github.event_name == 'pull_request'" in build["if"]
+    assert "github.event_name == 'push'" in build["if"]
     assert "outputs.mode == 'DEPLOY'" in build["if"]
+    assert "pull_request" not in build["if"]
     assert "ARTIFACT_PREPARE" not in build["if"]
     assert "LAYER7_API" not in build["if"]
     assert "LAYER7_EROS" not in build["if"]
@@ -105,8 +107,10 @@ def test_layer7_is_production_and_retired_staging_paths_cannot_deploy():
         assert not push_deploy_authorized(mode=mode, changed_paths=legacy_paths)
 
     deploy = jobs["deploy"]
-    assert "needs.tests.outputs.deploy == 'true'" in deploy["if"]
+    assert "workflow_dispatch" in deploy["if"]
+    assert "inputs.approve_production == true" in deploy["if"]
     assert "github.actor == github.repository_owner" in deploy["if"]
+    assert "needs" not in deploy
     assert deploy["environment"]["name"] == "production"
     assert deploy["concurrency"]["group"] == "gpoint-production-release"
     assert not any("LAYER7_API" in step.get("if", "") for step in deploy["steps"])
@@ -279,7 +283,7 @@ def test_kamal_inventory_summary_contains_only_the_crosschecked_version():
 def test_release_event_routing_is_fail_closed_and_does_not_give_prs_prod_access():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     intent = workflow["jobs"]["tests"]
-    assert "if" not in intent
+    assert intent["if"] == "github.event_name != 'workflow_dispatch'"
     assert "environment" not in intent
     intent_script = next(step.get("run", "") for step in intent["steps"]
                          if step.get("id") == "intent")
@@ -288,8 +292,9 @@ def test_release_event_routing_is_fail_closed_and_does_not_give_prs_prod_access(
     assert "GPOINT_MIGRATION_REHEARSAL_PREP" not in intent_script
     assert 'return 2' in (ROOT / "scripts/native_release_intent.py").read_text()
     deploy = workflow["jobs"]["deploy"]
-    assert "needs.tests.outputs.deploy == 'true'" in deploy["if"]
-    assert "pull_request" not in deploy["if"]
+    assert "inputs.approve_production == true" in deploy["if"]
+    assert "workflow_dispatch" in deploy["if"] and "pull_request" not in deploy["if"]
+    assert "needs" not in deploy
     assert "production" not in workflow["jobs"]["tests"].get("environment", {})
     assert workflow["permissions"] == {"contents": "read"}
 
@@ -591,7 +596,8 @@ def test_manual_migration_rehearsal_uses_existing_backup_without_deployment_or_k
     assert "repos/$GITHUB_REPOSITORY/deployments" not in body
     assert rehearsal["permissions"] == {"contents": "read", "packages": "read"}
     native = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    assert "needs.tests.outputs.deploy == 'true'" in native["jobs"]["deploy"]["if"]
+    assert "inputs.approve_production == true" in native["jobs"]["deploy"]["if"]
+    assert "needs" not in native["jobs"]["deploy"]
 
 
 def test_migration_rehearsal_uses_immutable_oci_identity_across_docker_hosts():
@@ -688,8 +694,8 @@ def test_scheduled_vps_backup_uploads_and_restores_same_bunny_snapshot_during_tr
 def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     rollback = _ROLLBACK["jobs"]["deploy"]
-    assert "inputs.mode == 'rollback'" in rollback["if"]
-    assert "inputs.mode == 'rollback'" in rollback["if"]
+    assert "workflow_dispatch" in rollback["if"]
+    assert any("inputs.mode == 'rollback'" in step.get("if", "") for step in rollback["steps"])
     assert rollback["environment"] == {
         "name": "production", "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
@@ -721,7 +727,8 @@ def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
     assert inputs["rollback_target_sha"]["type"] == "string"
     assert "rollback_target_sha" in inputs
     assert "rollback_deployment_id" in inputs
-    assert "outputs.deploy == 'true'" in workflow["jobs"]["deploy"]["if"]
+    assert "approve_production == true" in workflow["jobs"]["deploy"]["if"]
+    assert "outputs.deploy == 'true'" not in workflow["jobs"]["deploy"]["if"]
 
 
 def test_deploy_publishes_release_timing_even_when_the_release_fails():
@@ -739,8 +746,8 @@ def test_production_deploy_scope_is_resolved_only_from_live_inventory():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     condition = workflow["jobs"]["deploy"]["if"]
     assert "needs.build.outputs.deploy_scope" not in condition
-    assert "needs.tests.outputs.deploy == 'true'" in condition
-    assert "needs.build.result == 'success'" in condition
+    assert "inputs.approve_production == true" in condition
+    assert "needs" not in workflow["jobs"]["deploy"]
     assert not any(step.get("id") == "build_scope"
                    for step in workflow["jobs"]["build"]["steps"])
     component_plan = next(step for step in workflow["jobs"]["deploy"]["steps"]

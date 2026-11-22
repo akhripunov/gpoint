@@ -1,4 +1,6 @@
 import unittest
+import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -26,7 +28,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         jobs = self.workflow["jobs"]
         self.assertEqual(set(jobs), {"tests", "build", "deploy"})
         rollback = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())["jobs"]["deploy"]
-        self.assertIn("inputs.mode == 'rollback'", rollback["if"])
+        self.assertIn("inputs.mode == 'rollback'", "\n".join(step.get("if", "") for step in rollback["steps"]))
         self.assertEqual(rollback["environment"]["name"], "production")
         self.assertIn("steps.verify.outputs.environment_url", rollback["environment"]["url"])
         self.assertEqual(rollback["concurrency"]["group"], "gpoint-production-release")
@@ -38,9 +40,10 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("github.ref == 'refs/heads/main'", rehearsal["if"])
         self.assertIn("inputs.migration_rehearsal == true", rehearsal["if"])
         self.assertEqual(jobs["build"]["needs"], ["tests"])
-        self.assertEqual(jobs["deploy"]["needs"], ["tests", "build"])
+        self.assertNotIn("needs", jobs["deploy"])
         self.assertIn("outputs.mode == 'DEPLOY'", jobs["build"]["if"])
-        self.assertIn("github.event_name == 'pull_request'", jobs["build"]["if"])
+        self.assertIn("github.event_name == 'push'", jobs["build"]["if"])
+        self.assertNotIn("pull_request", jobs["build"]["if"])
         self.assertNotIn("ARTIFACT_PREPARE", jobs["build"]["if"])
 
     def test_native_dispatch_has_no_cross_run_prebuilt_image_inputs(self):
@@ -61,7 +64,39 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertNotIn("REUSE_PREPARED_IMAGES", readback["env"])
         self.assertIn('docker pull --platform linux/amd64 "$image:$IMAGE_VERSION"', readback["run"])
         deploy = self.workflow["jobs"]["deploy"]
-        self.assertIn("always()", deploy["if"])
+        self.assertIn("workflow_dispatch", deploy["if"])
+
+    def test_prepare_and_deploy_are_separate_exact_sha_phases(self):
+        jobs = self.workflow["jobs"]
+        self.assertEqual(jobs["tests"]["if"], "github.event_name != 'workflow_dispatch'")
+        self.assertIn("github.event_name == 'push'", jobs["build"]["if"])
+        self.assertIn("github.ref == 'refs/heads/main'", jobs["build"]["if"])
+        self.assertNotIn("pull_request", jobs["build"]["if"])
+        deploy = jobs["deploy"]
+        self.assertNotIn("needs", deploy)
+        self.assertIn("github.actor == github.repository_owner", deploy["if"])
+        self.assertIn("inputs.approve_production == true", deploy["if"])
+        self.assertEqual(deploy["environment"]["name"], "production")
+        self.assertEqual(deploy["concurrency"]["group"], "gpoint-production-release")
+        steps = deploy["steps"]
+        ids = [step.get("id") for step in steps]
+        self.assertLess(ids.index("prepared_run"), ids.index("prepared"))
+        self.assertLess(ids.index("prepared"), next(i for i, step in enumerate(steps)
+                                                      if step.get("name") == "Install verified Kamal SSH credentials"))
+        lookup = next(step["run"] for step in steps if step.get("id") == "prepared_run")
+        self.assertIn("head_sha == $sha", lookup)
+        self.assertIn("conclusion == \"success\"", lookup)
+        self.assertIn("artifact_name=\"gpoint-release-$run_id-$run_attempt\"", lookup)
+        download = next(step for step in steps if step.get("uses", "").startswith("actions/download-artifact@"))
+        self.assertEqual(download["with"]["digest-mismatch"], "error")
+        self.assertEqual(download["with"]["run-id"], "${{ steps.prepared_run.outputs.run_id }}")
+        manifest_upload = next(step for step in jobs["build"]["steps"]
+                               if step.get("name") == "Store immutable release manifest for later Deploy and rollback")
+        self.assertTrue(manifest_upload["uses"].startswith("actions/upload-artifact@"))
+        self.assertEqual(manifest_upload["with"]["retention-days"], 90)
+        self.assertIn("requiredChecks", "\n".join(step.get("run", "") for step in jobs["build"]["steps"]))
+        self.assertIn("approve_production == true", deploy["if"])
+        self.assertNotIn("needs", deploy)
 
     def test_native_image_version_is_bound_to_its_current_build_run(self):
         build = self.workflow["jobs"]["build"]
@@ -78,7 +113,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(build["outputs"]["image_version"], "${{ steps.image_version.outputs.image_version }}")
         self.assertIn("${CURRENT_RUN_ID}", version_step["run"])
         self.assertIn("${CURRENT_RUN_ATTEMPT}", version_step["run"])
-        self.assertEqual(deploy["env"]["IMAGE_VERSION"], "${{ needs.build.outputs.image_version }}")
+        self.assertNotIn("IMAGE_VERSION", deploy["env"])
+        self.assertIn("IMAGE_VERSION={version}", next(step["run"] for step in deploy["steps"] if step.get("id") == "prepared"))
         kamal = next(step for step in deploy["steps"]
                      if step.get("name") == "Deploy exact immutable images with stock Kamal")
         self.assertIn("--version \"$IMAGE_VERSION\"", kamal["run"])
@@ -123,7 +159,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
 
     def test_required_checks_cover_release_tooling_and_eros(self):
         self.assertEqual(self.workflow["concurrency"], {
-            "group": "gpoint-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'native-production-transaction' }}",
+            "group": "gpoint-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && 'manual-production' || 'main-preparation' }}",
             "cancel-in-progress": False,
         })
         tests = self.workflow["jobs"]["tests"]
@@ -226,9 +262,10 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("pull_request", triggers)
         self.assertEqual(triggers["push"]["branches"], ["main"])
         deploy = self.workflow["jobs"]["deploy"]
-        self.assertIn("always()", deploy["if"])
-        self.assertIn("needs.build.result == 'success'", deploy["if"])
-        self.assertIn("github.event_name == 'push'", deploy["if"])
+        self.assertIn("workflow_dispatch", deploy["if"])
+        self.assertNotIn("needs", deploy)
+        self.assertNotIn("push", deploy["if"])
+        self.assertIn("github.actor == github.repository_owner", deploy["if"])
         self.assertIn("production", deploy["environment"]["name"])
         self.assertNotIn("paths", triggers["push"])
         approval = triggers["workflow_dispatch"]["inputs"]["approve_production"]
@@ -258,7 +295,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn('return "BLOCK"', intent)
 
         deploy = self.workflow["jobs"]["deploy"]
-        self.assertIn("always()", deploy["if"])
+        self.assertIn("workflow_dispatch", deploy["if"])
+        self.assertNotIn("needs", deploy)
         rehearsal = yaml.safe_load((ROOT / ".github/workflows/gpoint-operations.yml").read_text())["jobs"]["migration_rehearsal"]
         self.assertEqual(rehearsal["environment"], {"name": "production", "deployment": False})
         self.assertNotIn("deployments", rehearsal["permissions"])
@@ -469,16 +507,16 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("WORKFLOW_SHA", script)
         self.assertIn("APPROVE_PRODUCTION", script)
         self.assertIn("OWNER_APPROVAL_ACTOR", script)
-        self.assertEqual(deploy["needs"], ["tests", "build"])
+        self.assertNotIn("needs", deploy)
         self.assertTrue(all(name in self.workflow["jobs"]["build"]["outputs"]
                             for name in ("app_digest", "miniapp_digest", "eros_digest")))
         self.assertNotIn("gsales_digest", self.workflow["jobs"]["build"]["outputs"])
         deploy_text = yaml.safe_dump(deploy)
-        self.assertIn("needs.build.outputs.app_digest", deploy_text)
+        self.assertIn("steps.prepared.outputs.core_digest", deploy_text)
         self.assertNotIn("needs.build.outputs.agata_digest", deploy_text)
         self.assertNotIn("needs.build.outputs.gsales_digest", deploy_text)
-        self.assertIn("needs.build.outputs.miniapp_digest", deploy_text)
-        self.assertIn("needs.build.outputs.eros_digest", deploy_text)
+        self.assertIn("steps.prepared.outputs.miniapp_digest", deploy_text)
+        self.assertIn("steps.prepared.outputs.eros_digest", deploy_text)
         self.assertNotRegex(script, r"docker\s+compose\s+(up|down|pull|restart)")
         self.assertIn("kamal redeploy --skip-push", script)
         self.assertNotIn("kamal deploy --skip-push", script)
@@ -543,3 +581,68 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             self.assertIn(f"config/{config}", config_check)
         self.assertIn("config-validation-placeholder", config_check)
         self.assertIn("Kamal config validation failed", config_check)
+
+    def test_deploy_manifest_validator_accepts_exact_artifact_and_rejects_mismatches(self):
+        deploy = self.workflow["jobs"]["deploy"]
+        validator = next(step for step in deploy["steps"] if step.get("id") == "prepared")
+        candidate = "a" * 40
+        upstream = "b" * 40
+        digests = {name: "sha256:" + char * 64 for name, char in
+                   (("core", "1"), ("miniapp", "2"), ("eros", "3"))}
+
+        def run_case(mutate=None, corrupt_checksum=False):
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                prepared = root / "gpoint-prepared"
+                (prepared / "services/eros-engine").mkdir(parents=True)
+                (prepared / "services/eros-engine/upstream.sha").write_text(upstream + "\n")
+                images = {
+                    "core": {"repository": "ghcr.io/akhripunov/gpoint-runtime", "version": f"{candidate}-9000-2", "digest": digests["core"], "sourceRevision": candidate},
+                    "miniapp": {"repository": "ghcr.io/akhripunov/gpoint-miniapp", "version": f"{candidate}-9000-2", "digest": digests["miniapp"], "sourceRevision": candidate},
+                    "eros": {"repository": "ghcr.io/akhripunov/gpoint-eros", "version": f"{candidate}-9000-2", "digest": digests["eros"], "sourceRevision": candidate, "upstreamRevision": upstream},
+                }
+                manifest = {
+                    "schema": "gpoint-release-preparation/v1", "repository": "akhripunov/gpoint", "sha": candidate,
+                    "sourceRun": {"id": 9000, "attempt": 2, "event": "push", "branch": "main", "conclusion": "success"},
+                    "requiredChecks": [{"name": name, "conclusion": "success"} for name in
+                                       ("Tests (workspace)", "Tests (python)", "Build and publish immutable images")],
+                    "images": images, "imageVersion": f"{candidate}-9000-2", "readBack": "success",
+                }
+                if mutate:
+                    mutate(manifest)
+                manifest_path = prepared / "gpoint-release-manifest.json"
+                manifest_path.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n")
+                digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+                if corrupt_checksum:
+                    digest = "0" * 64
+                (prepared / "gpoint-release-manifest.sha256").write_text(
+                    f"{digest}  gpoint-release-manifest.json\n")
+                output, envfile = root / "output", root / "env"
+                env = os.environ.copy()
+                env.update({"RUNNER_TEMP": str(root), "CANDIDATE_SHA": candidate, "SOURCE_RUN_ID": "9000",
+                            "SOURCE_RUN_ATTEMPT": "2", "SOURCE_ARTIFACT_DIGEST": "sha256:" + "4" * 64,
+                            "REPOSITORY": "akhripunov/gpoint", "GITHUB_OUTPUT": str(output), "GITHUB_ENV": str(envfile)})
+                result = subprocess.run(["bash", "-euo", "pipefail", "-c", validator["run"]],
+                                        env=env, capture_output=True, text=True, check=False)
+                return result, output.read_text() if output.exists() else "", envfile.read_text() if envfile.exists() else ""
+
+        result, outputs, envfile = run_case()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"core_digest={digests['core']}", outputs)
+        self.assertIn(f"miniapp_digest={digests['miniapp']}", outputs)
+        self.assertIn(f"eros_digest={digests['eros']}", outputs)
+        self.assertIn(f"IMAGE_VERSION={candidate}-9000-2", envfile)
+
+        failures = [
+            (lambda manifest: manifest.update(sha="c" * 40), False),
+            (lambda manifest: manifest["sourceRun"].update(attempt=3), False),
+            (lambda manifest: manifest["requiredChecks"][0].update(conclusion="failure"), False),
+            (lambda manifest: manifest["images"]["core"].update(digest="latest"), False),
+            (lambda manifest: manifest["images"].pop("miniapp"), False),
+            (lambda manifest: manifest["images"]["eros"].update(upstreamRevision="c" * 40), False),
+            (None, True),
+        ]
+        for mutate, corrupt_checksum in failures:
+            with self.subTest(mutate=mutate, corrupt_checksum=corrupt_checksum):
+                rejected, _, _ = run_case(mutate, corrupt_checksum)
+                self.assertNotEqual(rejected.returncode, 0)
