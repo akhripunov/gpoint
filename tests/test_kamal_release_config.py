@@ -37,6 +37,24 @@ def test_shared_proxy_hosts_are_not_redeclared_by_kamal_roles():
     assert "hosts" not in miniapp["servers"]["web"]["proxy"]
 
 
+def test_eros_api_uses_a_stable_loopback_worker_accessory_instead_of_api_port_publish():
+    config = yaml.safe_load((ROOT / "config/deploy.eros-api.yml").read_text())
+    api_options = config["servers"]["api"]["options"]
+    accessory = config["accessories"]["worker-proxy"]
+
+    assert "publish" not in api_options
+    assert accessory["image"] == (
+        "ghcr.io/akhripunov/gpoint-runtime@"
+        "<%= ENV.fetch(\"GPOINT_WORKER_PROXY_DIGEST\", \"sha256:0000000000000000000000000000000000000000000000000000000000000000\") %>"
+    )
+    assert accessory["cmd"] == "node apps/api/src/gpoint-worker-tunnel-proxy.mjs"
+    assert accessory["port"] == "127.0.0.1:13004:3000"
+    assert accessory["network"] == "kamal"
+    assert accessory["options"]["read-only"] is True
+    assert accessory["options"]["cap-drop"] == "ALL"
+    assert accessory["options"]["security-opt"] == "no-new-privileges:true"
+
+
 def test_kamal_core_config_uses_public_tls_proxy_and_only_core_roles():
     config = yaml.safe_load((ROOT / "config/deploy.yml").read_text())
     assert not (ROOT / "Gemfile.kamal").exists()
@@ -1104,6 +1122,7 @@ def test_ordinary_verify_receives_baseline_facts_in_remote_shell():
             },
         }, separators=(',', ':')).encode()).decode(),
         'expected_eros_upstream': 'c' * 40,
+        'EROS_INSTALLED': 'true',
         'BASELINE_ROLE_VERSION': 'b' * 40 + '-100-1', 'BASELINE_ROLE_SOURCE_SHA': 'b' * 40,
         'DB_MOUNTS_SHA256': 'c' * 64, 'REDIS_MOUNTS_SHA256': 'd' * 64,
     }
