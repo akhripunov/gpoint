@@ -83,6 +83,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertLess(ids.index("prepared_run"), ids.index("prepared"))
         self.assertLess(ids.index("prepared"), next(i for i, step in enumerate(steps)
                                                       if step.get("name") == "Install verified Kamal SSH credentials"))
+        self.assertLess(ids.index("eros_e2e_evidence"), next(i for i, step in enumerate(steps)
+                                                             if step.get("name") == "Install verified Kamal SSH credentials"))
         lookup = next(step["run"] for step in steps if step.get("id") == "prepared_run")
         self.assertIn("head_sha == $sha", lookup)
         self.assertIn("conclusion == \"success\"", lookup)
@@ -174,7 +176,6 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertNotIn("if", intent)
         self.assertEqual(tests["outputs"], {
             "mode": "${{ steps.intent.outputs.mode }}",
-            "deploy": "${{ steps.intent.outputs.deploy }}",
         })
         eros_scope = next(step for step in tests["steps"] if step.get("id") == "eros_scope")
         self.assertEqual(eros_scope.get("if"), "matrix.suite == 'workspace'")
@@ -228,14 +229,15 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
                               if step.get("id") == "kamal_inventory")
         self.assertIn("verify-kamal-production-baseline.py", live_inventory["run"])
 
-    def test_accumulated_infrastructure_gate_uses_successful_native_marker(self):
+    def test_approved_deploy_dispatch_replaces_automatic_push_infrastructure_gate(self):
         steps = self.workflow["jobs"]["deploy"]["steps"]
-        marker = next(step for step in steps if step.get("id") == "infrastructure_baseline")
         plan = next(step for step in steps if step.get("id") == "component_plan")
-        self.assertIn("latest-successful-native-sha", marker["run"])
-        self.assertIn("INFRASTRUCTURE_BASELINE_SHA", plan["env"])
-        self.assertIn("changed_paths(infrastructure_baseline, candidate", plan["run"])
-        self.assertNotIn("accumulated_changed_paths", plan["run"])
+        self.assertNotIn("infrastructure_baseline", [step.get("id") for step in steps])
+        self.assertNotIn("INFRASTRUCTURE_BASELINE_SHA", plan["env"])
+        self.assertNotIn("is_infrastructure_change", plan["run"])
+        self.assertIn("github.event_name == 'workflow_dispatch'", self.workflow["jobs"]["deploy"]["if"])
+        self.assertIn("github.actor == github.repository_owner", self.workflow["jobs"]["deploy"]["if"])
+        self.assertIn("inputs.approve_production == true", self.workflow["jobs"]["deploy"]["if"])
 
     def test_cumulative_engine_scope_runs_e2e_and_build_requires_same_run_tests_success(self):
         tests = self.workflow["jobs"]["tests"]
@@ -248,7 +250,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         build = self.workflow["jobs"]["build"]
         self.assertIn("tests", build["needs"])
         self.assertIn("needs.tests.result == 'success'", build["if"])
-        self.assertIn("needs.tests.outputs.deploy == 'true'", build["if"])
+        self.assertIn("needs.tests.outputs.mode == 'DEPLOY'", build["if"])
+        self.assertNotIn("needs.tests.outputs.deploy", build["if"])
         self.assertFalse(any(step.get("name") == "Require exact-candidate Eros test evidence"
                              for step in build["steps"]))
 
@@ -282,7 +285,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
 
     def test_operational_only_push_and_migration_rehearsal_fail_closed(self):
         gate = self.workflow["jobs"]["tests"]
-        self.assertEqual(gate["outputs"]["deploy"], "${{ steps.intent.outputs.deploy }}")
+        self.assertEqual(gate["outputs"]["mode"], "${{ steps.intent.outputs.mode }}")
+        self.assertNotIn("deploy", gate["outputs"])
         self.assertIn("scripts/native_release_intent.py", "\n".join(step.get("run", "") for step in gate["steps"]))
         gate_text = "\n".join(step.get("run", "") for step in gate["steps"])
         self.assertNotIn("--backup-maintenance", gate_text)
@@ -646,3 +650,88 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             with self.subTest(mutate=mutate, corrupt_checksum=corrupt_checksum):
                 rejected, _, _ = run_case(mutate, corrupt_checksum)
                 self.assertNotEqual(rejected.returncode, 0)
+
+    def test_deploy_only_eros_evidence_reads_exact_preparation_attempt(self):
+        deploy = self.workflow["jobs"]["deploy"]
+        evidence = next(step for step in deploy["steps"] if step.get("id") == "eros_e2e_evidence")
+        command = evidence["run"]
+        self.assertIn("steps.prepared_run.outputs.run_id", str(evidence["env"]))
+        self.assertIn("steps.prepared_run.outputs.run_attempt", str(evidence["env"]))
+        self.assertIn("$SOURCE_RUN_ID/attempts/$SOURCE_RUN_ATTEMPT/jobs", command)
+        self.assertNotIn("$GITHUB_RUN_ID/jobs", command)
+        self.assertIn('outcome not in {"success", "skipped"}', command)
+        self.assertIn("outcome is None", command)
+        self.assertIn('outcome in {"failure", "cancelled"}', command)
+
+        def run_case(conclusion="success", *, include_workspace=True, include_step=True,
+                     workspace_conclusion="success"):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                fake_gh = root / "gh"
+                payload = {"jobs": []}
+                if include_workspace:
+                    job = {"name": "Tests (workspace)", "status": "completed",
+                           "conclusion": workspace_conclusion, "steps": []}
+                    if include_step:
+                        job["steps"].append({"name": "Run stock Eros SQLx and synthetic conversation E2E",
+                                             "conclusion": conclusion})
+                    payload["jobs"].append(job)
+                fake_gh.write_text("#!/bin/sh\ncase \"$*\" in *'/runs/9000/attempts/2/jobs?per_page=100'*) ;; *) exit 71 ;; esac\nprintf '%s\\n' '" + json.dumps(payload) + "'\n")
+                fake_gh.chmod(0o700)
+                output, summary = root / "output", root / "summary"
+                env = os.environ.copy()
+                env.update({"PATH": str(root) + os.pathsep + env.get("PATH", ""),
+                            "GITHUB_REPOSITORY": "akhripunov/gpoint", "SOURCE_RUN_ID": "9000",
+                            "SOURCE_RUN_ATTEMPT": "2", "GITHUB_OUTPUT": str(output),
+                            "GITHUB_STEP_SUMMARY": str(summary)})
+                result = subprocess.run(["bash", "-euo", "pipefail", "-c", command], env=env,
+                                        text=True, capture_output=True, check=False)
+                return result, output.read_text() if output.exists() else ""
+
+        result, output = run_case("success")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output, "outcome=success\n")
+        result, output = run_case("skipped")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output, "outcome=skipped\n")
+
+        for args in (("failure",), ("cancelled",), (None,), ("missing",),
+                     ("success", False, True, "failure")):
+            with self.subTest(args=args):
+                if len(args) == 4:
+                    rejected, output = run_case(args[0], include_workspace=args[1], include_step=args[2],
+                                                workspace_conclusion=args[3])
+                else:
+                    rejected, output = run_case(args[0], include_step=args[0] != "missing")
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertEqual(output, "")
+
+        rejected, output = run_case("success", include_workspace=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(output, "")
+
+    def test_complete_workflow_routes_pr_push_and_deploy_dispatch(self):
+        events = self.workflow.get("on", self.workflow.get(True))
+        jobs = self.workflow["jobs"]
+        self.assertEqual(events["pull_request"]["branches"], ["main"])
+        self.assertEqual(events["push"]["branches"], ["main"])
+        self.assertEqual(jobs["tests"]["if"], "github.event_name != 'workflow_dispatch'")
+        self.assertEqual(set(jobs["tests"]["outputs"]), {"mode"})
+        build_if = jobs["build"]["if"]
+        self.assertIn("github.event_name == 'push'", build_if)
+        self.assertIn("github.ref == 'refs/heads/main'", build_if)
+        self.assertIn("needs.tests.result == 'success'", build_if)
+        self.assertIn("needs.tests.outputs.mode == 'DEPLOY'", build_if)
+        self.assertNotIn("needs.tests.outputs.deploy", build_if)
+        self.assertNotIn("pull_request", build_if)
+        deploy = jobs["deploy"]
+        self.assertNotIn("needs", deploy)
+        self.assertIn("workflow_dispatch", deploy["if"])
+        self.assertIn("approve_production == true", deploy["if"])
+        self.assertIn("github.actor == github.repository_owner", deploy["if"])
+        deploy_yaml = yaml.safe_dump(deploy)
+        self.assertNotIn("needs.tests", deploy_yaml)
+        self.assertNotIn("needs.build", deploy_yaml)
+        self.assertNotIn("GITHUB_RUN_ID/jobs", deploy_yaml)
+        self.assertNotIn("github.event_name == 'push'", deploy_yaml)
+        self.assertNotIn("infrastructure_baseline", deploy_yaml)

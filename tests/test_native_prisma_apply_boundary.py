@@ -18,7 +18,7 @@ def test_approved_prisma_apply_is_inside_the_protected_deploy_before_kamal():
     assert ids.index("migration_plan") < ids.index("deployment")
     assert ids.index("deployment") < ids.index("migration_apply") < ids.index("kamal_apply")
     apply = next(step for step in steps if step.get("id") == "migration_apply")
-    assert apply["if"] == "needs.tests.outputs.mode == 'DEPLOY' && (inputs.mode != 'rollback')"
+    assert apply["if"] == "inputs.mode == 'deploy' && (inputs.mode != 'rollback')"
     assert 'if [[ "$APPLY" == false ]]' in apply["run"]
     assert "AGATA" not in apply["run"]
     assert not any("steps.migration_apply.outputs." in value for value in apply["env"].values())
@@ -30,7 +30,7 @@ def test_approved_prisma_apply_is_inside_the_protected_deploy_before_kamal():
     assert apply["env"]["APP_IMAGE"] == "ghcr.io/akhripunov/gpoint-runtime@${{ steps.component_plan.outputs.migration_app_digest }}"
     assert "apply_failed" not in apply
     kamal = next(step for step in steps if step.get("id") == "kamal_apply")
-    assert kamal["if"] == "needs.tests.outputs.mode == 'DEPLOY' && ((success()) && inputs.mode != 'rollback')"
+    assert kamal["if"] == "inputs.mode == 'deploy' && ((success()) && inputs.mode != 'rollback')"
     verify = next(step for step in steps if step.get("id") == "verify")
     assert "steps.migration_apply.outputs.prisma_migrations" in verify["env"]["EXPECTED_PRISMA_MIGRATIONS"]
     assert "BASELINE_AGATA_HEAD" not in verify["env"]
@@ -64,7 +64,7 @@ def test_prisma_migration_plan_and_apply_remain_exact_sha_and_environment_scoped
     assert "--baseline-sha \"$BASELINE_SOURCE_SHA\"" in plan["run"]
     assert "--candidate-sha \"$CANDIDATE_SHA\"" in plan["run"]
     eros = next(step for step in deploy["steps"] if step.get("id") == "eros_database")
-    assert eros["if"].startswith("needs.tests.outputs.mode == 'DEPLOY'")
+    assert eros["if"].startswith("inputs.mode == 'deploy'")
 
 
 def test_production_job_reads_host_and_ssh_from_secrets():

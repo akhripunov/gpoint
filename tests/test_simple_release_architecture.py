@@ -33,7 +33,7 @@ def _ordinary_core_deploy_steps() -> int:
         if "inputs.mode != 'rollback'" in condition:
             count += 1
             continue
-        if "needs.tests.outputs.mode == 'DEPLOY'" in condition:
+        if "inputs.mode == 'deploy'" in condition:
             count += 1
             continue
         if "needs.tests.outputs.mode != 'LAYER7_API'" in condition:
@@ -84,7 +84,7 @@ def test_retired_eros_pilot_compose_deployer_is_not_a_release_tool():
     assert "eros-pilot-deployment" not in package["scripts"]["test:release"]
 
 
-def test_pr_candidate_runs_build_without_production_deploy():
+def test_pr_candidate_runs_required_tests_without_build_or_production_deploy():
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     )
@@ -93,10 +93,8 @@ def test_pr_candidate_runs_build_without_production_deploy():
 
     assert workflow["name"] == "GPoint Release Pipeline"
 
-    assert "github.event_name == 'pull_request'" in build["if"]
-    assert "github.event.pull_request.head.repo.full_name == github.repository" in build["if"]
-    assert "github.event.pull_request.author_association" in build["if"]
-    assert 'fromJSON(\'["OWNER","MEMBER","COLLABORATOR"]\')' in build["if"]
+    assert "github.event_name == 'push'" in build["if"]
+    assert "pull_request" not in build["if"]
     assert build["permissions"]["packages"] == "write"
     assert "build_components" not in build["outputs"]
     assert "deploy_scope" not in build["outputs"]
@@ -120,7 +118,10 @@ def test_pr_candidate_runs_build_without_production_deploy():
     assert "pull-requests" in tests["permissions"]
     assert not any(step.get("name") == "Require exact-candidate Eros test evidence" for step in build["steps"])
     assert "github.event_name == 'pull_request'" not in deploy["if"]
-    assert "needs.tests.outputs.mode == 'DEPLOY'" in deploy["if"]
+    assert "needs" not in deploy
+    assert "github.event_name == 'workflow_dispatch'" in deploy["if"]
+    assert "inputs.approve_production == true" in deploy["if"]
+    assert "needs.tests.outputs.mode == 'DEPLOY'" in build["if"]
     assert "needs.build.outputs.deploy_scope" not in deploy["if"]
 
 

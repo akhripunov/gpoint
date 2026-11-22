@@ -1,16 +1,8 @@
-"""Release routing: Tests -> Build -> Deploy and the rollback mode.
+"""Integrated release event routing and Deploy-only mode gates."""
 
-Run 43148553035 taught one lesson; this file teaches the other one. When Build is
-skipped, a job that needs it is skipped too unless its condition uses always().
-Rollback intentionally skips Build (it redeploys already published images), so the
-Deploy admission must be evaluated, not eyeballed.
-"""
-
-import itertools
 import re
 from pathlib import Path
 
-import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,14 +14,6 @@ REPLACEMENTS = (
     (r"always\(\)", "True"),
     (r"cancelled\(\)", "False"),
     (r"success\(\)", "True"),
-    (r"github\.event_name", "event"),
-    (r"github\.ref", "ref"),
-    (r"github\.actor", "actor"),
-    (r"github\.repository_owner", "owner"),
-    (r"needs\.tests\.result", "tests_result"),
-    (r"needs\.build\.result", "build_result"),
-    (r"needs\.tests\.outputs\.mode", "tests_mode"),
-    (r"needs\.tests\.outputs\.deploy", "tests_deploy"),
     (r"inputs\.mode", "inputs_mode"),
     (r"steps\.[A-Za-z0-9_]+\.outputs\.[A-Za-z0-9_]+ == '[^']*'", "True"),
     (r"steps\.[A-Za-z0-9_]+\.outcome == 'failure'", "False"),
@@ -39,85 +23,64 @@ REPLACEMENTS = (
 )
 
 
-def evaluate(expression: str, **values) -> bool:
-    defaults = {
-        "tests_mode": "DEPLOY", "tests_deploy": "true", "tests_result": "success",
-        "build_result": "success", "event": "push",
-        "ref": "refs/heads/main", "actor": "akhripunov", "owner": "akhripunov",
-        "inputs_mode": "deploy",
-    }
-    defaults.update(values)
-    values = defaults
+def evaluate(expression: str, *, inputs_mode: str) -> bool:
     source = expression
     for pattern, replacement in REPLACEMENTS:
         source = re.sub(pattern, replacement, source)
     source = source.replace("&&", " and ").replace("||", " or ")
     source = re.sub(r"!(?!=)", " not ", source)
-    return bool(eval(source, {"__builtins__": {}}, values))  # noqa: S307 - fixed test input
+    return bool(eval(source, {"__builtins__": {}}, {"inputs_mode": inputs_mode}))  # noqa: S307
+
+def test_pr_push_and_deploy_dispatch_form_one_connected_release_flow():
+    events = WORKFLOW.get("on", WORKFLOW.get(True))
+    tests = WORKFLOW["jobs"]["tests"]
+    build = BUILD
+    assert events["pull_request"]["branches"] == ["main"]
+    assert events["push"]["branches"] == ["main"]
+    assert tests["if"] == "github.event_name != 'workflow_dispatch'"
+    assert set(tests["outputs"]) == {"mode"}
+    assert "github.event_name == 'push'" in build["if"]
+    assert "github.ref == 'refs/heads/main'" in build["if"]
+    assert "needs.tests.result == 'success'" in build["if"]
+    assert "needs.tests.outputs.mode == 'DEPLOY'" in build["if"]
+    assert "pull_request" not in build["if"]
+    assert "needs.tests.outputs.deploy" not in build["if"]
+    assert "needs" not in DEPLOY
+    assert "workflow_dispatch" in DEPLOY["if"]
+    assert "github.ref == 'refs/heads/main'" in DEPLOY["if"]
+    assert "github.actor == github.repository_owner" in DEPLOY["if"]
+    assert "inputs.approve_production == true" in DEPLOY["if"]
+    assert DEPLOY["environment"]["name"] == "production"
+    assert DEPLOY["concurrency"]["group"] == "gpoint-production-release"
 
 
-def should_deploy(*, event, ref, actor, owner, mode, tests_result, build_result,
-                  tests_mode, tests_deploy) -> bool:
-    """Independent reading of the release rules, used to check the workflow."""
-    if tests_result != "success" or tests_deploy != "true":
-        return False
-    if event == "push":
-        return ref == "refs/heads/main" and build_result == "success"
-    if event != "workflow_dispatch":
-        return False
-    if ref != "refs/heads/main" or actor != owner:
-        return False
-    if mode == "deploy":
-        return tests_mode == "DEPLOY" and build_result == "success"
-    if mode == "rollback":
-        return tests_mode == "ROLLBACK" and build_result in {"success", "skipped"}
-    return False
-
-
-CASES = list(itertools.product(
-    ("push", "workflow_dispatch", "pull_request"),
-    ("refs/heads/main", "refs/heads/feature"),
-    (True, False),
-    ("deploy", "rollback", ""),
-    ("success", "failure", "cancelled", "skipped"),
-    ("success", "failure", "skipped", "cancelled"),
-    ("DEPLOY", "ROLLBACK", "BLOCK"),
-    ("true", "false"),
-))
-
-
-@pytest.mark.parametrize("event,ref,owner_actor,mode,tests_result,build_result,"
-                         "tests_mode,tests_deploy", CASES)
-def test_deploy_admission_matches_the_release_rules(event, ref, owner_actor, mode,
-                                                    tests_result, build_result,
-                                                    tests_mode, tests_deploy):
-    actual = evaluate(
-        DEPLOY["if"], event=event, ref=ref, actor="akhripunov" if owner_actor else "collaborator",
-        owner="akhripunov", inputs_mode=mode, tests_result=tests_result,
-        build_result=build_result, tests_mode=tests_mode, tests_deploy=tests_deploy)
-    expected = should_deploy(
-        event=event, ref=ref, actor="akhripunov" if owner_actor else "collaborator",
-        owner="akhripunov", mode=mode, tests_result=tests_result,
-        build_result=build_result, tests_mode=tests_mode, tests_deploy=tests_deploy)
-    assert actual is expected, (
-        f"deploy admission differs for event={event} ref={ref} owner={owner_actor} "
-        f"mode={mode} tests={tests_result} build={build_result} "
-        f"tests_mode={tests_mode}")
-
-
-def test_noop_product_release_still_enters_runtime_verification():
-    condition = DEPLOY["if"]
-    assert "needs.build.outputs.deploy_scope" not in condition
-    assert "needs.build.result == 'success'" in condition
-    assert "needs.tests.outputs.deploy == 'true'" in condition
-
-
-def test_rollback_skips_build_but_still_reaches_deploy():
-    assert "inputsmode" not in BUILD["if"]
-    assert "inputs.mode == 'DEPLOY'" in BUILD["if"] or "mode == 'DEPLOY'" in BUILD["if"]
-    assert "skipped" in DEPLOY["if"]
-    assert "always()" in DEPLOY["if"]
-    assert "cancelled()" in DEPLOY["if"]
+def test_deploy_uses_prior_attempt_manifest_and_has_no_current_run_ci_dependency():
+    deploy_text = yaml.safe_dump(DEPLOY)
+    assert "needs.tests" not in deploy_text
+    assert "needs.build" not in deploy_text
+    assert "GITHUB_RUN_ID/jobs" not in deploy_text
+    assert "github.event_name == 'push'" not in deploy_text
+    assert "infrastructure_baseline" not in deploy_text
+    find = next(step for step in DEPLOY["steps"] if step.get("id") == "prepared_run")
+    assert "/attempts/$run_attempt/jobs" in find["run"]
+    assert "Tests (workspace)" in find["run"]
+    assert "Tests (python)" in find["run"]
+    assert "Build and publish immutable images" in find["run"]
+    assert "conclusion == \"success\"" in find["run"]
+    evidence = next(step for step in DEPLOY["steps"] if step.get("id") == "eros_e2e_evidence")
+    assert evidence["env"]["SOURCE_RUN_ID"] == "${{ steps.prepared_run.outputs.run_id }}"
+    assert evidence["env"]["SOURCE_RUN_ATTEMPT"] == "${{ steps.prepared_run.outputs.run_attempt }}"
+    assert "/attempts/$SOURCE_RUN_ATTEMPT/jobs" in evidence["run"]
+    assert not any(step.get("uses", "").startswith("docker/build-push-action@")
+                   for step in DEPLOY["steps"])
+    download = next(step for step in DEPLOY["steps"]
+                    if step.get("uses", "").startswith("actions/download-artifact@"))
+    assert download["with"]["artifact-ids"] == "${{ steps.prepared_run.outputs.artifact_id }}"
+    assert download["with"]["run-id"] == "${{ steps.prepared_run.outputs.run_id }}"
+    assert download["with"]["digest-mismatch"] == "error"
+    manifest = next(step for step in DEPLOY["steps"] if step.get("id") == "prepared")
+    assert manifest["id"] == "prepared"
+    assert "IMAGE_VERSION={version}" in manifest["run"]
 
 
 ORDINARY_MUTATIONS = {

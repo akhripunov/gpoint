@@ -54,10 +54,9 @@ jobs:
       deployments: read
       actions: read
       pull-requests: read
-    # Both required suites compute identical release intent outputs.
+    # Both required suites compute the same release intent mode.
     outputs:
       mode: ${{ steps.intent.outputs.mode }}
-      deploy: ${{ steps.intent.outputs.deploy }}
     # Playwright's --with-deps package list is not available on the moving
     # ubuntu-latest image; pin the test matrix to its supported Ubuntu image.
     runs-on: ubuntu-24.04
@@ -399,8 +398,7 @@ jobs:
     needs: [tests]
     if: >-
       !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-      needs.tests.result == 'success' && needs.tests.outputs.mode == 'DEPLOY' &&
-      needs.tests.outputs.deploy == 'true'
+      needs.tests.result == 'success' && needs.tests.outputs.mode == 'DEPLOY'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -682,17 +680,13 @@ jobs:
           WORKFLOW_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
-            test "$APPROVE_PRODUCTION" = true
-            test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY" || {
-              echo 'production release actor must match the repository owner' >&2; exit 1;
-            }
-            test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY" || {
-              echo 'production release triggering actor must match the repository owner' >&2; exit 1;
-            }
-          elif [[ "$GITHUB_EVENT_NAME" != push ]]; then
-            echo 'unsupported production release event' >&2; exit 1
-          fi
+          test "$APPROVE_PRODUCTION" = true
+          test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY" || {
+            echo 'production release actor must match the repository owner' >&2; exit 1;
+          }
+          test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY" || {
+            echo 'production release triggering actor must match the repository owner' >&2; exit 1;
+          }
           test "$REQUESTED_SHA" = "$WORKFLOW_SHA"
           if ! [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo 'candidate SHA must be exactly 40 lowercase hexadecimal characters' >&2; exit 1;
@@ -716,8 +710,8 @@ jobs:
           candidates="$(jq -r --arg sha "$CANDIDATE_SHA" '.workflow_runs[] | select(.head_sha == $sha and .head_branch == "main" and .event == "push" and .status == "completed" and .conclusion == "success") | [.id, .run_attempt] | @tsv' <<< "$runs")"
           while IFS=$'\t' read -r run_id run_attempt; do
             [[ -n "$run_id" && -n "$run_attempt" ]] || continue
-            jobs="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/jobs?per_page=100")"
-            jq -e 'def ok($name): any(.jobs[]; .name == $name and .conclusion == "success"); ok("Tests (workspace)") and ok("Tests (python)") and ok("Build and publish immutable images")' <<< "$jobs" >/dev/null || continue
+            jobs="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/attempts/$run_attempt/jobs?per_page=100")"
+            jq -e 'def ok($name): [.jobs[] | select(.name == $name)] as $matches | ($matches | length) == 1 and $matches[0].conclusion == "success"; ok("Tests (workspace)") and ok("Tests (python)") and ok("Build and publish immutable images")' <<< "$jobs" >/dev/null || continue
             artifacts="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/artifacts?per_page=100")"
             artifact_name="gpoint-release-$run_id-$run_attempt"
             artifact="$(jq -c --arg name "$artifact_name" '[.artifacts[] | select(.name == $name and .expired == false)] | if length == 1 then .[0] else empty end' <<< "$artifacts")"
@@ -795,6 +789,42 @@ jobs:
               print(f"EROS_UPSTREAM_SHA={upstream}", file=out)
           print(f"Prepared SHA {sha} from run {run_id}/{attempt}; artifact digest verified: {os.environ['SOURCE_ARTIFACT_DIGEST']}")
           PY
+      - name: Read exact Tests workspace Eros E2E outcome
+        if: inputs.mode != 'rollback'
+        id: eros_e2e_evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ steps.prepared_run.outputs.run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ steps.prepared_run.outputs.run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ && "$SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          source_jobs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/attempts/$SOURCE_RUN_ATTEMPT/jobs?per_page=100")"
+          outcome="$(python3 -c '
+          import json, sys
+          jobs = json.load(sys.stdin).get("jobs", [])
+          workspace = [job for job in jobs if job.get("name") == "Tests (workspace)"]
+          if len(workspace) != 1:
+              raise SystemExit("source preparation attempt is missing its unique Tests (workspace) job")
+          job = workspace[0]
+          if job.get("status") != "completed" or job.get("conclusion") != "success":
+              raise SystemExit("source Tests (workspace) job did not complete successfully")
+          e2e = [step for step in job.get("steps", [])
+                 if step.get("name") == "Run stock Eros SQLx and synthetic conversation E2E"]
+          if len(e2e) != 1:
+              raise SystemExit("source preparation attempt is missing its unique Eros E2E result")
+          outcome = e2e[0].get("conclusion")
+          if outcome is None:
+              raise SystemExit("source preparation attempt is missing the Eros E2E conclusion")
+          if outcome in {"failure", "cancelled"}:
+              raise SystemExit("source Eros E2E did not pass: " + outcome)
+          if outcome not in {"success", "skipped"}:
+              raise SystemExit("source Eros E2E has an unsupported conclusion: " + str(outcome))
+          print(outcome)
+          ' <<< "$source_jobs")"
+          [[ "$outcome" == success || "$outcome" == skipped ]]
+          echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
+          echo "GPOINT_TESTS_WORKSPACE_EROS_E2E_OUTCOME=$outcome SOURCE_RUN=$SOURCE_RUN_ID/$SOURCE_RUN_ATTEMPT" >> "$GITHUB_STEP_SUMMARY"
       - name: Install verified Kamal SSH credentials
         env:
           GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}
@@ -1041,32 +1071,6 @@ jobs:
               *) echo 'unexpected topology fact' >&2; exit 1 ;;
             esac
           done <<< "$facts"
-      - name: Resolve last successful Native deployment as infrastructure approval baseline
-        if: github.event_name == 'push'
-        id: infrastructure_baseline
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          python3 scripts/resolve_native_environment_deployment.py \
-            --repository "$REPOSITORY" --latest-successful-native-sha >> "$GITHUB_OUTPUT"
-      - name: Read exact Tests workspace Eros E2E outcome
-        if: inputs.mode != 'rollback'
-        id: eros_e2e_evidence
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          outcome="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" --jq '
-            .jobs[] | select(.name == "Tests (workspace)") |
-            if .conclusion != "success" then "workspace_" + (.conclusion // "incomplete")
-            else
-              ([.steps[] | select(.name == "Run stock Eros SQLx and synthetic conversation E2E")][0].conclusion // "missing_e2e_step")
-            end')"
-          [[ "$outcome" =~ ^(success|skipped|failure|cancelled|missing_workspace_job|missing_e2e_step|workspace_[a-z]+|incomplete)$ ]]
-          echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
-          echo "GPOINT_TESTS_WORKSPACE_EROS_E2E_OUTCOME=$outcome" >> "$GITHUB_STEP_SUMMARY"
       - name: Plan exact component-scoped Kamal update from live baseline
         if: (inputs.mode != 'rollback')
         id: component_plan
@@ -1076,8 +1080,6 @@ jobs:
           MINIAPP_DIGEST: ${{ steps.prepared.outputs.miniapp_digest }}
           EROS_DIGEST: ${{ steps.prepared.outputs.eros_digest }}
           E2E_OUTCOME: ${{ steps.eros_e2e_evidence.outputs.outcome }}
-          EVENT_NAME: ${{ github.event_name }}
-          INFRASTRUCTURE_BASELINE_SHA: ${{ steps.infrastructure_baseline.outputs.sha }}
         run: |
           set -euo pipefail
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
@@ -1086,8 +1088,7 @@ jobs:
           sys.path.insert(0, str(Path.cwd() / "scripts"))
           from native_release_intent import (ALL_COMPONENT_ROLES, ROLE_REPOSITORIES,
                                              classify_component_scope, expected_runtime_inventory_b64,
-                                             changed_paths,
-                                             is_infrastructure_change, require_live_eros_e2e_success)
+                                             require_live_eros_e2e_success)
 
           candidate = os.environ["CANDIDATE_SHA"]
           baseline = json.loads(os.environ["BASELINE_ROLE_INVENTORY"])
@@ -1098,13 +1099,6 @@ jobs:
           live_eros_e2e_required = require_live_eros_e2e_success(
               Path.cwd(), live_eros_source, candidate, os.environ["E2E_OUTCOME"])
           print("live_eros_e2e_required=" + str(live_eros_e2e_required).lower())
-          if os.environ["EVENT_NAME"] == "push":
-              infrastructure_baseline = os.environ["INFRASTRUCTURE_BASELINE_SHA"]
-              if not re.fullmatch(r"[0-9a-f]{40}", infrastructure_baseline):
-                  raise SystemExit("last verified Native production deployment SHA is unavailable")
-              accumulated_paths = changed_paths(infrastructure_baseline, candidate, repo=Path.cwd())
-              if is_infrastructure_change(accumulated_paths):
-                  raise SystemExit("accumulated production infrastructure changes require approved workflow_dispatch")
           effective = {}
           image_inputs = {"CORE": "APP_DIGEST", "MINIAPP": "MINIAPP_DIGEST", "EROS": "EROS_DIGEST"}
           outputs = {"CORE": "app_digest", "MINIAPP": "miniapp_digest", "EROS": "eros_digest"}

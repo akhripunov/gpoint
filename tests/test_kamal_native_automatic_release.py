@@ -180,14 +180,18 @@ def test_build_unconditionally_publishes_all_three_images_and_live_inventory_sco
     assert eros_scope["if"] == "matrix.suite == 'workspace'"
     evidence = next(step for step in deploy_steps if step.get("id") == "eros_e2e_evidence")
     assert evidence["env"]["GH_TOKEN"] == "${{ github.token }}"
-    assert 'select(.name == "Tests (workspace)")' in evidence["run"]
-    assert 'select(.name == "Run stock Eros SQLx and synthetic conversation E2E")' in evidence["run"]
+    assert evidence["env"]["SOURCE_RUN_ID"] == "${{ steps.prepared_run.outputs.run_id }}"
+    assert evidence["env"]["SOURCE_RUN_ATTEMPT"] == "${{ steps.prepared_run.outputs.run_attempt }}"
+    assert "/runs/$SOURCE_RUN_ID/attempts/$SOURCE_RUN_ATTEMPT/jobs" in evidence["run"]
+    assert "$GITHUB_RUN_ID/jobs" not in evidence["run"]
+    assert 'job.get("name") == "Tests (workspace)"' in evidence["run"]
+    assert 'step.get("name") == "Run stock Eros SQLx and synthetic conversation E2E"' in evidence["run"]
     assert component_plan["env"]["E2E_OUTCOME"] == "${{ steps.eros_e2e_evidence.outputs.outcome }}"
     assert "require_live_eros_e2e_success" in plan_run
     assert "E2E_REQUIRED" not in plan_run
 
 
-def test_merge_bot_can_deploy_exact_current_main_sha_automatically(tmp_path):
+def test_deploy_dispatch_requires_owner_approval_and_exact_current_main_sha(tmp_path):
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     deploy = workflow["jobs"]["deploy"]
     gate = next(step for step in deploy["steps"]
@@ -200,14 +204,13 @@ def test_merge_bot_can_deploy_exact_current_main_sha_automatically(tmp_path):
         env = os.environ.copy()
         env.update({
             "PATH": str(tmp_path) + os.pathsep + env.get("PATH", ""),
-            "GITHUB_EVENT_NAME": "push",
             "GITHUB_REPOSITORY": "akhripunov/gpoint",
             "GITHUB_SHA": sha,
             "REQUESTED_SHA": sha,
             "WORKFLOW_SHA": sha,
-            "APPROVE_PRODUCTION": "false",
+            "APPROVE_PRODUCTION": "true",
             "OWNER_APPROVAL_ACTOR": "akhripunov",
-            "OWNER_TRIGGERING_ACTOR": "collaborator",
+            "OWNER_TRIGGERING_ACTOR": "akhripunov",
             "OWNER_REPOSITORY": "akhripunov",
         })
 
@@ -217,6 +220,16 @@ def test_merge_bot_can_deploy_exact_current_main_sha_automatically(tmp_path):
         )
 
         assert result.returncode == 0, result.stderr
+
+        for update in ({"APPROVE_PRODUCTION": "false"},
+                       {"OWNER_APPROVAL_ACTOR": "collaborator"},
+                       {"OWNER_TRIGGERING_ACTOR": "collaborator"},
+                       {"REQUESTED_SHA": "b" * 40}):
+            rejected = subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", gate["run"]],
+                env={**env, **update}, capture_output=True, text=True, check=False,
+            )
+            assert rejected.returncode != 0
     finally:
         fake_gh.unlink(missing_ok=True)
 
