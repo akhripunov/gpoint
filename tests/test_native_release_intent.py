@@ -109,6 +109,17 @@ def test_retired_agata_and_relay_paths_do_not_select_an_image(path):
     assert MODULE._known_non_runtime_path(path)
 
 
+def test_recovery_authorization_metadata_is_known_non_runtime_and_push_classified():
+    path = ".release-authorizations/gpoint-prod-recovery-20261122-001.json"
+
+    assert MODULE._component_paths(path) == set()
+    assert MODULE._known_non_runtime_path(path)
+    assert MODULE._path_kind(path) == "ops"
+    assert MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths={path},
+    ) == "DEPLOY"
+
+
 @pytest.mark.parametrize("path,expected", [
     ("apps/api/src/main.ts", "CORE"),
     ("apps/miniapp/src/main.tsx", "MINIAPP"),
