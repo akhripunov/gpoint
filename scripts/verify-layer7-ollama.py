@@ -21,24 +21,37 @@ LEGACY_PORT_BINDINGS = {"11434/tcp": [{"HostIp": "127.0.0.1", "HostPort": "11435
 
 def _inspect_optional(kind: str, name: str, docker_run) -> dict | None:
     command = ["docker", "network", "inspect", name] if kind == "network" else ["docker", "inspect", name]
-    result = docker_run(command, check=False,
-                        capture_output=True, text=True)
-    if result.returncode:
-        message = result.stderr or ""
+    transient_errors = (
+        "context deadline exceeded", "connection refused", "connection reset",
+        "unexpected eof", "cannot connect to the docker daemon", "i/o timeout",
+        "tls handshake timeout",
+    )
+    for attempt in range(1, 4):
+        result = docker_run(command, check=False, capture_output=True, text=True)
+        if not result.returncode:
+            try:
+                rows = json.loads(result.stdout)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"Docker {kind} inventory is invalid JSON") from error
+            if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+                raise ValueError(f"Docker {kind} inventory is ambiguous")
+            return rows[0]
+
+        message = (result.stderr or "").strip()
         missing = ((kind == "network" and
                     (f"network {name} not found" in message or f"No such network: {name}" in message))
                    or (kind == "container" and
                        (f"No such object: {name}" in message or f"No such container: {name}" in message)))
         if missing:
             return None
-        raise ValueError(f"Docker {kind} inventory could not be read")
-    try:
-        rows = json.loads(result.stdout)
-    except json.JSONDecodeError as error:
-        raise ValueError(f"Docker {kind} inventory is invalid JSON") from error
-    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
-        raise ValueError(f"Docker {kind} inventory is ambiguous")
-    return rows[0]
+        lowered = message.lower()
+        if attempt < 3 and any(error in lowered for error in transient_errors):
+            print(f"OLLAMA_DOCKER_INVENTORY=RETRY attempt={attempt} kind={kind}", file=sys.stderr)
+            time.sleep(attempt)
+            continue
+        detail = re.sub(r"\s+", " ", message)[:240] or f"exit_{result.returncode}"
+        raise ValueError(f"Docker {kind} inventory could not be read: {detail}")
+    raise AssertionError("unreachable Docker inventory retry state")
 
 
 def _run_docker(args: list[str], docker_run) -> None:
