@@ -36,6 +36,41 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     assert (ROOT / ".github/workflows/gpoint-operations.yml").exists()
 
 
+def test_core_deploy_prepares_and_verifies_stable_worker_tunnel_with_stock_kamal():
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    steps = workflow["jobs"]["deploy"]["steps"]
+    apply = next(step for step in steps if step.get("id") == "kamal_apply")["run"]
+    verify = next(step for step in steps if step.get("id") == "verify")["run"]
+    accessory = apply.index("kamal accessory boot worker-proxy")
+    core_api = apply.index("kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles api")
+
+    assert accessory < core_api
+    assert "kamal accessory reboot worker-proxy" in apply
+    assert 'GPOINT_WORKER_PROXY_DIGEST="$APP_DIGEST"' in apply
+    assert "--env GPOINT_WORKER_PROXY_DIGEST" in apply
+    assert "docker run" not in apply[accessory:core_api]
+    assert "127.0.0.1:13004" in apply
+    assert "expected 401" in apply
+    assert "gpoint-core-worker-proxy" in verify
+    assert "GPOINT_WORKER_TUNNEL_PROXY=PASS" in verify
+    assert "HostPort\": \"13004\"" in verify
+    assert "set(networks) != {\"kamal\"}" in verify
+
+
+def test_core_rollback_keeps_the_worker_tunnel_accessory_and_checks_it_after_rollback():
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    steps = workflow["jobs"]["deploy"]["steps"]
+    rollback_apply = next(step for step in steps if step.get("id") == "rollback_apply")["run"]
+    rollback_verify = next(step for step in steps if step.get("id") == "rollback_verify")["run"]
+
+    assert "accessory remove worker-proxy" not in rollback_apply
+    assert "accessory stop worker-proxy" not in rollback_apply
+    assert "gpoint-core-worker-proxy" in rollback_verify
+    assert "Worker tunnel accessory is missing after Core rollback" in rollback_verify
+    assert "127.0.0.1:13004" in rollback_verify
+    assert "WORKER_TUNNEL_PROXY=PASS" in rollback_verify
+
+
 def test_layer7_is_production_and_retired_staging_paths_cannot_deploy():
     import sys
     sys.path.insert(0, str(ROOT / "scripts"))

@@ -11,11 +11,6 @@ servers:
       clear:
         RELEASE_SHA: <%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>
     options:
-      # Loopback-only endpoint for the Mac Product Worker tunnel. Public traffic
-      # keeps using kamal-proxy below; this port is never bound to a public
-      # interface and still requires the worker bearer token and tenant.
-      publish:
-        - "127.0.0.1:13003:3000"
       network:
         - shared_internal
         - gpoint_eros_data
@@ -32,6 +27,25 @@ servers:
       app_port: 3000
       healthcheck:
         path: /health/live
+
+# Keep the Mac Product Worker tunnel endpoint independent of the replaceable
+# API container. This forwards only the authenticated GPoint worker routes
+# through the existing Kamal Proxy and binds only to VPS loopback.
+accessories:
+  worker-proxy:
+    image: ghcr.io/akhripunov/gpoint-runtime@<%= ENV.fetch("GPOINT_WORKER_PROXY_DIGEST", "sha256:0000000000000000000000000000000000000000000000000000000000000000") %>
+    host: <%= ENV.fetch("GPOINT_PRODUCTION_HOST") %>
+    cmd: node apps/api/src/gpoint-worker-tunnel-proxy.mjs
+    port: "127.0.0.1:13004:3000"
+    network: kamal
+    options:
+      memory: 128m
+      cpus: 0.25
+      pids-limit: 64
+      read-only: true
+      cap-drop: ALL
+      security-opt: no-new-privileges:true
+      log-opt: max-size=10m
 
 proxy:
   hosts:

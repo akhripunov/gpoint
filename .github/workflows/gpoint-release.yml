@@ -1338,7 +1338,7 @@ jobs:
             docker run --rm --volume "$GITHUB_WORKSPACE:/workdir" --volume "$HOME/.ssh:/root/.ssh:ro" --volume "$HOME/.ssh:$HOME/.ssh:ro" \
               --workdir /workdir --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA --env GPOINT_PRODUCTION_HOST \
               --env GPOINT_SSH_KEY --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD \
-              --env GPOINT_KAMAL_EXPECTED_DIGEST --env GPOINT_KAMAL_SERVICE --env KAMAL_ROLES \
+              --env GPOINT_KAMAL_EXPECTED_DIGEST --env GPOINT_KAMAL_SERVICE --env GPOINT_WORKER_PROXY_DIGEST --env KAMAL_ROLES \
               --env GPOINT_KAMAL_CORE_API_VERSION --env GPOINT_KAMAL_CORE_API_SOURCE_SHA \
               ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 "$@"
           }
@@ -1431,7 +1431,46 @@ jobs:
             if [[ "$EROS_INSTALLED" == true || "$DEPLOY_EROS" == true ]]; then
               core_api_config=config/deploy.eros-api.yml
             fi
-            GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
+            if [[ "$core_api_config" == config/deploy.eros-api.yml ]]; then
+              proxy_name=gpoint-core-worker-proxy
+              proxy_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{.State.Status}}' "$proxy_name" 2>/dev/null || true)"
+              proxy_image="ghcr.io/akhripunov/gpoint-runtime@$APP_DIGEST"
+              if [[ -z "$proxy_state" ]]; then
+                GPOINT_WORKER_PROXY_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core \
+                  kamal accessory boot worker-proxy --config-file "$core_api_config"
+              else
+                [[ "$proxy_state" == running ]] || { echo "Worker tunnel accessory is not running: $proxy_state" >&2; exit 1; }
+                current_proxy_image="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{.Config.Image}}' "$proxy_name")"
+                current_proxy_service="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{index .Config.Labels "service"}}' "$proxy_name")"
+                [[ "$current_proxy_service" == gpoint-core-worker-proxy ]] || { echo 'Worker tunnel accessory identity is unexpected' >&2; exit 1; }
+                if [[ "$current_proxy_image" != "$proxy_image" ]]; then
+                  GPOINT_WORKER_PROXY_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core \
+                    kamal accessory reboot worker-proxy --config-file "$core_api_config"
+                fi
+              fi
+              ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$APP_DIGEST" <<'REMOTE_WORKER_PROXY_CHECK'
+          set -euo pipefail
+          name=gpoint-core-worker-proxy
+          expected_image="ghcr.io/akhripunov/gpoint-runtime@$1"
+          test "$(docker inspect --format '{{.State.Status}}' "$name")" = running
+          test "$(docker inspect --format '{{.Config.Image}}' "$name")" = "$expected_image"
+          test "$(docker inspect --format '{{index .Config.Labels "service"}}' "$name")" = gpoint-core-worker-proxy
+          bindings="$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$name")"
+          networks="$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$name")"
+          python3 - "$bindings" "$networks" <<'PY'
+          import json, sys
+          bindings, networks = (json.loads(value) for value in sys.argv[1:])
+          if bindings != {"3000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "13004"}]}:
+              raise SystemExit("Worker tunnel accessory must bind only VPS loopback port 13004")
+          if set(networks) != {"kamal"}:
+              raise SystemExit("Worker tunnel accessory must use only the Kamal network")
+          PY
+          status="$(curl --connect-timeout 2 --max-time 5 --silent --show-error --output /dev/null --write-out '%{http_code}' http://127.0.0.1:13004/gpoint-worker/health)"
+          test "$status" = 401 || { echo "Worker tunnel unauthenticated guard returned HTTP $status, expected 401" >&2; exit 1; }
+          REMOTE_WORKER_PROXY_CHECK
+              echo "GPOINT_WORKER_TUNNEL_PROXY_READY=PASS IMAGE=$proxy_image PORT=127.0.0.1:13004" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            GPOINT_WORKER_PROXY_DIGEST="$APP_DIGEST" GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
               kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file "$core_api_config"
             GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal app stop --roles worker --config-file config/deploy.yml
             GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker \
@@ -1529,7 +1568,7 @@ jobs:
           test -n "$EXPECTED_PRISMA_HEAD" && test -n "$EXPECTED_PRISMA_MIGRATIONS" && test -n "$EXPECTED_PRISMA_CHECKSUMS"
           test -n "$BASELINE_PRISMA_HEAD" && test -n "$BASELINE_PRISMA_MIGRATIONS" && test -n "$BASELINE_PRISMA_CHECKSUMS"
           expected_eros_upstream="$(cat services/eros-engine/upstream.sha)"
-          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$EXPECTED_PRISMA_MIGRATIONS" "$EXPECTED_PRISMA_CHECKSUMS" "$EXPECTED_PRISMA_HEAD" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "${PENDING_PRISMA_MIGRATIONS:--}" "${PENDING_PRISMA_CHECKSUMS:--}" "$EXPECTED_ROLE_IDENTITIES_B64" "$EROS_DIGEST" "$expected_eros_upstream" <<'REMOTE'
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$EXPECTED_PRISMA_MIGRATIONS" "$EXPECTED_PRISMA_CHECKSUMS" "$EXPECTED_PRISMA_HEAD" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "${PENDING_PRISMA_MIGRATIONS:--}" "${PENDING_PRISMA_CHECKSUMS:--}" "$EXPECTED_ROLE_IDENTITIES_B64" "$EROS_DIGEST" "$expected_eros_upstream" "$EROS_INSTALLED" <<'REMOTE'
           set -euo pipefail
           sha="$1"; version="$2"; app="$3"; miniapp="$4"; db_id="$5"; redis_id="$6"; deployment_id="$7"; run_id="$8"; attempt="$9"; writer="${10}"
           expected_prisma_migrations="${11}"; expected_prisma_checksums="${12}"; expected_prisma_head="${13}"
@@ -1539,6 +1578,7 @@ jobs:
           expected_role_identities_b64="${21}"
           eros_digest="${22}"
           expected_eros_upstream="${23}"
+          eros_installed="${24}"
           [[ "$pending_prisma_migrations" != "-" ]] || pending_prisma_migrations=""
           [[ "$pending_prisma_checksums" != "-" ]] || pending_prisma_checksums=""
           [[ "$run_id" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]
@@ -1659,6 +1699,31 @@ jobs:
           if not proxy.intersection(core) or not proxy.intersection(miniapp):
               raise SystemExit('Kamal Proxy is not connected to both Core API and Mini App networks')
           PY
+          worker_proxy_name=gpoint-core-worker-proxy
+          worker_proxy_state="$(docker inspect --format '{{.State.Status}}' "$worker_proxy_name" 2>/dev/null || true)"
+          if [[ "$eros_installed" == true || -n "$worker_proxy_state" ]]; then
+            test "$worker_proxy_state" = running || { echo 'Eros is active but the Worker tunnel accessory is not running' >&2; exit 1; }
+            worker_proxy_image="$(docker inspect --format '{{.Config.Image}}' "$worker_proxy_name")"
+            worker_proxy_service="$(docker inspect --format '{{index .Config.Labels "service"}}' "$worker_proxy_name")"
+            [[ "$worker_proxy_image" =~ ^ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}$ ]]
+            test "$worker_proxy_service" = gpoint-core-worker-proxy
+            worker_proxy_bindings="$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$worker_proxy_name")"
+            worker_proxy_networks="$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$worker_proxy_name")"
+            python3 - "$worker_proxy_bindings" "$worker_proxy_networks" <<'PY'
+          import json, sys
+          bindings, networks = (json.loads(value) for value in sys.argv[1:])
+          if bindings != {"3000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "13004"}]}:
+              raise SystemExit("Worker tunnel accessory is not bound only to VPS loopback port 13004")
+          if set(networks) != {"kamal"}:
+              raise SystemExit("Worker tunnel accessory network isolation differs from Kamal")
+          PY
+            worker_proxy_http="$(curl --connect-timeout 2 --max-time 5 --silent --show-error --output /dev/null --write-out '%{http_code}' http://127.0.0.1:13004/gpoint-worker/health)"
+            test "$worker_proxy_http" = 401 || { echo "Worker tunnel route returned HTTP $worker_proxy_http without credentials; expected 401" >&2; exit 1; }
+            echo "GPOINT_WORKER_TUNNEL_PROXY_IMAGE=$worker_proxy_image"
+            echo GPOINT_WORKER_TUNNEL_PROXY=PASS
+          else
+            echo GPOINT_WORKER_TUNNEL_PROXY=NOT_INSTALLED
+          fi
           runtime_db="$(docker exec --workdir /app/apps/api "gpoint-core-api-$core_version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const failed=await db.$queryRawUnsafe("SELECT count(*)::int AS count FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL");if(failed[0].count!==0)throw Error("unfinished Prisma migration exists");const rows=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");const head=rows.length?rows[rows.length-1].migration_name:"NONE";console.log("PRISMA_HEAD="+head);console.log("PRISMA_MIGRATIONS="+rows.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+rows.map(x=>x.migration_name+"="+x.checksum).join(","))}catch(e){console.error("POST_DEPLOY_DATABASE_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           prisma_head="$(sed -n 's/^PRISMA_HEAD=//p' <<< "$runtime_db")"
           prisma_migrations="$(sed -n 's/^PRISMA_MIGRATIONS=//p' <<< "$runtime_db")"
@@ -1696,6 +1761,10 @@ jobs:
           manifest_sha="$(sed -n 's/^MANIFEST_SHA=//p' <<< "$facts")"
           [[ "$manifest_sha" =~ ^[0-9a-f]{64}$ ]]
           echo "manifest_sha=$manifest_sha" >> "$GITHUB_OUTPUT"
+          worker_proxy_image="$(sed -n 's/^GPOINT_WORKER_TUNNEL_PROXY_IMAGE=//p' <<< "$facts")"
+          if [[ -n "$worker_proxy_image" ]]; then
+            echo "GPOINT_WORKER_TUNNEL_PROXY_IMAGE=$worker_proxy_image" >> "$GITHUB_STEP_SUMMARY"
+          fi
           source_params="$(python3 - "$EXPECTED_ROLE_IDENTITIES_B64" <<'PY'
           import base64, json, re, sys
           value = json.loads(base64.b64decode(sys.argv[1], validate=True))
@@ -2152,9 +2221,10 @@ jobs:
           media_body="$RUNNER_TEMP/gpoint-rollback/media-route.json"
           media_status="$(curl --retry 5 --retry-connrefused --retry-delay 2 --silent --show-error --output "$media_body" --write-out '%{http_code}' https://gpoint.one/media/assets/kamal-route-verification-missing)"
           test "$media_status" = 404 && grep -Fq '"message":"media not found"' "$media_body"
-          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$TARGET_SHA" "$CORE_VERSION" "$MINIAPP_VERSION" "$CORE_SOURCE_SHA" "$MINIAPP_SOURCE_SHA" "$CORE_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" "$CORE_BOT_ENABLED" <<'REMOTE'
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$TARGET_SHA" "$CORE_VERSION" "$MINIAPP_VERSION" "$CORE_SOURCE_SHA" "$MINIAPP_SOURCE_SHA" "$CORE_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" "$CORE_BOT_ENABLED" "$EROS_VERSION" <<'REMOTE'
           set -euo pipefail
           core_version="$2"; miniapp_version="$3"; core_sha="$4"; miniapp_sha="$5"; dbid="$8"; redisid="$9"; dbmount="${10}"; redismount="${11}"; bot_enabled="${12}"
+          eros_version="${13}"
           [[ "$bot_enabled" == true || "$bot_enabled" == false ]]
           test "$(docker inspect --format '{{.Id}}' shared_postgres_1)" = "$dbid"
           test "$(docker inspect --format '{{.Id}}' shared_redis_1)" = "$redisid"
@@ -2198,6 +2268,28 @@ jobs:
           PY
           docker exec kamal-proxy kamal-proxy list | grep -F 'gpoint-miniapp' >/dev/null
           docker exec kamal-proxy kamal-proxy list | grep -F 'gpoint-core' >/dev/null
+          worker_proxy_name=gpoint-core-worker-proxy
+          worker_proxy_state="$(docker inspect --format '{{.State.Status}}' "$worker_proxy_name" 2>/dev/null || true)"
+          if [[ "$eros_version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ || -n "$worker_proxy_state" ]]; then
+            test "$worker_proxy_state" = running || { echo 'Worker tunnel accessory is missing after Core rollback' >&2; exit 1; }
+            worker_proxy_image="$(docker inspect --format '{{.Config.Image}}' "$worker_proxy_name")"
+            [[ "$worker_proxy_image" =~ ^ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}$ ]]
+            test "$(docker inspect --format '{{index .Config.Labels "service"}}' "$worker_proxy_name")" = gpoint-core-worker-proxy
+            worker_proxy_bindings="$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$worker_proxy_name")"
+            worker_proxy_networks="$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$worker_proxy_name")"
+            python3 - "$worker_proxy_bindings" "$worker_proxy_networks" <<'PY'
+          import json, sys
+          bindings, networks = (json.loads(value) for value in sys.argv[1:])
+          if bindings != {"3000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "13004"}]}:
+              raise SystemExit("Worker tunnel rollback endpoint lost loopback-only port binding")
+          if set(networks) != {"kamal"}:
+              raise SystemExit("Worker tunnel rollback endpoint left the isolated Kamal network")
+          PY
+            worker_proxy_http="$(curl --connect-timeout 2 --max-time 5 --silent --show-error --output /dev/null --write-out '%{http_code}' http://127.0.0.1:13004/gpoint-worker/health)"
+            test "$worker_proxy_http" = 401 || { echo "Worker tunnel rollback route returned HTTP $worker_proxy_http without credentials, expected 401" >&2; exit 1; }
+            echo "WORKER_TUNNEL_PROXY_IMAGE=$worker_proxy_image"
+            echo WORKER_TUNNEL_PROXY=PASS
+          fi
           runtime_db="$(docker exec --workdir /app/apps/api "gpoint-core-api-$core_version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","))}catch(e){console.error("POST_ROLLBACK_DB_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           printf '%s\n' "$runtime_db"
           echo ROLLBACK_RUNTIME_VERIFY=PASS

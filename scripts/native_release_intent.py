@@ -45,8 +45,10 @@ TEST_DIRECTORY_NAMES = frozenset({"test", "tests"})
 PRISMA_MIGRATION = re.compile(
     r"^packages/db/prisma/migrations/[0-9]{14}_[a-z0-9_]+/migration\.sql$"
 )
+RECOVERY_AUTHORIZATION_FILE = ".release-authorizations/gpoint-prod-recovery-20261122-001.json"
 # Explicitly reviewed non-runtime inputs that do not change an application image.
 KNOWN_NON_RUNTIME_FILES = frozenset({
+    RECOVERY_AUTHORIZATION_FILE,
     ".github/actionlint.yaml",
     ".kamal/hooks/post-app-boot",
     ".kamal/hooks/pre-app-boot",
@@ -227,6 +229,8 @@ def _path_kind(path: str) -> str:
     parts = normalized.split("/")
     if not normalized or normalized.startswith("../") or "/../" in normalized:
         return "unknown"
+    if normalized == RECOVERY_AUTHORIZATION_FILE:
+        return "ops"
     if normalized in EROS_MODEL_CONFIG_PATHS:
         return "ops"
     if normalized == "packages/db/prisma/schema.prisma":

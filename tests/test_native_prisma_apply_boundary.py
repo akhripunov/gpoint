@@ -34,7 +34,7 @@ def test_approved_prisma_apply_is_inside_the_protected_deploy_before_kamal():
     verify = next(step for step in steps if step.get("id") == "verify")
     assert "steps.migration_apply.outputs.prisma_migrations" in verify["env"]["EXPECTED_PRISMA_MIGRATIONS"]
     assert "BASELINE_AGATA_HEAD" not in verify["env"]
-    assert '"$EXPECTED_ROLE_IDENTITIES_B64" "$EROS_DIGEST" "$expected_eros_upstream" <<\'REMOTE\'' in verify["run"]
+    assert '"$EXPECTED_ROLE_IDENTITIES_B64" "$EROS_DIGEST" "$expected_eros_upstream" "$EROS_INSTALLED" <<\'REMOTE\'' in verify["run"]
     assert set(jobs) == {"tests", "build", "deploy"}
     assert "ARTIFACT_PREPARE" not in jobs["deploy"]["if"]
 
