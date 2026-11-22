@@ -1526,7 +1526,6 @@ jobs:
           PENDING_PRISMA_MIGRATIONS: ${{ steps.migration_plan.outputs.pending_prisma_migrations }}
           PENDING_PRISMA_CHECKSUMS: ${{ steps.migration_plan.outputs.pending_prisma_checksums }}
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
-          EROS_INSTALLED: ${{ steps.topology.outputs.EROS_INSTALLED }}
         run: |
           set -euo pipefail
           if [[ "$EROS_INSTALLED" == true ]]; then
