@@ -21,6 +21,19 @@ SHA40 = re.compile(r"^[0-9a-f]{40}$")
 IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 VERSION = re.compile(r"^[0-9a-f]{40}-[0-9]+-[0-9]+$")
 REPO_DIGEST = re.compile(r"^ghcr\.io/akhripunov/[a-z0-9-]+@sha256:[0-9a-f]{64}$")
+ROLE_SERVICES = {
+    "gpoint-core-api": ("gpoint-core", "api"),
+    "gpoint-core-worker": ("gpoint-core", "worker"),
+    "gpoint-core-bot": ("gpoint-core", "bot"),
+    "gpoint-miniapp-web": ("gpoint-miniapp", "web"),
+    "gpoint-eros-pilot-engine": ("gpoint-eros-pilot", "engine"),
+}
+
+
+def matching_role_names(role: str, names: list[str]) -> list[str]:
+    """Select exact Kamal role names, excluding accessories sharing a prefix."""
+    pattern = re.compile(re.escape(role) + r"-([0-9a-f]{40}-[0-9]+-[0-9]+)")
+    return [name for name in names if pattern.fullmatch(name)]
 
 
 def validate(records: list[dict]) -> dict:
@@ -41,6 +54,9 @@ def validate(records: list[dict]) -> dict:
             raise ValueError(f"Kamal version is missing or malformed for {role}")
         if name != role + "-" + version:
             raise ValueError(f"invalid Kamal version/name for {role}")
+        expected_service, expected_role = ROLE_SERVICES[role]
+        if row.get("service") != expected_service or row.get("container_role") != expected_role:
+            raise ValueError(f"invalid service identity for {role}")
         if (not SHA40.fullmatch(source or "") or not version.startswith(source + "-")
                 or not IMAGE_ID.fullmatch(image_id or "")):
             raise ValueError(f"invalid OCI source SHA or Docker image ID for {role}")
@@ -72,7 +88,7 @@ def inspect_running_roles() -> list[dict]:
                           check=True, text=True, capture_output=True).stdout.splitlines()
     role_repositories = {**ROLES, **EROS_ROLES}
     for role in role_repositories:
-        matches = [name for name in found if name.startswith(role + "-")]
+        matches = matching_role_names(role, found)
         if not matches and role in {"gpoint-core-bot", "gpoint-eros-pilot-engine"}:
             continue
         if len(matches) != 1:
@@ -85,12 +101,19 @@ def inspect_running_roles() -> list[dict]:
                              text=True, capture_output=True).stdout)[0]
         version = name[len(role) + 1:]
         labels = image.get("Config", {}).get("Labels", {})
+        container_labels = inspected.get("Config", {}).get("Labels", {})
+        expected_service, expected_role = ROLE_SERVICES[role]
+        if (container_labels.get("service") != expected_service
+                or container_labels.get("role") != expected_role):
+            raise ValueError(f"invalid service identity for {role}")
         revision = (labels.get("com.gpoint.source.revision") if role == "gpoint-eros-pilot-engine"
                     else labels.get("org.opencontainers.image.revision"))
         rows.append({"role": role, "name": name, "version": version,
                      "image_id": image_id,
                      "started_at": inspected.get("State", {}).get("StartedAt"),
                      "revision": revision,
+                     "service": container_labels.get("service"),
+                     "container_role": container_labels.get("role"),
                      "repo_digests": image.get("RepoDigests") or []})
     return rows
 

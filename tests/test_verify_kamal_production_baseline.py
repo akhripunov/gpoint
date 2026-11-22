@@ -24,6 +24,8 @@ def rows(include_bot=True, include_eros=True):
         digest = "sha256:" + ("1" if group == "CORE" else "2" if group == "MINIAPP" else "3") * 64
         records.append({
             "role": role, "name": role + "-" + version, "version": version,
+            "service": BASELINE.ROLE_SERVICES[role][0],
+            "container_role": BASELINE.ROLE_SERVICES[role][1],
             "revision": source, "image_id": "sha256:" + ("4" if group == "CORE" else "5" if group == "MINIAPP" else "6") * 64,
             "repo_digests": [repository + "@" + digest],
             "started_at": ("2026-11-16T18:49:32Z" if role == "gpoint-core-api" else
@@ -109,4 +111,41 @@ def test_rejects_any_retired_role_in_the_active_live_inventory():
         "repo_digests": ["ghcr.io/akhripunov/gpoint-runtime@sha256:" + "a" * 64],
     })
     with pytest.raises(ValueError, match="incomplete or duplicated"):
+        BASELINE.validate(records)
+
+
+def test_worker_role_match_excludes_running_tunnel_accessory():
+    worker = "gpoint-core-worker-" + "a" * 40 + "-10-1"
+    assert BASELINE.matching_role_names("gpoint-core-worker", [
+        worker, "gpoint-core-worker-proxy",
+    ]) == [worker]
+
+
+def test_worker_role_match_fails_closed_when_worker_is_absent_or_duplicated():
+    assert BASELINE.matching_role_names(
+        "gpoint-core-worker", ["gpoint-core-worker-proxy"]
+    ) == []
+    assert BASELINE.matching_role_names("gpoint-core-worker", [
+        "gpoint-core-worker-" + "a" * 40 + "-10-1",
+        "gpoint-core-worker-" + "b" * 40 + "-11-2",
+        "gpoint-core-worker-proxy",
+    ]) == [
+        "gpoint-core-worker-" + "a" * 40 + "-10-1",
+        "gpoint-core-worker-" + "b" * 40 + "-11-2",
+    ]
+
+
+def test_baseline_rejects_worker_with_wrong_service_identity():
+    records = rows()
+    worker = next(row for row in records if row["role"] == "gpoint-core-worker")
+    worker["service"] = "gpoint-core-worker-proxy"
+    with pytest.raises(ValueError, match="service identity"):
+        BASELINE.validate(records)
+
+
+def test_baseline_rejects_worker_with_wrong_kamal_version_name():
+    records = rows()
+    worker = next(row for row in records if row["role"] == "gpoint-core-worker")
+    worker["name"] = "gpoint-core-worker-proxy"
+    with pytest.raises(ValueError, match="invalid Kamal version/name"):
         BASELINE.validate(records)
