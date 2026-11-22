@@ -1559,8 +1559,8 @@ jobs:
           test "$redis_mounts_sha" = "$REDIS_MOUNTS_SHA256" || { echo 'Redis persistence identity changed during Kamal apply' >&2; exit 1; }
           test "$(docker inspect --format '{{.State.Running}}' kamal-proxy)" = true
           test "$(docker ps -q --filter 'name=^/kamal-proxy$' | wc -l | tr -d ' ')" = 1
-          test "$(docker ps -q --filter label=com.docker.compose.project=shared --filter label=com.docker.compose.service=postgres | wc -l | tr -d ' ')" = 1
-          test "$(docker ps -q --filter label=com.docker.compose.project=shared --filter label=com.docker.compose.service=redis | wc -l | tr -d ' ')" = 1
+          test "$(docker ps -q --filter 'name=^/shared_postgres_1$' | wc -l | tr -d ' ')" = 1
+          test "$(docker ps -q --filter 'name=^/shared_redis_1$' | wc -l | tr -d ' ')" = 1
           if systemctl is-active --quiet caddy; then echo 'Caddy is active on ordinary Kamal topology' >&2; exit 1; fi
           runtime_rows="$(python3 - "$expected_role_identities_b64" "$sha" <<'PY'
           import base64, json, re, sys
