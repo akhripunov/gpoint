@@ -305,6 +305,8 @@ def test_runtime_verify_rechecks_public_routes_and_five_target_roles_after_deplo
     assert '"${PENDING_PRISMA_MIGRATIONS:--}" "${PENDING_PRISMA_CHECKSUMS:--}"' in verify
     assert '[[ "$pending_prisma_migrations" != "-" ]] || pending_prisma_migrations=""' in verify
     assert '[[ "$pending_prisma_checksums" != "-" ]] || pending_prisma_checksums=""' in verify
+    assert 'DIGEST=$eros_digest' in verify
+    assert 'DIGEST=$EROS_DIGEST' not in verify
     for expected in (
         "https://gpoint.one/api/health/live",
         "gpoint-core-api",

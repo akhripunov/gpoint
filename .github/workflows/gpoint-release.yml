@@ -1640,7 +1640,7 @@ jobs:
             docker exec "gpoint-eros-pilot-engine-$eros_version" grep -F 'embeddings = "http://gpoint-core-api:3000/eros-worker/v1/embeddings"' /etc/eros-engine/model_config.toml >/dev/null
             python3 "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py" "gpoint-eros-pilot-engine-$eros_version" "$expected_eros_upstream" none
             rm -f -- "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py"
-            echo "GPOINT_EROS_HEALTH=PASS UPSTREAM_SHA=$expected_eros_upstream DIGEST=$EROS_DIGEST"
+            echo "GPOINT_EROS_HEALTH=PASS UPSTREAM_SHA=$expected_eros_upstream DIGEST=$eros_digest"
           fi
           docker exec "gpoint-core-api-$core_version" node -e 'const fs=require("node:fs");const crypto=require("node:crypto");const p="/data/media/.gpoint-runtime-verify-"+crypto.randomUUID();let created=false;try{fs.writeFileSync(p,"gpoint-media-read-write-pass",{flag:"wx"});created=true;if(fs.readFileSync(p,"utf8")!=="gpoint-media-read-write-pass")process.exit(1)}finally{if(created)fs.unlinkSync(p)}'
           media_mounts="$(docker inspect "gpoint-core-api-$core_version" --format '{{json .Mounts}}')"
