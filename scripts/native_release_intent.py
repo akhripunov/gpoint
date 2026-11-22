@@ -227,12 +227,24 @@ def push_deploy_authorized(*, mode: str, changed_paths: set[str] | frozenset[str
     return mode == "DEPLOY"
 
 
+def _existing_release_authorization_addendum(path: str) -> bool:
+    if RELEASE_AUTHORIZATION_ADDENDUM.fullmatch(path) is None:
+        return False
+    repo_root = Path(__file__).resolve().parents[1]
+    authorization_id = path.split("/")[2]
+    authorization = repo_root / ".release-authorizations" / f"{authorization_id}.json"
+    metadata = repo_root / path
+    return (authorization.is_file() and not authorization.is_symlink()
+            and metadata.is_file() and not metadata.is_symlink())
+
+
 def _path_kind(path: str) -> str:
     normalized = path.strip("/")
     parts = normalized.split("/")
     if not normalized or normalized.startswith("../") or "/../" in normalized:
         return "unknown"
-    if normalized == RECOVERY_AUTHORIZATION_FILE:
+    if (normalized == RECOVERY_AUTHORIZATION_FILE
+            or _existing_release_authorization_addendum(normalized)):
         return "ops"
     if normalized in EROS_MODEL_CONFIG_PATHS:
         return "ops"
@@ -419,16 +431,9 @@ def _known_non_runtime_path(path: str) -> bool:
         return True
     if path.startswith(("services/agata/", "packages/agata-client/", "config/deploy.agata.yml")):
         return True
-    addendum = RELEASE_AUTHORIZATION_ADDENDUM.fullmatch(path)
-    if addendum is not None:
-        repo_root = Path(__file__).resolve().parents[1]
-        authorization = repo_root / ".release-authorizations" / f"{path.split('/')[2]}.json"
-        metadata = repo_root / path
-        if (authorization.is_file() and not authorization.is_symlink()
-                and metadata.is_file() and not metadata.is_symlink()):
-            return True
     return (_non_runtime_documentation_path(path)
             or path == "config/deploy.ollama.yml"
+            or _existing_release_authorization_addendum(path)
             or path in EROS_MODEL_CONFIG_PATHS
             or path in KNOWN_NON_RUNTIME_FILES
             or PRISMA_MIGRATION.fullmatch(path) is not None
