@@ -133,6 +133,38 @@ def test_prepare_creates_only_the_internal_network_and_reports_absent_accessory(
     assert not any("--format" in call for call in calls)
 
 
+def test_prepare_retries_transient_docker_container_inventory_error(capsys):
+    module = load_module()
+    network = {"Internal": True, "Containers": {"1": {"Name": module.CONTAINER}}}
+    container = {
+        "Config": {"Image": module.IMAGE},
+        "State": {"Status": "running"},
+        "HostConfig": {
+            "PortBindings": {"11434/tcp": [{"HostIp": "127.0.0.1", "HostPort": "11435"}]},
+        },
+        "Mounts": [{"Name": "ollama-layer7-models", "Destination": "/root/.ollama", "RW": True}],
+        "NetworkSettings": {"Networks": {module.NETWORK: {"Aliases": ["ollama"]}}},
+    }
+    attempts = 0
+
+    def run(args, **_kwargs):
+        nonlocal attempts
+        if args[:3] == ["docker", "network", "inspect"]:
+            return docker_result(args, [network])
+        if args[:2] == ["docker", "inspect"]:
+            if args[2] == module.CONTAINER:
+                attempts += 1
+                if attempts == 1:
+                    return Result("", returncode=1, stderr="Error response from daemon: context deadline exceeded")
+                return docker_result(args, [container])
+            return Result("", returncode=1, stderr=f"Error: No such object: {args[2]}")
+        raise AssertionError(args)
+
+    assert module.prepare(docker_run=run) == "running"
+    assert attempts == 2
+    assert "OLLAMA_DOCKER_INVENTORY=RETRY attempt=1 kind=container" in capsys.readouterr().err
+
+
 def test_prepare_migrates_only_the_known_legacy_accessory_without_restarting_it():
     module = load_module()
     network = {"Internal": True, "Containers": {}}
