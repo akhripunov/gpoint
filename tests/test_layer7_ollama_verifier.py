@@ -125,7 +125,7 @@ def test_prepare_creates_only_the_internal_network_and_reports_absent_accessory(
             return docker_result(args, [network])
         if args[:2] == ["docker", "inspect"]:
             name = args[2]
-            return Result("", returncode=1, stderr=f"Error: No such object: {name}")
+            return Result("", returncode=1, stderr=f"error: no such object: {name}")
         raise AssertionError(args)
 
     assert module.prepare(docker_run=run) == "absent"

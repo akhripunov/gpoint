@@ -38,13 +38,13 @@ def _inspect_optional(kind: str, name: str, docker_run) -> dict | None:
             return rows[0]
 
         message = (result.stderr or "").strip()
+        lowered = message.lower()
         missing = ((kind == "network" and
-                    (f"network {name} not found" in message or f"No such network: {name}" in message))
+                    (f"network {name} not found" in lowered or f"no such network: {name}" in lowered))
                    or (kind == "container" and
-                       (f"No such object: {name}" in message or f"No such container: {name}" in message)))
+                       (f"no such object: {name}" in lowered or f"no such container: {name}" in lowered)))
         if missing:
             return None
-        lowered = message.lower()
         if attempt < 3 and any(error in lowered for error in transient_errors):
             print(f"OLLAMA_DOCKER_INVENTORY=RETRY attempt={attempt} kind={kind}", file=sys.stderr)
             time.sleep(attempt)
