@@ -1195,7 +1195,7 @@ jobs:
             "DOCKER_CONFIG='$stage/docker-config' docker login ghcr.io --username '$GITHUB_ACTOR' --password-stdin" >/dev/null
           # Use the exact candidate helpers for this one release snapshot.
           tar -C scripts -cf - gpoint-scheduled-backup.py gpoint-backup-policy.py \
-            gpoint-media-tree.py verify-gpoint-scheduled-backup-restore.sh \
+            gpoint-media-tree.py agata-production-migration.py verify-gpoint-scheduled-backup-restore.sh \
             | ssh -T "root@${GPOINT_PRODUCTION_HOST}" "tar --no-same-owner -xf - -C '$stage'"
           backup_output="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" \
             python3 "$stage/gpoint-scheduled-backup.py" --release-backup)" || {
@@ -1207,7 +1207,7 @@ jobs:
           backup_manifest="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" cat "$backup_path")"
           python3 - "$BASELINE_PRISMA_HEAD" "$backup_manifest" <<'PY'
           import json, sys
-          manifest = json.loads(sys.argv[3])
+          manifest = json.loads(sys.argv[2])
           if manifest.get("schema") != "gpoint-release-backup/v1" or manifest.get("status") != "PASS":
               raise SystemExit("fresh backup manifest is invalid")
           if manifest.get("database", {}).get("prisma_head") != sys.argv[1]:
@@ -1219,7 +1219,7 @@ jobs:
             "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "$backup_path" <<'REMOTE_APPLY'
           set -euo pipefail
           stage="$1"; app_image="$2"; candidate="$3"; pending="$4"; pending_checksums="$5"
-          baseline_migrations="$6"; baseline_checksums="$7"; baseline_head="$8"
+          baseline_migrations="$6"; baseline_checksums="$7"; baseline_head="$8"; backup_path="$9"
           [[ "$stage" =~ ^/run/gpoint-prisma-apply-[0-9]+-[0-9]+$ ]]
           [[ "$app_image" =~ ^ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}$ ]]
           [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]
@@ -1230,8 +1230,9 @@ jobs:
           test "$(docker image inspect "$app_image" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
           test "$(docker image inspect "$app_image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$candidate"
           docker image inspect "$app_image" --format '{{json .RepoDigests}}' | grep -F "$app_image" >/dev/null
+          [[ "$backup_path" =~ ^/opt/gpoint/backups/release/runs/[0-9a-f]{40}-[0-9]+-[0-9]+/manifest\.json$ ]]
           freshness="$(python3 "$stage/gpoint-backup-policy.py" freshness \
-            --release-backup --manifest "${10}" --max-age-hours 26)"
+            --release-backup --manifest "$backup_path" --max-age-hours 26)"
           grep -q '^GPOINT_BACKUP_FRESHNESS=PASS ' <<< "$freshness"
           docker run --rm --network shared_internal --env-file /opt/gpoint/env/production.env \
             --workdir /app/packages/db "$app_image" pnpm exec prisma migrate deploy
@@ -1373,18 +1374,34 @@ jobs:
             if [[ "$EROS_INSTALLED" == true || "$DEPLOY_EROS" == true ]]; then
               core_api_config=config/deploy.eros-api.yml
             fi
+            GPOINT_WORKER_PROXY_DIGEST="$APP_DIGEST" GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
+              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file "$core_api_config"
             if [[ "$core_api_config" == config/deploy.eros-api.yml ]]; then
               proxy_name=gpoint-core-worker-proxy
-              proxy_state="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{.State.Status}}' "$proxy_name" 2>/dev/null || true)"
               proxy_image="ghcr.io/akhripunov/gpoint-runtime@$APP_DIGEST"
-              if [[ -z "$proxy_state" ]]; then
+              proxy_inventory="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$proxy_name" <<'REMOTE_WORKER_PROXY_INVENTORY'
+          set -euo pipefail
+          name="$1"
+          ids="$(docker ps -aq --filter "name=^/$name$")"
+          if [[ -z "$ids" ]]; then
+            echo 'PROXY_STATE=missing'
+            exit 0
+          fi
+          [[ "$ids" != *$'\n'* ]] || { echo 'Worker tunnel accessory has duplicate containers' >&2; exit 1; }
+          state="$(docker inspect --format '{{.State.Status}}' "$ids")"
+          image="$(docker inspect --format '{{.Config.Image}}' "$ids")"
+          service="$(docker inspect --format '{{index .Config.Labels "service"}}' "$ids")"
+          [[ "$service" == gpoint-core-worker-proxy ]] || { echo 'Worker tunnel accessory identity is unexpected' >&2; exit 1; }
+          printf 'PROXY_STATE=%s\nPROXY_IMAGE=%s\n' "$state" "$image"
+          REMOTE_WORKER_PROXY_INVENTORY
+              )"
+              proxy_state="$(printf '%s\n' "$proxy_inventory" | sed -n 's/^PROXY_STATE=//p')"
+              if [[ "$proxy_state" == missing ]]; then
                 GPOINT_WORKER_PROXY_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core \
                   kamal accessory boot worker-proxy --config-file "$core_api_config"
               else
                 [[ "$proxy_state" == running ]] || { echo "Worker tunnel accessory is not running: $proxy_state" >&2; exit 1; }
-                current_proxy_image="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{.Config.Image}}' "$proxy_name")"
-                current_proxy_service="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{index .Config.Labels "service"}}' "$proxy_name")"
-                [[ "$current_proxy_service" == gpoint-core-worker-proxy ]] || { echo 'Worker tunnel accessory identity is unexpected' >&2; exit 1; }
+                current_proxy_image="$(printf '%s\n' "$proxy_inventory" | sed -n 's/^PROXY_IMAGE=//p')"
                 if [[ "$current_proxy_image" != "$proxy_image" ]]; then
                   GPOINT_WORKER_PROXY_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core \
                     kamal accessory reboot worker-proxy --config-file "$core_api_config"
@@ -1392,8 +1409,8 @@ jobs:
               fi
               ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$APP_DIGEST" <<'REMOTE_WORKER_PROXY_CHECK'
           set -euo pipefail
-          name=gpoint-core-worker-proxy
           expected_image="ghcr.io/akhripunov/gpoint-runtime@$1"
+          name=gpoint-core-worker-proxy
           test "$(docker inspect --format '{{.State.Status}}' "$name")" = running
           test "$(docker inspect --format '{{.Config.Image}}' "$name")" = "$expected_image"
           test "$(docker inspect --format '{{index .Config.Labels "service"}}' "$name")" = gpoint-core-worker-proxy
@@ -1412,14 +1429,16 @@ jobs:
           REMOTE_WORKER_PROXY_CHECK
               echo "GPOINT_WORKER_TUNNEL_PROXY_READY=PASS IMAGE=$proxy_image PORT=127.0.0.1:13004" >> "$GITHUB_STEP_SUMMARY"
             fi
-            GPOINT_WORKER_PROXY_DIGEST="$APP_DIGEST" GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=api \
-              kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api --config-file "$core_api_config"
             GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker kamal app stop --roles worker --config-file config/deploy.yml
+            running_workers="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker ps -q --filter label=service=gpoint-core-worker --filter status=running)"
+            [[ -z "$running_workers" ]] || { echo 'Old Core Worker is still running after Kamal stop' >&2; exit 1; }
             GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=worker \
               kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker --config-file config/deploy.yml
             verify_single_running_role gpoint-core-worker "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
             if [[ "$DEPLOY_BOT" == true ]]; then
               GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot kamal app stop --roles bot --config-file config/deploy.yml
+              running_bots="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker ps -q --filter label=service=gpoint-core-bot --filter status=running)"
+              [[ -z "$running_bots" ]] || { echo 'Old Core Bot is still running after Kamal stop' >&2; exit 1; }
               GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core KAMAL_ROLES=bot \
                 kamal deploy --skip-push --version "$IMAGE_VERSION" --roles bot --config-file config/deploy.yml
               verify_single_running_role gpoint-core-bot "$IMAGE_VERSION" "$GPOINT_COMMIT_SHA"
@@ -1433,6 +1452,18 @@ jobs:
             GPOINT_KAMAL_EXPECTED_DIGEST="$MINIAPP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-miniapp KAMAL_ROLES=web \
               kamal deploy --skip-push --version "$IMAGE_VERSION" --roles web --config-file config/deploy.miniapp.yml
           fi
+      - name: Verify Eros SQLx ledger after the candidate boots
+        id: eros_database_verify
+        if: steps.component_plan.outputs.deploy_eros == 'true' && inputs.mode != 'rollback'
+        env:
+          CANDIDATE_SHA: ${{ github.sha }}
+          EROS_DIGEST: ${{ steps.component_plan.outputs.eros_digest }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST"
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - \
+            --mode verify-applied --candidate "$CANDIDATE_SHA" --image "$image" \
+            --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" < scripts/eros-native-database.py
       - name: Verify public routes and exact running services
         if: (inputs.mode != 'rollback')
         id: verify
@@ -1497,7 +1528,7 @@ jobs:
           test -n "$EXPECTED_PRISMA_HEAD" && test -n "$EXPECTED_PRISMA_MIGRATIONS" && test -n "$EXPECTED_PRISMA_CHECKSUMS"
           test -n "$BASELINE_PRISMA_HEAD" && test -n "$BASELINE_PRISMA_MIGRATIONS" && test -n "$BASELINE_PRISMA_CHECKSUMS"
           expected_eros_upstream="$(cat services/eros-engine/upstream.sha)"
-          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$EXPECTED_PRISMA_MIGRATIONS" "$EXPECTED_PRISMA_CHECKSUMS" "$EXPECTED_PRISMA_HEAD" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "${PENDING_PRISMA_MIGRATIONS:--}" "${PENDING_PRISMA_CHECKSUMS:--}" "$EXPECTED_ROLE_IDENTITIES_B64" "$EROS_DIGEST" "$expected_eros_upstream" "$EROS_INSTALLED" <<'REMOTE'
+          facts="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$APP_DIGEST" "$MINIAPP_DIGEST" "$DB_CONTAINER_ID" "$REDIS_CONTAINER_ID" "$DEPLOYMENT_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$writer_remote" "$EXPECTED_PRISMA_MIGRATIONS" "$EXPECTED_PRISMA_CHECKSUMS" "$EXPECTED_PRISMA_HEAD" "$DB_MOUNTS_SHA256" "$REDIS_MOUNTS_SHA256" "$BASELINE_PRISMA_MIGRATIONS" "$BASELINE_PRISMA_CHECKSUMS" "$BASELINE_PRISMA_HEAD" "${PENDING_PRISMA_MIGRATIONS:--}" "${PENDING_PRISMA_CHECKSUMS:--}" "$EXPECTED_ROLE_IDENTITIES_B64" "${EROS_DIGEST:--}" "$expected_eros_upstream" "$EROS_INSTALLED" <<'REMOTE'
           set -euo pipefail
           sha="$1"; version="$2"; app="$3"; miniapp="$4"; db_id="$5"; redis_id="$6"; deployment_id="$7"; run_id="$8"; attempt="$9"; writer="${10}"
           expected_prisma_migrations="${11}"; expected_prisma_checksums="${12}"; expected_prisma_head="${13}"
@@ -1506,6 +1537,7 @@ jobs:
           pending_prisma_migrations="${19}"; pending_prisma_checksums="${20}"
           expected_role_identities_b64="${21}"
           eros_digest="${22}"
+          [[ "$eros_digest" != "-" ]] || eros_digest=""
           expected_eros_upstream="${23}"
           eros_installed="${24}"
           [[ "$pending_prisma_migrations" != "-" ]] || pending_prisma_migrations=""
@@ -1931,6 +1963,8 @@ jobs:
           done
           if [[ "${{ inputs.rollback_eros }}" == true ]]; then
             [[ "$EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ && "$EROS_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+            eros_upstream_sha="$(git show "${EROS_SOURCE_SHA}:services/eros-engine/upstream.sha")"
+            [[ "$eros_upstream_sha" =~ ^[0-9a-f]{40}$ ]]
             image=ghcr.io/akhripunov/gpoint-eros
             docker pull --platform linux/amd64 "$image@$EROS_DIGEST"
             docker image inspect "$image@$EROS_DIGEST" > "$RUNNER_TEMP/gpoint-rollback/eros-image.json"
@@ -1938,7 +1972,8 @@ jobs:
             docker buildx imagetools inspect --format '{{json .Provenance}}' "$image@$EROS_DIGEST" > "$RUNNER_TEMP/gpoint-rollback/eros-provenance.json"
             python3 scripts/verify_native_eros_image.py \
               "$RUNNER_TEMP/gpoint-rollback/eros-image.json" "$RUNNER_TEMP/gpoint-rollback/eros-sbom.json" \
-              "$RUNNER_TEMP/gpoint-rollback/eros-provenance.json" "$EROS_DIGEST" "$EROS_SOURCE_SHA"
+              "$RUNNER_TEMP/gpoint-rollback/eros-provenance.json" "$EROS_DIGEST" "$EROS_SOURCE_SHA" \
+              --upstream-sha "$eros_upstream_sha"
           fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         if: (inputs.mode == 'rollback')
@@ -2009,7 +2044,7 @@ jobs:
           echo "DB_MOUNTS_SHA256=$db_mounts"
           echo "REDIS_MOUNTS_SHA256=$redis_mounts"
           current_api="$(docker ps -q --filter 'name=^/gpoint-core-api-')"
-          current_db="$(docker exec --workdir /app/apps/api "$current_api" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","))}catch(e){console.error("READ_ONLY_DB_CHECK_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+          current_db="$(docker exec --workdir /app/apps/api "$current_api" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const failed=await db.$queryRawUnsafe("SELECT count(*)::int AS count FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL");if(failed[0].count!==0)throw Error("unfinished Prisma migration exists");const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","))}catch(e){console.error("READ_ONLY_DB_CHECK_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           printf '%s\n' "$current_db"
           REMOTE
           )"
@@ -2219,7 +2254,7 @@ jobs:
             echo "WORKER_TUNNEL_PROXY_IMAGE=$worker_proxy_image"
             echo WORKER_TUNNEL_PROXY=PASS
           fi
-          runtime_db="$(docker exec --workdir /app/apps/api "gpoint-core-api-$core_version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","))}catch(e){console.error("POST_ROLLBACK_DB_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
+          runtime_db="$(docker exec --workdir /app/apps/api "gpoint-core-api-$core_version" node -e 'const {PrismaClient}=require("@prisma/client");const db=new PrismaClient();(async()=>{try{const failed=await db.$queryRawUnsafe("SELECT count(*)::int AS count FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL");if(failed[0].count!==0)throw Error("unfinished Prisma migration exists");const r=await db.$queryRawUnsafe("SELECT migration_name,checksum FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name");console.log("PRISMA_HEAD="+(r.length?r[r.length-1].migration_name:"NONE"));console.log("PRISMA_MIGRATIONS="+r.map(x=>x.migration_name).join(","));console.log("PRISMA_CHECKSUMS="+r.map(x=>x.migration_name+"="+x.checksum).join(","))}catch(e){console.error("POST_ROLLBACK_DB_VERIFY_FAILED="+e.name);process.exitCode=1}finally{await db.$disconnect()}})()')"
           printf '%s\n' "$runtime_db"
           echo ROLLBACK_RUNTIME_VERIFY=PASS
           REMOTE

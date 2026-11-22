@@ -44,7 +44,11 @@ def test_core_deploy_prepares_and_verifies_stable_worker_tunnel_with_stock_kamal
     accessory = apply.index("kamal accessory boot worker-proxy")
     core_api = apply.index("kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles api")
 
-    assert accessory < core_api
+    assert core_api < accessory
+    assert "current_proxy_service=\"$(ssh -T" not in apply
+    assert "REMOTE_WORKER_PROXY_INVENTORY" in apply
+    assert "PROXY_STATE=missing" in apply
+    assert "|| true)" not in apply
     assert "kamal accessory reboot worker-proxy" in apply
     assert 'GPOINT_WORKER_PROXY_DIGEST="$APP_DIGEST"' in apply
     assert "--env GPOINT_WORKER_PROXY_DIGEST" in apply
@@ -54,9 +58,17 @@ def test_core_deploy_prepares_and_verifies_stable_worker_tunnel_with_stock_kamal
     assert "--request POST --data '{}'" in apply
     assert "gpoint-core-worker-proxy" in verify
     assert "GPOINT_WORKER_TUNNEL_PROXY=PASS" in verify
-    assert "HostPort\": \"13004\"" in verify
-    assert "set(networks) != {\"kamal\"}" in verify
-    assert "--request POST --data '{}'" in verify
+    assert '''if bindings != {"3000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "13004"}]}''' in verify
+    assert '''if set(networks) != {"kamal"}:''' in verify
+
+
+def test_eros_rollback_image_uses_the_upstream_pin_from_its_source_revision():
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    step = next(item for item in workflow["jobs"]["deploy"]["steps"]
+                if item.get("name") == "Verify target digests, platform, revision and provenance")
+
+    assert 'git show "${EROS_SOURCE_SHA}:services/eros-engine/upstream.sha"' in step["run"]
+    assert '--upstream-sha "$eros_upstream_sha"' in step["run"]
 
 
 def test_core_rollback_keeps_the_worker_tunnel_accessory_and_checks_it_after_rollback():

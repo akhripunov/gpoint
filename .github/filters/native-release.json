@@ -80,6 +80,7 @@
     "config/deploy.eros.yml",
     "config/deploy.miniapp.yml",
     "infra/production/**",
+    ".release-authorizations/**",
     "scripts/**",
     "systemd/**"
   ]

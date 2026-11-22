@@ -73,6 +73,10 @@ def test_layer7_is_not_configured_as_a_staging_release_target():
     assert all(not (ROOT / path).exists() for path in retired_paths)
 
 
+def test_stale_miniapp_recovery_controller_is_removed():
+    assert not (ROOT / ".github/workflows/miniapp-recovery.yml").exists()
+
+
 def test_retired_eros_pilot_compose_deployer_is_not_a_release_tool():
     package = __import__("json").loads((ROOT / "package.json").read_text())
     assert not (ROOT / "scripts/eros-pilot-deployment.mjs").exists()
