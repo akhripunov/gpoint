@@ -17,8 +17,14 @@ def load_module():
 
 
 class Result:
-    def __init__(self, value):
+    def __init__(self, value, *, returncode=0, stderr=""):
         self.stdout = value
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+def docker_result(args, value=None, *, returncode=0, stderr=""):
+    return Result("" if value is None else json.dumps(value), returncode=returncode, stderr=stderr)
 
 
 def fixture(module, *, host_ip="127.0.0.1", internal=True, alias=True,
@@ -83,3 +89,107 @@ def test_rejects_invalid_model_digest_before_docker_access():
     module = load_module()
     with pytest.raises(ValueError, match="digest"):
         module.verify("bad")
+
+
+def test_prepare_creates_only_the_internal_network_and_reports_absent_accessory():
+    module = load_module()
+    network = {"Internal": True, "Containers": {}}
+    calls = []
+
+    def run(args, **_kwargs):
+        calls.append(args)
+        if args[:3] == ["docker", "network", "inspect"]:
+            return docker_result(args, [network])
+        if args[:2] == ["docker", "inspect"]:
+            name = args[2]
+            return Result("", returncode=1, stderr=f"Error: No such object: {name}")
+        raise AssertionError(args)
+
+    assert module.prepare(docker_run=run) == "absent"
+    assert [call for call in calls if call[:3] == ["docker", "network", "create"]] == []
+    assert not any("--format" in call for call in calls)
+
+
+def test_prepare_migrates_only_the_known_legacy_accessory_without_restarting_it():
+    module = load_module()
+    network = {"Internal": True, "Containers": {}}
+    legacy_name = "gpoint-eros-relay-ollama"
+    container = {
+        "Config": {"Image": module.IMAGE},
+        "State": {"Status": "running"},
+        "HostConfig": {
+            "PortBindings": {"11434/tcp": [{"HostIp": "127.0.0.1", "HostPort": "11435"}]},
+        },
+        "Mounts": [{"Name": "ollama-layer7-models", "Destination": "/root/.ollama", "RW": True}],
+        "NetworkSettings": {"Networks": {"kamal": {"Aliases": [legacy_name]}}},
+    }
+    names = {legacy_name: container}
+    calls = []
+
+    def run(args, **_kwargs):
+        calls.append(args)
+        if args[:3] == ["docker", "network", "inspect"]:
+            return docker_result(args, [network])
+        if args[:2] == ["docker", "inspect"]:
+            name = args[2]
+            if name not in names:
+                return Result("", returncode=1, stderr=f"Error: No such object: {name}")
+            return docker_result(args, [names[name]])
+        if args[:3] == ["docker", "network", "connect"]:
+            assert args[3:6] == ["--alias", "ollama", module.NETWORK]
+            names[args[6]]["NetworkSettings"]["Networks"][module.NETWORK] = {"Aliases": ["ollama"]}
+            network["Containers"]["1"] = {"Name": legacy_name}
+            return Result("")
+        if args[:2] == ["docker", "rename"]:
+            old, new = args[2:]
+            names[new] = names.pop(old)
+            network["Containers"]["1"]["Name"] = new
+            return Result("")
+        raise AssertionError(args)
+
+    assert module.prepare(docker_run=run) == "running"
+    assert module.CONTAINER in names and legacy_name not in names
+    assert ["docker", "network", "connect", "--alias", "ollama", module.NETWORK, legacy_name] in calls
+    assert ["docker", "rename", legacy_name, module.CONTAINER] in calls
+    assert not any(call[1] in {"restart", "start"} for call in calls if len(call) > 1)
+    assert not any("--format" in call for call in calls)
+
+
+def test_prepare_fails_closed_when_both_accessory_names_exist():
+    module = load_module()
+    network = {"Internal": True, "Containers": {}}
+    container = {"Config": {"Image": module.IMAGE}, "State": {"Status": "running"}}
+
+    def run(args, **_kwargs):
+        if args[:3] == ["docker", "network", "inspect"]:
+            return docker_result(args, [network])
+        if args[:2] == ["docker", "inspect"]:
+            return docker_result(args, [container])
+        raise AssertionError(args)
+
+    with pytest.raises(ValueError, match="Both current and legacy"):
+        module.prepare(docker_run=run)
+
+
+def test_verify_and_detach_removes_only_the_kamal_network_after_full_verification():
+    module = load_module()
+    inspect, calls = fixture(module)
+    attached = {"value": True}
+
+    def inspect_with_kamal(args, **kwargs):
+        result = inspect(args, **kwargs)
+        if args[:2] == ["docker", "inspect"]:
+            rows = json.loads(result.stdout)
+            if attached["value"]:
+                rows[0]["NetworkSettings"]["Networks"]["kamal"] = {"Aliases": [module.CONTAINER]}
+            return Result(json.dumps(rows))
+        return result
+
+    def mutate(args, **_kwargs):
+        calls.append(args)
+        assert args == ["docker", "network", "disconnect", "kamal", module.CONTAINER]
+        attached["value"] = False
+        return Result("")
+
+    assert module.verify_and_detach(EXPECTED_DIGEST, docker_inspect=inspect_with_kamal, docker_mutate=mutate) is True
+    assert ["docker", "network", "disconnect", "kamal", module.CONTAINER] in calls

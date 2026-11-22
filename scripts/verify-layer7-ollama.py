@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Fail-closed smoke check for the pinned Layer7 Ollama embedding service."""
 
+from __future__ import annotations
+
 import json
 import re
 import subprocess
@@ -11,7 +13,108 @@ BASE_URL = "http://ollama:11434"
 MODEL_NAME = "qwen3-embedding:0.6b"
 IMAGE = "ollama/ollama@sha256:a717bfc1c56acfc2e85d3109bd40a7646258ec9062c40cea83b9ed0927eb4223"
 CONTAINER = "gpoint-ollama-ollama"
+LEGACY_CONTAINER = "gpoint-eros-relay-ollama"
 NETWORK = "gpoint_ollama_internal"
+LEGACY_PORT_BINDINGS = {"11434/tcp": [{"HostIp": "127.0.0.1", "HostPort": "11435"}]}
+
+
+def _inspect_optional(kind: str, name: str, docker_run) -> dict | None:
+    command = ["docker", "network", "inspect", name] if kind == "network" else ["docker", "inspect", name]
+    result = docker_run(command, check=False,
+                        capture_output=True, text=True)
+    if result.returncode:
+        message = result.stderr or ""
+        missing = ((kind == "network" and
+                    (f"network {name} not found" in message or f"No such network: {name}" in message))
+                   or (kind == "container" and
+                       (f"No such object: {name}" in message or f"No such container: {name}" in message)))
+        if missing:
+            return None
+        raise ValueError(f"Docker {kind} inventory could not be read")
+    try:
+        rows = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Docker {kind} inventory is invalid JSON") from error
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise ValueError(f"Docker {kind} inventory is ambiguous")
+    return rows[0]
+
+
+def _run_docker(args: list[str], docker_run) -> None:
+    result = docker_run(args, check=False, capture_output=True, text=True)
+    if result.returncode:
+        raise ValueError(f"Docker operation failed: {args[1]}")
+
+
+def prepare(docker_run=None) -> str:
+    """Ensure the private network and safely migrate the known legacy accessory name."""
+    run = docker_run or subprocess.run
+    network = _inspect_optional("network", NETWORK, run)
+    if network is None:
+        _run_docker(["docker", "network", "create", "--internal", NETWORK], run)
+        network = _inspect_optional("network", NETWORK, run)
+    if network is None or network.get("Internal") is not True:
+        raise ValueError("Ollama Docker network is not internal")
+
+    current = _inspect_optional("container", CONTAINER, run)
+    legacy = _inspect_optional("container", LEGACY_CONTAINER, run)
+    if current is not None and legacy is not None:
+        raise ValueError("Both current and legacy Ollama containers exist")
+    if current is None and legacy is None:
+        return "absent"
+
+    if current is not None:
+        state = current.get("State", {}).get("Status")
+        if state not in {"running", "exited", "created"}:
+            raise ValueError("Ollama accessory is in an unexpected state")
+        if current.get("Config", {}).get("Image") != IMAGE:
+            raise ValueError("Ollama accessory image differs from the pinned model server")
+        if current.get("HostConfig", {}).get("PortBindings") != LEGACY_PORT_BINDINGS:
+            raise ValueError("Ollama accessory loopback binding differs from the approved configuration")
+        if not any(m.get("Name") == "ollama-layer7-models" and
+                   m.get("Destination") == "/root/.ollama" and m.get("RW") is True
+                   for m in current.get("Mounts", [])):
+            raise ValueError("Ollama accessory model volume is not the approved persistent volume")
+        networks = current.get("NetworkSettings", {}).get("Networks") or {}
+        private = networks.get(NETWORK)
+        if (set(networks) - {NETWORK, "kamal"} or not private
+                or "ollama" not in (private.get("Aliases") or [])):
+            raise ValueError("Ollama accessory is missing its private network alias")
+        return state
+
+    state = legacy.get("State", {}).get("Status")
+    if state not in {"running", "exited", "created"}:
+        raise ValueError("Legacy Ollama accessory is in an unexpected state")
+    if legacy.get("Config", {}).get("Image") != IMAGE:
+        raise ValueError("Legacy Ollama accessory image differs from the pinned model server")
+    if legacy.get("HostConfig", {}).get("PortBindings") != LEGACY_PORT_BINDINGS:
+        raise ValueError("Legacy Ollama accessory loopback binding differs from the approved configuration")
+    if not any(m.get("Name") == "ollama-layer7-models" and
+               m.get("Destination") == "/root/.ollama" and m.get("RW") is True
+               for m in legacy.get("Mounts", [])):
+        raise ValueError("Legacy Ollama model volume is not the approved persistent volume")
+
+    networks = legacy.get("NetworkSettings", {}).get("Networks") or {}
+    private = networks.get(NETWORK)
+    if (private and set(networks) <= {NETWORK, "kamal"}
+            and "ollama" in (private.get("Aliases") or [])):
+        pass
+    elif set(networks) == {"kamal"} and state == "running":
+        _run_docker(["docker", "network", "connect", "--alias", "ollama", NETWORK,
+                     LEGACY_CONTAINER], run)
+    else:
+        raise ValueError("Legacy Ollama network topology is not recognized")
+
+    _run_docker(["docker", "rename", LEGACY_CONTAINER, CONTAINER], run)
+    migrated = _inspect_optional("container", CONTAINER, run)
+    if migrated is None or migrated.get("State", {}).get("Status") != state:
+        raise ValueError("Legacy Ollama accessory identity changed during rename")
+    migrated_networks = migrated.get("NetworkSettings", {}).get("Networks") or {}
+    private = migrated_networks.get(NETWORK)
+    if (set(migrated_networks) - {NETWORK, "kamal"} or not private
+            or "ollama" not in (private.get("Aliases") or [])):
+        raise ValueError("Migrated Ollama accessory lost its private network alias")
+    return state
 
 
 def verify(expected_digest: str, base_url: str = BASE_URL, docker_inspect=None,
@@ -100,13 +203,43 @@ try {
         raise ValueError("Core API could not verify the private Ollama embedding route")
 
 
+def verify_and_detach(expected_digest: str, docker_inspect=None, docker_mutate=None) -> bool:
+    """Verify the accessory, then remove only its obsolete Kamal-network attachment."""
+    inspect = docker_inspect or subprocess.run
+    mutate = docker_mutate or subprocess.run
+    verify(expected_digest, docker_inspect=inspect)
+    container = _inspect_optional("container", CONTAINER, inspect)
+    if container is None:
+        raise ValueError("Ollama accessory disappeared after verification")
+    networks = set((container.get("NetworkSettings", {}).get("Networks") or {}).keys())
+    if networks == {NETWORK}:
+        return False
+    if networks != {NETWORK, "kamal"}:
+        raise ValueError("Ollama accessory network isolation cannot be confirmed")
+    _run_docker(["docker", "network", "disconnect", "kamal", CONTAINER], mutate)
+    verify(expected_digest, docker_inspect=inspect)
+    return True
+
+
 def main() -> int:
-    container_name = sys.argv[2] if len(sys.argv) == 3 else CONTAINER
-    if len(sys.argv) not in (2, 3) or container_name != CONTAINER:
-        print(f"usage: verify-layer7-ollama.py <expected-model-sha256> [{CONTAINER}]", file=sys.stderr)
+    args = sys.argv[1:]
+    mode = args[1] if len(args) == 2 and args[1] in {"--prepare", "--verify-and-detach"} else "--verify"
+    if len(args) not in (1, 2) or (len(args) == 2 and mode == "--verify" and args[1] != CONTAINER):
+        print(f"usage: verify-layer7-ollama.py <expected-model-sha256> [{CONTAINER}|--prepare|--verify-and-detach]",
+              file=sys.stderr)
         return 2
     try:
-        verify(sys.argv[1], container_name=container_name)
+        if mode == "--prepare":
+            if not re.fullmatch(r"[a-f0-9]{64}", args[0]):
+                raise ValueError("invalid expected model digest")
+            print(f"OLLAMA_PREPARE=PASS state={prepare()}")
+            return 0
+        if mode == "--verify-and-detach":
+            detached = verify_and_detach(args[0])
+            print(f"LAYER7_OLLAMA_KAMAL_NETWORK={'DETACHED' if detached else 'UNCHANGED'}")
+        else:
+            container_name = args[1] if len(args) == 2 else CONTAINER
+            verify(args[0], container_name=container_name)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"LAYER7_OLLAMA_VERIFY=FAIL reason={type(error).__name__}", file=sys.stderr)
         return 1
