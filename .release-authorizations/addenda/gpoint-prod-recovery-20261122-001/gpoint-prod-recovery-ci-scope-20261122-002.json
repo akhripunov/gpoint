@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "amendment_id": "gpoint-prod-recovery-ci-scope-20261122-002",
+  "project": "gpoint",
+  "authorization_id": "gpoint-prod-recovery-20261122-001",
+  "source_instruction_identifier": "OWNER_SCOPE_GPOINT_PR194_HOSTED_CI_FIX_20261122",
+  "owner_decision": "OWNER authorizes continuing the existing PR #194 publication and its hosted CI. If required CI fails on the exact authorized fix, OWNER authorizes only the directly necessary narrow regression-test and fail-closed path-classification corrections in the exact files listed below, followed by the standard hosted CI and protected Deploy preparation. Keep all work on codex/simple-release-v1. Do not change production or bypass any required gate.",
+  "original_authorization_record_blob_sha": "bfb2064493a5dd77085805ddc7b675fe40e08f14",
+  "scope_additions": [
+    {
+      "path": "scripts/native_release_intent.py",
+      "source_commit_sha": "f06e3034975692f64db9f33a2baa055b635aec93",
+      "patch_sha256": "4965b62eee2fcab4701c865ebae978219bfebdb0101aca9b93906ed76251d0bd",
+      "result_file_sha256": "addfb1ec43583a091415db1dd8592b5720691236690ac9d6f9ab82d71168c867",
+      "result_blob_sha": "4669a24f8223118f903f73433eb10aa30b2758c2"
+    },
+    {
+      "path": "tests/test_native_change_surface.py",
+      "source_commit_sha": "f06e3034975692f64db9f33a2baa055b635aec93",
+      "patch_sha256": "54135e5d76ff844c92175c4aa0a5a80e94e6da12af50f65c3f2033e1361c7325",
+      "result_file_sha256": "287be5f11ab51304e23f34392051690a66a09a1996400b95c84c6fd327d648f6",
+      "result_blob_sha": "105bcbaae906b537d7cc52b5a58ebe71b7c81db7"
+    },
+    {
+      "path": "tests/test_release_scope_consistency.py",
+      "source_commit_sha": "f06e3034975692f64db9f33a2baa055b635aec93",
+      "patch_sha256": "fad4aed8efbcdc975818e550ee8a0b37591fc7097ef4be922f0c1ce79f4da752",
+      "result_file_sha256": "0c35a0bd38a2a66bfcfbd2bcfc95e9fecb42b6b1c6ca4f6fa41c3c5571ae4f68",
+      "result_blob_sha": "ffd70ebd13d7b4698d6963912b91e97b4ceefe14"
+    }
+  ],
+  "release_infrastructure_risk_contract": {
+    "allowed_paths": [
+      "scripts/native_release_intent.py",
+      "tests/test_native_change_surface.py",
+      "tests/test_release_scope_consistency.py"
+    ],
+    "allowed_operations": [
+      "integrate",
+      "prepare",
+      "publish_evidence"
+    ],
+    "baseline_sha": "69a80fbd178230c997c42d70474f067ce0726bd7",
+    "risk_description": "Update a stale workflow assertion to inspect the existing Ollama verifier helper and narrowly classify only existing, well-formed append-only authorization addendum files as non-runtime metadata so unknown paths remain fail-closed.",
+    "required_gates": [
+      "exact_candidate",
+      "complete_scope",
+      "required_CI",
+      "immutable_image_digest",
+      "production_environment_approval",
+      "live_preflight",
+      "rollback_readiness",
+      "Runtime_Verify",
+      "public_smoke",
+      "Eros_embedding_route"
+    ],
+    "backup_plan": "No production or database mutation is authorized by this amendment. Preserve all current production services, containers, images, and data.",
+    "rollback_plan": "Revert this amendment through the existing standard PR/release process if it causes a gate failure; do not modify production as part of rollback.",
+    "stop_conditions": [
+      "Stop for any path outside the listed scope, failed required CI, authorization mismatch, missing protected approval, or uncertainty about production state."
+    ]
+  },
+  "amendment_commitment_sha256": "2cfa4ceed34199739908484036084f4f1b6fbff20b8f537797fca53e02e88da7"
+}
