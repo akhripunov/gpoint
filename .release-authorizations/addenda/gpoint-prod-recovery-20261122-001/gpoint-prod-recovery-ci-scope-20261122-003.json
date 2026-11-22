@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "amendment_id": "gpoint-prod-recovery-ci-scope-20261122-003",
+  "project": "gpoint",
+  "authorization_id": "gpoint-prod-recovery-20261122-001",
+  "source_instruction_identifier": "OWNER_GPOINT_EXISTING_RELEASE_BRANCH_AND_PR194_RECOVERY_20261122",
+  "owner_decision": "OWNER directs all GPoint release-infrastructure corrections to remain on codex/simple-release-v1 and flow through a standard PR to main, and separately approved enabling merge commits for PR #194. After that merge, exact main SHA 67b2a12bb9a295350cae31659f090840283b37e5 failed closed because the newly approved immutable authorization addendum paths were not recognized by the existing push path classifier. This amendment authorizes only the narrowly scoped correction and regression test below, then hosted CI and standard PR integration. It does not authorize production dispatch or Apply.",
+  "original_authorization_record_blob_sha": "bfb2064493a5dd77085805ddc7b675fe40e08f14",
+  "scope_additions": [
+    {
+      "path": "scripts/native_release_intent.py",
+      "source_commit_sha": "15708bdf7d174f7d3bc550753424fe575a98a76c",
+      "patch_sha256": "95668a2e27b43564e75ca426398cec1b4da9c7f47e7757290dc553a9047f9b99",
+      "result_file_sha256": "ed7edc0db6bd2884d7a5ed5c111fab3f0c6943acda362774dfed8cc2fc9f156a",
+      "result_blob_sha": "5e15280d8edcbbb729d67970083c6283dfd04d92"
+    },
+    {
+      "path": "tests/test_release_scope_consistency.py",
+      "source_commit_sha": "15708bdf7d174f7d3bc550753424fe575a98a76c",
+      "patch_sha256": "b2a1745f92ee10d0da96d3bfc11e3e40b7813164eda02fdf48b71f138cc80e06",
+      "result_file_sha256": "df1b1f2744e274271ea0df3c0c515bad78c632f0df6687b292ca18d7791ac2df",
+      "result_blob_sha": "12df6e7f658c3090e8096feb09818aedca81f3db"
+    }
+  ],
+  "release_infrastructure_risk_contract": {
+    "allowed_paths": [
+      "scripts/native_release_intent.py",
+      "tests/test_release_scope_consistency.py"
+    ],
+    "allowed_operations": [
+      "integrate",
+      "prepare",
+      "publish_evidence"
+    ],
+    "baseline_sha": "69a80fbd178230c997c42d70474f067ce0726bd7",
+    "risk_description": "Classify only existing, well-formed append-only release authorization addenda tied to an existing authorization record as operational paths in both release intent and scope planning. Unknown authorization paths remain fail-closed. Infrastructure changes remain ineligible for automatic push Deploy.",
+    "required_gates": [
+      "exact_candidate",
+      "complete_scope",
+      "required_CI",
+      "immutable_image_digest",
+      "production_environment_approval",
+      "live_preflight",
+      "rollback_readiness",
+      "Runtime_Verify",
+      "public_smoke"
+    ],
+    "backup_plan": "No production, network, container, or database mutation is authorized. Preserve current production services, images, and data.",
+    "rollback_plan": "Revert only through a subsequent standard PR if the fix fails hosted CI or path classification tests. No production rollback is part of this amendment.",
+    "stop_conditions": [
+      "Stop on any change outside the exact listed paths, failed CI, unknown authorization metadata, path-classification ambiguity, or a request to dispatch/apply production without separate OWNER approval."
+    ]
+  },
+  "amendment_commitment_sha256": "78fdc34fa8652e425ff75e68449e91b7b899277a66e4bcddb8281767ffb53c12"
+}
