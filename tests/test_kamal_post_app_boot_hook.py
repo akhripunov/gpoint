@@ -73,6 +73,6 @@ def test_core_role_still_passes_its_network_list(tmp_path):
     assert result.returncode == 0, result.stderr
     assert args[-8:] == [
         "gpoint-core", "api", f"{CANDIDATE}-42495781430-1",
-        "gpoint_app:api,shared_internal:", CANDIDATE, CANDIDATE, "candidate", CANDIDATE,
+        "gpoint_app:api,shared_internal:,gpoint_ollama_internal:", CANDIDATE, CANDIDATE, "candidate", CANDIDATE,
     ]
     assert 'if [ "$networks" = "-" ]; then networks=""; fi' in stdin

@@ -1,5 +1,6 @@
 """Exact-SHA and component-scope contracts for Native First V3."""
 
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -107,6 +108,64 @@ def test_runtime_paths_map_only_to_their_active_component(path, component):
 def test_retired_agata_and_relay_paths_do_not_select_an_image(path):
     assert MODULE._component_paths(path) == set()
     assert MODULE._known_non_runtime_path(path)
+
+
+def test_authorization_metadata_is_schema_checked_and_namespace_fails_closed(tmp_path, monkeypatch):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    monkeypatch.setattr(MODULE, "__file__", str(scripts / "native_release_intent.py"))
+    auth_root = tmp_path / ".release-authorizations"
+    addendum_root = auth_root / "addenda" / "test-owner-task"
+    addendum_root.mkdir(parents=True)
+    authorization = {
+        "schema_version": 3,
+        "project": "gpoint",
+        "authorization_id": "test-owner-task",
+        "authorization_mode": "TASK_SCOPED_AUTO",
+        "production_baseline_sha": "a" * 40,
+        "allowed_paths": ["scripts/native_release_intent.py"],
+        "risk_contracts": {"release_infrastructure": {"allowed_paths": ["scripts/native_release_intent.py"]}},
+    }
+    (auth_root / "test-owner-task.json").write_text(json.dumps(authorization))
+    amendment = {
+        "schema_version": 1,
+        "project": "gpoint",
+        "authorization_id": "test-owner-task",
+        "amendment_id": "test-amendment",
+        "original_authorization_record_blob_sha": "b" * 40,
+        "scope_additions": [{"path": "scripts/native_release_intent.py"}],
+    }
+    amendment["amendment_commitment_sha256"] = hashlib.sha256(json.dumps(
+        amendment, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode()).hexdigest()
+    (addendum_root / "test-amendment.json").write_text(json.dumps(amendment))
+
+    valid_record = ".release-authorizations/test-owner-task.json"
+    valid_amendment = ".release-authorizations/addenda/test-owner-task/test-amendment.json"
+    assert MODULE._known_non_runtime_path(valid_record)
+    assert MODULE._known_non_runtime_path(valid_amendment)
+    assert MODULE._path_kind(valid_amendment) == "ops"
+
+    tampered = dict(amendment, owner_decision="changed after commitment")
+    (addendum_root / "tampered.json").write_text(json.dumps(tampered))
+    assert MODULE._path_kind(
+        ".release-authorizations/addenda/test-owner-task/tampered.json") == "unknown"
+    (addendum_root / "invalid.json").write_text("{}")
+    assert MODULE._path_kind(
+        ".release-authorizations/addenda/test-owner-task/tests/notes.txt") == "unknown"
+    assert MODULE._path_kind(
+        ".release-authorizations/addenda/test-owner-task/invalid.json") == "unknown"
+    (auth_root / "test-owner-task.json").write_text("{}")
+    assert MODULE._path_kind(valid_record) == "unknown"
+
+
+def test_release_authorization_paths_are_protected_in_shared_infrastructure_filter():
+    assert MODULE.paths_match_filter({".release-authorizations/test-owner-task.json"}, "infrastructure")
+    assert MODULE.paths_match_filter({
+        ".release-authorizations/addenda/test-owner-task/test-amendment.json"
+    }, "infrastructure")
+    assert not MODULE.push_deploy_authorized(
+        mode="DEPLOY", changed_paths={".release-authorizations/test-owner-task.json"})
 
 
 def test_recovery_authorization_metadata_is_known_non_runtime_and_push_classified():

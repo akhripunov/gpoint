@@ -56,11 +56,20 @@ def test_unknown_roots_stay_fail_closed():
 
 
 def test_only_well_formed_release_authorization_addenda_are_non_runtime():
-    assert intent._known_non_runtime_path(
+    addendum = (
         ".release-authorizations/addenda/gpoint-prod-recovery-20261122-001/"
         "gpoint-prod-recovery-ollama-preflight-20261122-001.json")
+    assert intent._known_non_runtime_path(addendum)
+    assert intent._path_kind(addendum) == "ops"
+    assert intent.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths={addendum}) == "DEPLOY"
+    assert not intent.push_deploy_authorized(mode="DEPLOY", changed_paths={addendum})
     assert not intent._known_non_runtime_path(
         ".release-authorizations/addenda/unknown/metadata.json")
+    assert intent._path_kind(
+        ".release-authorizations/addenda/unknown/metadata.json") == "unknown"
+    assert intent._path_kind(
+        ".release-authorizations/addenda/gpoint-prod-recovery-20261122-001/tests/notes.txt") == "unknown"
     assert not intent._known_non_runtime_path(
         ".release-authorizations/addenda/gpoint-prod-recovery-20261122-001/notes.txt")
     assert not intent._known_non_runtime_path(

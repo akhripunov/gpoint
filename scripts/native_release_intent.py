@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import re
 import subprocess
@@ -45,13 +46,14 @@ TEST_DIRECTORY_NAMES = frozenset({"test", "tests"})
 PRISMA_MIGRATION = re.compile(
     r"^packages/db/prisma/migrations/[0-9]{14}_[a-z0-9_]+/migration\.sql$"
 )
+RELEASE_AUTHORIZATION_RECORD = re.compile(
+    r"^\.release-authorizations/[a-z0-9][a-z0-9-]*\.json$"
+)
 RELEASE_AUTHORIZATION_ADDENDUM = re.compile(
     r"^\.release-authorizations/addenda/[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*\.json$"
 )
-RECOVERY_AUTHORIZATION_FILE = ".release-authorizations/gpoint-prod-recovery-20261122-001.json"
 # Explicitly reviewed non-runtime inputs that do not change an application image.
 KNOWN_NON_RUNTIME_FILES = frozenset({
-    RECOVERY_AUTHORIZATION_FILE,
     ".github/actionlint.yaml",
     ".kamal/hooks/post-app-boot",
     ".kamal/hooks/pre-app-boot",
@@ -138,11 +140,6 @@ LEGACY_RELEASE_MARKERS = frozenset({
     "GPOINT-LAYER7-EROS",
 })
 EROS_UPSTREAM_PIN = "services/eros-engine/upstream.sha"
-INFRASTRUCTURE_PREFIXES = (".github/", ".kamal/", "infra/production/", "scripts/", "systemd/")
-PRODUCTION_KAMAL_CONFIGS = frozenset({
-    "config/deploy.yml", "config/deploy.eros-api.yml", "config/deploy.ollama.yml",
-    "config/deploy.eros.yml", "config/deploy.miniapp.yml",
-})
 NATIVE_RELEASE_FILTERS = json.loads(
     (Path(__file__).resolve().parents[1] / ".github/filters/native-release.json").read_text()
 )
@@ -213,9 +210,7 @@ def require_live_eros_e2e_success(repo: Path, live_baseline: str, candidate: str
 
 
 def is_infrastructure_change(changed_paths: set[str] | frozenset[str]) -> bool:
-    return any(path in PRODUCTION_KAMAL_CONFIGS | {".dockerignore"}
-               or any(path.startswith(prefix) for prefix in INFRASTRUCTURE_PREFIXES)
-               for path in changed_paths)
+    return paths_match_filter(changed_paths, "infrastructure")
 
 
 def push_deploy_authorized(*, mode: str, changed_paths: set[str] | frozenset[str]) -> bool:
@@ -227,13 +222,81 @@ def push_deploy_authorized(*, mode: str, changed_paths: set[str] | frozenset[str
     return mode == "DEPLOY"
 
 
+def _read_release_metadata(path: str) -> dict[str, object] | None:
+    target = Path(__file__).resolve().parents[1] / path
+    try:
+        if target.is_symlink() or not target.is_file():
+            return None
+        value = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _existing_release_authorization_record(path: str) -> bool:
+    if RELEASE_AUTHORIZATION_RECORD.fullmatch(path) is None:
+        return False
+    record = _read_release_metadata(path)
+    if record is None:
+        return False
+    authorization_id = Path(path).stem
+    infrastructure = record.get("risk_contracts", {}).get("release_infrastructure") \
+        if isinstance(record.get("risk_contracts"), dict) else None
+    baseline = record.get("production_baseline_sha")
+    return (
+        record.get("schema_version") == 3
+        and record.get("project") == "gpoint"
+        and record.get("authorization_id") == authorization_id
+        and record.get("authorization_mode") in {"TASK_SCOPED_AUTO", "EXACT_SHA"}
+        and isinstance(baseline, str) and EXACT_SHA.fullmatch(baseline) is not None
+        and isinstance(record.get("allowed_paths"), list)
+        and isinstance(infrastructure, dict)
+        and isinstance(infrastructure.get("allowed_paths"), list)
+    )
+
+
+def _commitment_matches(metadata: dict[str, object], field: str) -> bool:
+    commitment = metadata.get(field)
+    if not isinstance(commitment, str) or re.fullmatch(r"[0-9a-f]{64}", commitment) is None:
+        return False
+    payload = {key: value for key, value in metadata.items() if key != field}
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest() == commitment
+
+
+def _existing_release_authorization_addendum(path: str) -> bool:
+    if RELEASE_AUTHORIZATION_ADDENDUM.fullmatch(path) is None:
+        return False
+    parts = path.split("/")
+    authorization_id = parts[2]
+    metadata = _read_release_metadata(path)
+    if metadata is None:
+        return False
+    original_blob = metadata.get("original_authorization_record_blob_sha")
+    return (
+        _existing_release_authorization_record(
+            f".release-authorizations/{authorization_id}.json")
+        and metadata.get("schema_version") == 1
+        and metadata.get("project") == "gpoint"
+        and metadata.get("authorization_id") == authorization_id
+        and metadata.get("amendment_id") == Path(path).stem
+        and isinstance(original_blob, str) and re.fullmatch(r"[0-9a-f]{40}", original_blob)
+        and _commitment_matches(metadata, "amendment_commitment_sha256")
+        and isinstance(metadata.get("scope_additions"), list)
+        and bool(metadata["scope_additions"])
+    )
+
+
 def _path_kind(path: str) -> str:
     normalized = path.strip("/")
     parts = normalized.split("/")
     if not normalized or normalized.startswith("../") or "/../" in normalized:
         return "unknown"
-    if normalized == RECOVERY_AUTHORIZATION_FILE:
-        return "ops"
+    if normalized.startswith(".release-authorizations/"):
+        if (_existing_release_authorization_record(normalized)
+                or _existing_release_authorization_addendum(normalized)):
+            return "ops"
+        return "unknown"
     if normalized in EROS_MODEL_CONFIG_PATHS:
         return "ops"
     if normalized == "packages/db/prisma/schema.prisma":
@@ -419,16 +482,10 @@ def _known_non_runtime_path(path: str) -> bool:
         return True
     if path.startswith(("services/agata/", "packages/agata-client/", "config/deploy.agata.yml")):
         return True
-    addendum = RELEASE_AUTHORIZATION_ADDENDUM.fullmatch(path)
-    if addendum is not None:
-        repo_root = Path(__file__).resolve().parents[1]
-        authorization = repo_root / ".release-authorizations" / f"{path.split('/')[2]}.json"
-        metadata = repo_root / path
-        if (authorization.is_file() and not authorization.is_symlink()
-                and metadata.is_file() and not metadata.is_symlink()):
-            return True
     return (_non_runtime_documentation_path(path)
             or path == "config/deploy.ollama.yml"
+            or _existing_release_authorization_record(path)
+            or _existing_release_authorization_addendum(path)
             or path in EROS_MODEL_CONFIG_PATHS
             or path in KNOWN_NON_RUNTIME_FILES
             or PRISMA_MIGRATION.fullmatch(path) is not None

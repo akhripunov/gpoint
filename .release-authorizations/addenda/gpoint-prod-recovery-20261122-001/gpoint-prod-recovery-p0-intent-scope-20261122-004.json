@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "amendment_id": "gpoint-prod-recovery-p0-intent-scope-20261122-004",
+  "project": "gpoint",
+  "authorization_id": "gpoint-prod-recovery-20261122-001",
+  "source_instruction_identifier": "OWNER_GPOINT_NATIVE_FIRST_FINAL_P0_20261122",
+  "owner_decision": "The OWNER P0 task explicitly authorizes completing the GPoint Native First/Kamal 2 release-infrastructure correction on codex/simple-release-v1 through the standard protected PR and release gates. This append-only amendment binds the current native release intent classifier and its scope regression test to the authorized task. It adds no production dispatch or Apply authority beyond the separate P0 authorization; unknown authorization metadata remains fail-closed.",
+  "original_authorization_record_blob_sha": "bfb2064493a5dd77085805ddc7b675fe40e08f14",
+  "scope_additions": [
+    {
+      "path": "scripts/native_release_intent.py",
+      "source_commit_sha": "b71041c602e5811c958b1be8eda7243190e78c4e",
+      "patch_sha256": "f31ebea333c81c5f8ee918b0a8e0853a1470ca143ec8b68ba1f2394d39586b5d",
+      "result_file_sha256": "c95d70790b729f31d1c1f1dec3770cab252a080d458a83b4d0445febfb62f94f",
+      "result_blob_sha": "d8cc457b9c2ad807293327d4d4b2d2c6280b72ac"
+    },
+    {
+      "path": "tests/test_release_scope_consistency.py",
+      "source_commit_sha": "b71041c602e5811c958b1be8eda7243190e78c4e",
+      "patch_sha256": "11bfac604e11851c456181a09047670759543d46d706002076582b231afdb67d",
+      "result_file_sha256": "1dde53c9be9e469fb8bc622b70ec7673fec4b5ec2327b60fa89a68422778dc4a",
+      "result_blob_sha": "ff8e11fc1f724b8d8c21d58b3df6d14e659754b5"
+    }
+  ],
+  "amendment_commitment_sha256": "f2697ede588724c1d16bc7aac751e4ec3db85b769268aa44ef8a8ead2a8b3a49"
+}

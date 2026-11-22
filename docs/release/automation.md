@@ -701,11 +701,12 @@ backup/offsite требования не меняются. Удалять recove
 Статусы основаны на workflow calls, package scripts, imports, tests и
 recovery/transition paths. Отсутствие автоматического вызова не доказывает
 отсутствие ручного или внешнего использования. Таблица фиксирует безопасное
-условие удаления, а не разрешение на удаление.
+условие удаления; для явно одобренного удаления ниже зафиксирован результат текущего P0.
 
 | Путь | Статус | Замена / назначение | Test evidence | Условие безопасного удаления |
 |---|---|---|---|---|
 | `.github/workflows/gpoint-release.yml` | ACTIVE | Канонический Tests → Build/GHCR → protected Kamal Deploy → Runtime Verify; штатный GitHub Deployment для обычного Deploy. | `tests/test_kamal_native_automatic_release.py`, `tests/test_kamal_release_config.py`, `tests/test_native_rollback_evidence.py`, `tests/test_native_build_boundary.py`. | Не удалять; заменять только отдельным OWNER-approved workflow с равными или более строгими gates и доказанной миграцией активных callers. |
+| `.github/workflows/miniapp-recovery.yml` | **REMOVED 2026-11-22** | Удалён устаревший параллельный Mini App deploy controller; recovery/deploy остаётся в каноническом protected `gpoint-release.yml`. | `tests/test_simple_release_architecture.py`, `tests/test_native_environment_deployment.py`. | — |
 | `.github/workflows/gpoint-deploy.yml` | **REMOVED 2026-11-12** | Legacy Deploy заменён `gpoint-release.yml`. Незавершённых legacy-попыток не осталось (все runs завершены; 5 записей `inactive` от 18–19.10 — история). | — | — |
 | `.github/workflows/gpoint-prepare.yml`, `.github/workflows/gpoint-recover-interrupted.yml` | **REMOVED 2026-11-12** | Recovery больше не требуется: Native First выполняет forward-resume повторным dispatch точного SHA (pending-миграции считаются по live-БД, Kamal сходится), а `rollback` job восстанавливает предыдущий совместимый релиз без downgrade БД. | `tests/test_native_release_intent.py`, `tests/test_native_rollback_evidence.py`, `tests/test_prisma_migration_release_plan.py`. | Новый механизм не добавлялся: существующих достаточно. |
 | `.github/workflows/gpoint-first-kamal-cutover.yml` | **REMOVED 2026-11-12** | Первый Kamal-cutover завершён (10 успешных прогонов); production с 04.11 работает на Kamal-сервисах, замена — `gpoint-release.yml`. | — | — |
