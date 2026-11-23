@@ -703,6 +703,12 @@ jobs:
           set -euo pipefail
           docker pull --platform linux/amd64 "$KAMAL_IMAGE"
           echo "KAMAL_IMAGE_PULL=PASS PLATFORM=linux/amd64 DIGEST=sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625"
+      - name: Restore absent GPoint Bot once from verified installed Core
+        if: github.event_name == 'push' && inputs.mode != 'rollback'
+        env:
+          BOT_AUTH_EVENT_BEFORE: ${{ github.event.before || '' }}
+        run: |
+          bash scripts/gpoint-bot-bootstrap.sh
       - name: Read live application version with Kamal
         if: (inputs.mode != 'rollback')
         id: kamal_inventory

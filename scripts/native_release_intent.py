@@ -64,6 +64,7 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "scripts/classify-release-prepush.py",
     "scripts/eros-native-database.py",
     "scripts/eros-production-secrets.py",
+    "scripts/gpoint-bot-bootstrap.sh",
     "scripts/gpoint-backup-policy.py",
     "scripts/gpoint-scheduled-backup.py",
     "scripts/native_release_intent.py",
