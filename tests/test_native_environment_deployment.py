@@ -39,7 +39,8 @@ def test_resolves_only_exact_in_progress_deployment_for_current_run_attempt():
     assert result == 101
 
 
-def test_main_resolves_exact_active_deploy_job_url_for_this_attempt(monkeypatch, capsys):
+@pytest.mark.parametrize("reported_job_status", ["in_progress", "queued", "completed"])
+def test_main_resolves_exact_active_deploy_job_url_for_this_attempt(monkeypatch, capsys, reported_job_status):
     job_url = f"https://github.com/{REPOSITORY}/actions/runs/{RUN}/job/126479089691"
     monkeypatch.setattr(sys, "argv", [
         "resolve_native_environment_deployment.py", "--sha", SHA,
@@ -57,7 +58,7 @@ def test_main_resolves_exact_active_deploy_job_url_for_this_attempt(monkeypatch,
     monkeypatch.setattr(resolver, "_gh_json", gh_json)
     jobs_route = f"repos/{REPOSITORY}/actions/runs/{RUN}/attempts/{ATTEMPT}/jobs?per_page=100"
     job = {"id": 126479089691, "name": "Kamal production Deploy and Verify",
-           "status": "in_progress", "html_url": job_url}
+           "status": reported_job_status, "html_url": job_url}
     monkeypatch.setattr(resolver, "_gh_run_jobs",
                         lambda route: [job] if route == jobs_route else [], raising=False)
 
@@ -66,6 +67,22 @@ def test_main_resolves_exact_active_deploy_job_url_for_this_attempt(monkeypatch,
     workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     deploy_permissions = workflow.split("  deploy:\n", 1)[1].split("    env:\n", 1)[0]
     assert "      actions: read" in deploy_permissions
+
+
+def test_deploy_job_url_rejects_wrong_identity_even_if_status_is_in_progress():
+    expected = f"https://github.com/{REPOSITORY}/actions/runs/{RUN}/job/126479089691"
+    wrong = f"https://github.com/{REPOSITORY}/actions/runs/999/job/126479089691"
+    jobs = [{"id": 126479089691, "name": "Kamal production Deploy and Verify",
+             "status": "in_progress", "html_url": wrong}]
+    with pytest.raises(ValueError, match="exactly one"):
+        resolver._current_attempt_deploy_job_urls(jobs, repository=REPOSITORY, run_id=RUN)
+    jobs[0]["html_url"] = expected
+    assert resolver._current_attempt_deploy_job_urls(jobs, repository=REPOSITORY, run_id=RUN) == {expected}
+    jobs.append({"id": 126479089692, "name": "Kamal production Deploy and Verify",
+                 "status": "queued",
+                 "html_url": f"https://github.com/{REPOSITORY}/actions/runs/{RUN}/job/126479089692"})
+    with pytest.raises(ValueError, match="exactly one"):
+        resolver._current_attempt_deploy_job_urls(jobs, repository=REPOSITORY, run_id=RUN)
 
 
 def test_main_outputs_verified_successful_native_and_installed_eros_source_shas(monkeypatch, capsys):

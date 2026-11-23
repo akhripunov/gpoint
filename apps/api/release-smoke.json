@@ -1,0 +1,7 @@
+{
+  "project": "GPoint",
+  "test": "core-native-container-replacement",
+  "attempt": "core-container-replacement-proof-retry-20261123",
+  "scope": "CORE",
+  "effect": "metadata-only"
+}
