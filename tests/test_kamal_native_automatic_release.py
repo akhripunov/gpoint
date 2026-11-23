@@ -51,7 +51,8 @@ def test_core_deploy_prepares_and_verifies_stable_worker_tunnel_with_stock_kamal
     assert "|| true)" not in apply
     assert "kamal accessory reboot worker-proxy" in apply
     assert 'GPOINT_WORKER_PROXY_DIGEST="$APP_DIGEST"' in apply
-    assert "--env GPOINT_WORKER_PROXY_DIGEST" in apply
+    assert "--env GPOINT_WORKER_PROXY_DIGEST" in (ROOT / "scripts/run-pinned-kamal.sh").read_text()
+    assert 'run-pinned-kamal.sh" apply . "$@"' in apply
     assert "docker run" not in apply[accessory:core_api]
     assert "127.0.0.1:13004" in apply
     assert "expected 401" in apply
@@ -864,13 +865,16 @@ def test_eros_inventory_accepts_kamal_version_without_container_name(tmp_path):
         "GITHUB_OUTPUT": str(output),
         "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
         "GPOINT_PRODUCTION_HOST": "example.invalid",
-        "KAMAL_IMAGE": "unused",
+        "KAMAL_IMAGE": "ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625",
+        "HOME": str(tmp_path),
         "TEST_ROLE_INVENTORY": role_inventory,
         "TEST_VERSION": version,
     }
+    (tmp_path / '.ssh').mkdir()
     fake_commands = '''
 ssh() { printf '%s\\n' "$TEST_ROLE_INVENTORY"; }
 docker() { printf 'example.invalid: %s\\n' "$TEST_VERSION"; }
+export -f docker
 '''
     result = subprocess.run(["bash", "-c", fake_commands + inventory["run"]],
                             env=env, text=True, capture_output=True)
