@@ -137,11 +137,10 @@ test('GPoint-owned read receipts preserve selected-message semantics and survive
 
 test('creator cleanup retains the GPoint-owned Eros relationship reference', () => {
   const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
-  const profileDelete = runner.indexOf('DELETE FROM \"CreatorProfile\"');
-  const creatorDelete = runner.indexOf('DELETE FROM \"Creator\"');
-  assert.match(runner, /DELETE FROM \"CreatorProfile\"[^\n]*20000000-0000-4000-8000-000000000002/);
+  const mappingCheck = runner.indexOf('mapping_rows=$(compose exec');
   const historyCheck = runner.indexOf('--history-only');
-  assert.ok(historyCheck >= 0 && profileDelete > historyCheck && creatorDelete > profileDelete);
+  assert.ok(historyCheck >= 0 && mappingCheck > historyCheck);
+  assert.match(runner, /\\"creatorId\\" = '20000000-0000-4000-8000-000000000002'/);
   assert.match(runner, /ErosRelationshipMapping_creatorId_fkey/);
 });
 
@@ -160,6 +159,9 @@ test('GPoint consent and Eros mapping foreign keys preserve ownership records', 
   assert.doesNotMatch(migration, /ErosRelationshipMapping_(?:userId|creatorId)_fkey[^;]*ON DELETE CASCADE/);
   const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
   assert.match(runner, /LOCAL_E2E_GPOINT_MAPPING_OWNERSHIP=PASS/);
+  assert.match(runner, /confdeltype = 'r'[\s\S]*ErosRelationshipMapping_userId_fkey[\s\S]*ErosRelationshipMapping_creatorId_fkey/);
+  assert.match(runner, /SELECT count\(\*\) FROM \\"ErosRelationshipMapping\\" WHERE \\"userId\\"/);
+  assert.doesNotMatch(runner, /DELETE FROM \\"(?:User|CreatorProfile|Creator)\\"/);
   assert.doesNotMatch(runner, /MAPPING_ERASURE_GUARD|blocked_without_stock_eros_erase/);
 });
 
