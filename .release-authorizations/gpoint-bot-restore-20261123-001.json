@@ -12,9 +12,10 @@
   "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
   "allowed_paths": [
     ".github/workflows/gpoint-release.yml",
+    ".release-authorizations/gpoint-bot-restore-20261123-001.json",
     "scripts/gpoint-bot-bootstrap.sh",
-    "tests/test_gpoint_bot_bootstrap.py",
-    ".release-authorizations/gpoint-bot-restore-20261123-001.json"
+    "scripts/native_release_intent.py",
+    "tests/test_gpoint_bot_bootstrap.py"
   ],
   "allowed_operations": [
     "integrate",
@@ -53,9 +54,10 @@
       ],
       "allowed_paths": [
         ".github/workflows/gpoint-release.yml",
+        ".release-authorizations/gpoint-bot-restore-20261123-001.json",
         "scripts/gpoint-bot-bootstrap.sh",
-        "tests/test_gpoint_bot_bootstrap.py",
-        ".release-authorizations/gpoint-bot-restore-20261123-001.json"
+        "scripts/native_release_intent.py",
+        "tests/test_gpoint_bot_bootstrap.py"
       ],
       "baseline_sha": "66ed5fcd61af29dabadc2948886ccb40ee1c2f33",
       "risk_description": "Enabling an absent Telegram Bot can create competing polling consumers or use stale production credentials. The one-shot operation must stop without mutation when its approved live baseline, Telegram API identity/webhook or local process checks fail.",
