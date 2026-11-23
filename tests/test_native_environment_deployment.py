@@ -78,6 +78,21 @@ def test_deployment_produced_by_direct_api_not_status_polling():
     assert not hasattr(resolver, "_current_attempt_deploy_job_urls")
 
 
+def test_direct_deployment_environment_compatibility_is_verified_before_build():
+    workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
+    tests = workflow.split("  tests:\n", 1)[1].split("  build:\n", 1)[0]
+    assert "name: Verify production Environment allows direct Deployment records" in tests
+    compatibility = tests.split(
+        "name: Verify production Environment allows direct Deployment records", 1
+    )[1].split("name: Resolve whether cumulative changes require Eros E2E", 1)[0]
+    assert "inputs.mode != 'rollback'" in compatibility
+    assert "gh api \"repos/$GITHUB_REPOSITORY/environments/production\"" in compatibility
+    assert "required_reviewers" in compatibility
+    assert "wait_timer" in compatibility
+    assert "branch_policy" in compatibility
+    assert "all(. ==" in compatibility
+
+
 def test_direct_deployment_statuses_preserve_rollback_and_baseline_evidence():
     workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     deploy = workflow.split("  deploy:\n", 1)[1]

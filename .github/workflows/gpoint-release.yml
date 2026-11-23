@@ -131,6 +131,19 @@ jobs:
           [[ "$MODE" == rollback ]] && args+=(--rollback)
           [[ "$APPROVE_PRODUCTION" == true ]] && args+=(--approve-production)
           python3 scripts/native_release_intent.py "${args[@]}" >> "$GITHUB_OUTPUT"
+      - name: Verify production Environment allows direct Deployment records
+        if: matrix.suite == 'python' && (inputs.mode != 'rollback')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Read-only. Reject unknown/custom app protection rules before changing main.
+          environment_json="$(gh api "repos/$GITHUB_REPOSITORY/environments/production")"
+          jq -e '
+            .name == "production" and
+            ([.protection_rules[]?.type] | all(. == "required_reviewers" or . == "wait_timer" or . == "branch_policy"))
+          ' <<< "$environment_json" >/dev/null
+          echo "GPOINT_DIRECT_DEPLOYMENT_ENVIRONMENT=PASS" >> "$GITHUB_STEP_SUMMARY"
       - name: Resolve whether cumulative changes require Eros E2E
         id: eros_scope
         if: matrix.suite == 'workspace'
