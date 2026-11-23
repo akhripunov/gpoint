@@ -602,6 +602,8 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: production
+      # Rollbacks retain native GitHub deployments. Ordinary deploys create exact API records only after preflight.
+      deployment: ${{ inputs.mode == 'rollback' }}
       url: ${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}
     concurrency:
       group: gpoint-production-release
@@ -1185,19 +1187,26 @@ jobs:
             echo "pending_prisma_checksums=$pending_checksums"
             echo "candidate_prisma_head=$source_head"
           } >> "$GITHUB_OUTPUT"
-      - name: Resolve exact GitHub environment Deployment ID
+      - name: Create exact GitHub production Deployment
         if: (inputs.mode != 'rollback')
         id: deployment
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          resolved="$(python3 scripts/resolve_native_environment_deployment.py \
-            --sha "$CANDIDATE_SHA" --repository "$GITHUB_REPOSITORY" \
-            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT")"
-          grep -Eq '^deployment_id=[1-9][0-9]*$' <<< "$resolved"
-          deployment_id="${resolved#deployment_id=}"
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$CANDIDATE_SHA" = "$GITHUB_SHA"
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          payload="$(jq -nc --arg sha "$CANDIDATE_SHA" --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            '{ref: $sha, environment: "production", task: "deploy", auto_merge: false, required_contexts: [], transient_environment: false, production_environment: true, payload: {run_id: $run, attempt: $attempt}}')"
+          response="$(gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" --input - <<< "$payload")"
+          deployment_id="$(jq -er --arg sha "$CANDIDATE_SHA" 'select(.sha == $sha and .environment == "production" and .task == "deploy" and .transient_environment == false) | .id | select(type == "number" and . > 0)' <<< "$response")"
+          [[ "$deployment_id" =~ ^[1-9][0-9]*$ ]]
           echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
+          log_url="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          body="$(jq -nc --arg log "$log_url" '{state: "in_progress", environment: "production", log_url: $log, description: "Kamal production release started"}')"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$deployment_id/statuses" --input - <<< "$body" | jq -e '.state == "in_progress"' >/dev/null
+          echo "GPOINT_DEPLOYMENT_CREATED=$deployment_id SHA=$CANDIDATE_SHA" >> "$GITHUB_STEP_SUMMARY"
       - name: Apply approved Prisma migrations once before Kamal
         if: needs.tests.outputs.mode == 'DEPLOY' && (inputs.mode != 'rollback')
         id: migration_apply
@@ -2362,3 +2371,34 @@ jobs:
         run: |
           set -euo pipefail
           echo "RECOVERY_REQUIRED: rollback apply/verify did not PASS; no automatic rollback or second Apply. Confirm live topology read-only before another production mutation." >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish verified GitHub production Deployment
+        if: (inputs.mode != 'rollback' && steps.verify.outcome == 'success')
+        id: deployment_success
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
+          ENVIRONMENT_URL: ${{ steps.verify.outputs.environment_url }}
+          MANIFEST_SHA: ${{ steps.verify.outputs.manifest_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$DEPLOYMENT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$ENVIRONMENT_URL" == "https://gpoint.one/#gpoint-manifest-sha256=$MANIFEST_SHA"* ]]
+          log_url="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          body="$(jq -nc --arg log "$log_url" --arg url "$ENVIRONMENT_URL" --arg sha "$CANDIDATE_SHA" --arg manifest "$MANIFEST_SHA" \
+            '{state: "success", environment: "production", log_url: $log, environment_url: $url, description: ("Kamal success SHA " + $sha + " manifest " + $manifest)}')"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" --input - <<< "$body" | jq -e '.state == "success"' >/dev/null
+          echo "GPOINT_DEPLOYMENT_SUCCESS=$DEPLOYMENT_ID SHA=$CANDIDATE_SHA MANIFEST_SHA=$MANIFEST_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish unsuccessful GitHub production Deployment
+        if: (always() && inputs.mode != 'rollback' && steps.deployment.outputs.id != '' && steps.deployment_success.outcome != 'success')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
+        run: |
+          set -euo pipefail
+          [[ "$DEPLOYMENT_ID" =~ ^[1-9][0-9]*$ ]]
+          log_url="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          body="$(jq -nc --arg log "$log_url" '{state: "failure", environment: "production", log_url: $log, description: "Kamal release did not complete verified success"}')"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" --input - <<< "$body" | jq -e '.state == "failure"' >/dev/null
+          echo "GPOINT_DEPLOYMENT_FAILURE=$DEPLOYMENT_ID RECOVERY_REQUIRED=read-only-reconciliation" >> "$GITHUB_STEP_SUMMARY"
+
