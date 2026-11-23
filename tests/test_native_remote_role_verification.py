@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -22,33 +23,35 @@ def _fake_docker(tmp_path, names):
     binary = tmp_path / "docker"
     binary.write_text(
         """#!/usr/bin/env python3
+import json
 import os
 import sys
 
 args = sys.argv[1:]
+with open(os.environ["FAKE_DOCKER_TRACE"], "a") as trace:
+    trace.write(json.dumps(args) + "\\n")
+
 if args[0] == "ps":
     print(os.environ.get("FAKE_DOCKER_NAMES", ""))
 elif args[0] == "inspect":
-    output_format = args[2]
-    if output_format == "{{.State.Running}}":
-        print("true")
-    elif output_format == '{{index .Config.Labels "service"}}':
-        print(os.environ.get("FAKE_DOCKER_SERVICE", "gpoint-core"))
-    elif output_format == '{{index .Config.Labels "role"}}':
-        print(os.environ.get("FAKE_DOCKER_ROLE", "worker"))
-    elif output_format == "{{.Image}}":
-        print("sha256:" + "c" * 64)
-    elif output_format == '{{index .Config.Labels "org.opencontainers.image.revision"}}':
-        print(os.environ["FAKE_DOCKER_REVISION"])
-    else:
+    expected = '{{.State.Running}}|{{index .Config.Labels "service"}}|{{index .Config.Labels "role"}}|{{.Image}}'
+    if len(args) != 4 or args[1] != "--format" or args[2] != expected:
         raise SystemExit("unexpected docker inspect format")
-elif args[0] == "image" and args[1] == "inspect":
-    if args[-1] == "{{json .RepoDigests}}":
-        print('["ghcr.io/akhripunov/gpoint-runtime@sha256:' + "d" * 64 + '"]')
-    elif args[-1] == '{{index .Config.Labels "org.opencontainers.image.revision"}}':
-        print(os.environ["FAKE_DOCKER_REVISION"])
-    else:
+    print("|".join([
+        os.environ.get("FAKE_DOCKER_RUNNING", "true"),
+        os.environ.get("FAKE_DOCKER_SERVICE", "gpoint-core"),
+        os.environ.get("FAKE_DOCKER_ROLE", "worker"),
+        "sha256:" + "c" * 64,
+    ]))
+elif args[:2] == ["image", "inspect"]:
+    valid = {
+        '{{json .RepoDigests}}|{{index .Config.Labels "org.opencontainers.image.revision"}}',
+        '{{json .RepoDigests}}|{{index .Config.Labels "com.gpoint.source.revision"}}',
+    }
+    if len(args) != 5 or args[2] != "--format" or args[3] not in valid:
         raise SystemExit("unexpected docker image inspect format")
+    repository = os.environ.get("FAKE_DOCKER_REPOSITORY", "ghcr.io/akhripunov/gpoint-runtime")
+    print(json.dumps([repository + "@sha256:" + "d" * 64]) + "|" + os.environ["FAKE_DOCKER_REVISION"])
 else:
     raise SystemExit("unexpected docker command")
 """,
@@ -59,6 +62,7 @@ else:
     env["PATH"] = f"{tmp_path}:{env['PATH']}"
     env["FAKE_DOCKER_NAMES"] = "\n".join(names)
     env["FAKE_DOCKER_REVISION"] = "a" * 40
+    env["FAKE_DOCKER_TRACE"] = str(tmp_path / "docker-trace.jsonl")
     return env
 
 
@@ -149,3 +153,46 @@ def test_remote_verifier_rejects_wrong_kamal_version(tmp_path):
         "gpoint-core-worker-" + "b" * 40 + "-1-2",
     ])
     assert result.returncode != 0
+
+
+def test_verifier_uses_one_container_and_one_image_inspect(tmp_path):
+    result = _run_verifier(tmp_path, ["gpoint-core-worker-" + "a" * 40 + "-1-1"])
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in (tmp_path / "docker-trace.jsonl").read_text().splitlines()]
+    assert [call[:2] for call in calls] == [
+        ["ps", "--no-trunc"], ["inspect", "--format"], ["image", "inspect"],
+    ]
+
+
+def test_remote_verifier_rejects_stopped_role_even_if_listed(tmp_path):
+    env = _fake_docker(tmp_path, ["gpoint-core-worker-" + "a" * 40 + "-1-1"])
+    env["FAKE_DOCKER_RUNNING"] = "false"
+    result = subprocess.run(
+        ["bash", str(VERIFIER), "gpoint-core-worker", "a" * 40 + "-1-1", "a" * 40],
+        env=env, capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+
+
+def test_remote_verifier_rejects_wrong_image_repository(tmp_path):
+    env = _fake_docker(tmp_path, ["gpoint-core-worker-" + "a" * 40 + "-1-1"])
+    env["FAKE_DOCKER_REPOSITORY"] = "ghcr.io/another-owner/gpoint-runtime"
+    result = subprocess.run(
+        ["bash", str(VERIFIER), "gpoint-core-worker", "a" * 40 + "-1-1", "a" * 40],
+        env=env, capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+
+
+def test_eros_role_uses_upstream_image_source_label_contract(tmp_path):
+    env = _fake_docker(tmp_path, ["gpoint-eros-pilot-engine-" + "a" * 40 + "-1-1"])
+    env.update(FAKE_DOCKER_SERVICE="gpoint-eros-pilot",
+               FAKE_DOCKER_ROLE="engine",
+               FAKE_DOCKER_REPOSITORY="ghcr.io/akhripunov/gpoint-eros")
+    result = subprocess.run(
+        ["bash", str(VERIFIER), "gpoint-eros-pilot-engine", "a" * 40 + "-1-1", "a" * 40],
+        env=env, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in (tmp_path / "docker-trace.jsonl").read_text().splitlines()]
+    assert "com.gpoint.source.revision" in calls[-1][3]
