@@ -83,7 +83,18 @@ async function connectSyntheticTelegramChannelAndProvisionGenome() {
   const nativeFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
     const url = new URL(String(input));
-    if (url.hostname !== 'api.telegram.org') return nativeFetch(input, init);
+    if (url.hostname !== 'api.telegram.org') {
+      const response = await nativeFetch(input, init);
+      if (url.pathname === '/svc/v1/genomes') {
+        let code = 'none';
+        try {
+          const body = await response.clone().json();
+          if (typeof body.code === 'string' && /^[a-z0-9_-]{1,64}$/i.test(body.code)) code = body.code;
+        } catch { /* expose only the HTTP status when the upstream body is not a safe code */ }
+        console.error(`LOCAL_E2E_GENOME_WRITE_RESPONSE=status:${response.status} code:${code}`);
+      }
+      return response;
+    }
     const method = url.pathname.split('/').at(-1);
     const requestBody = JSON.parse(String(init?.body ?? '{}'));
     let result;

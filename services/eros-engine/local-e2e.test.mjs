@@ -61,6 +61,8 @@ test('synthetic E2E reports only safe durable provisioning retry diagnostics', (
   const runner = readFileSync(new URL('local-test-e2e.mjs', directory), 'utf8');
   assert.match(runner, /LOCAL_E2E_GENOME_PROVISIONING_FAILURE=code:/);
   assert.match(runner, /select: \{ attempts: true, lastErrorCode: true \}/);
+  assert.match(runner, /LOCAL_E2E_GENOME_WRITE_RESPONSE=status:\$\{response\.status\} code:\$\{code\}/);
+  assert.match(runner, /typeof body\.code === 'string'/);
   assert.doesNotMatch(runner, /GENOME_WRITE_SECRET.*console\.(?:log|error)/);
 });
 
