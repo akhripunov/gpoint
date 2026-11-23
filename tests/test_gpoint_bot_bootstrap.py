@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/gpoint-bot-bootstrap.sh"
 WORKFLOW = ROOT / ".github/workflows/gpoint-release.yml"
-AUTH = ROOT / ".release-authorizations/gpoint-bot-restore-20261123-001.json"
+AUTH = ROOT / ".release-authorizations/gpoint-bot-restore-20261123-002.json"
 SHA = "66ed5fcd61af29dabadc2948886ccb40ee1c2f33"
 
 
@@ -54,6 +54,9 @@ def test_bootstrap_never_redeploys_other_roles_or_mutates_webhook():
     assert "deleteWebhook" not in source
     assert "docker rm" not in source
     assert "GPOINT_PRODUCTION_HOST" in source
+    assert 'test -f "$HOME/.ssh/id_ed25519"' in source
+    assert 'test -f "$GPOINT_SSH_KEY"' not in source
+    assert '"/root/.ssh/id_ed25519"' in source
     assert "95.133.236.59" in source
 
 
