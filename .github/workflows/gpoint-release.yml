@@ -384,6 +384,7 @@ jobs:
           tests/test_docker_dependency_manifests.py
           tests/test_prepush_runner.py
           tests/test_release_scope_consistency.py
+          tests/test_ci_integration_scope.py
           tests/test_release_routing_matrix.py
           tests/test_backup_install_script.py
           tests/test_backup_restore_readiness.py tests/test_gpoint_scheduled_backup.py
