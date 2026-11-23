@@ -3,7 +3,90 @@ import { GPOINT_EROS_RESPONSE_PROMPT_TRAITS } from '../src/eros-response-prompt.
 import test from 'node:test';
 import { jwtVerify } from 'jose';
 import { verifyBridgeIdentity } from '../src/eros-worker-contract.js';
-import { createErosEngineClient, decodeErosCursor, encodeErosCursor, ErosAdapterError, ErosEngineClient, erosIdentityFor, erosTestCreatorIds, isErosChatAllowed, isSyntheticErosPair, markErosAssistantMessagesRead, erosInboxLastMessageSummary, prepareErosRelationship, recordErosAssistantMessage, resolveErosRelationshipInstanceId, syncErosAssistantMessageStates, unreadErosAssistantCounts, uuidV5 } from '../src/eros-adapter.js';
+import { createErosEngineClient, decodeErosCursor, encodeErosCursor, ErosAdapterError, ErosEngineClient, erosGenomeCardFor, erosGenomeIdentityFor, erosIdentityFor, erosTestCreatorIds, isErosChatAllowed, isSyntheticErosPair, markErosAssistantMessagesRead, erosInboxLastMessageSummary, prepareErosRelationship, recordErosAssistantMessage, resolveErosRelationshipInstanceId, syncErosAssistantMessageStates, unreadErosAssistantCounts, uuidV5 } from '../src/eros-adapter.js';
+
+test('Creator genomes use a stable identity namespace and a non-invented stock card', () => {
+  const genomeId = erosGenomeIdentityFor('creator_cuid_1');
+  assert.equal(genomeId, erosGenomeIdentityFor('creator_cuid_1'));
+  assert.notEqual(genomeId, erosIdentityFor({ userId: 'user_cuid_1', creatorId: 'creator_cuid_1' }).creatorId);
+  assert.notEqual(genomeId, erosIdentityFor({ userId: 'user_cuid_1', creatorId: 'creator_cuid_2' }).relationshipId);
+  assert.deepEqual(erosGenomeCardFor('  Creator Name  '), {
+    spec: 'eros-character',
+    spec_version: '1.1',
+    data: {
+      name: 'Creator Name',
+      system_prompt: 'You are a creator on GPoint. Speak naturally and respectfully. Do not invent personal facts; ask when information is missing. Respect applicable safety and privacy rules.',
+      tip_personality: null,
+      art_metadata: {},
+    },
+  });
+  assert.throws(() => erosGenomeCardFor('  '), /eros_genome_card_invalid/);
+});
+
+test('stock genome write uses the dedicated secret and accepts only exact 200/201 UUID confirmation', async () => {
+  const creatorId = erosGenomeIdentityFor('creator_cuid_1');
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const client = createErosEngineClient({
+    NODE_ENV: 'test', EROS_ENABLED: 'true', EROS_SERVICE_URL: 'http://eros:8080',
+    EROS_JWT_SECRET: 'unit-test-eros-jwt-secret-at-least-32-bytes',
+    EROS_GENOME_WRITE_SECRET: 'unit-test-genome-write-secret-at-least-32-bytes',
+  }, async (input, init) => {
+    calls.push({ url: String(input), init: init ?? {} });
+    return Response.json({ id: creatorId }, { status: 201 });
+  })!;
+  assert.equal(await client.createGenome(creatorId, erosGenomeCardFor('Creator Name')), creatorId);
+  assert.equal(calls[0].url, 'http://eros:8080/svc/v1/genomes');
+  assert.equal(calls[0].init.method, 'POST');
+  const headers = new Headers(calls[0].init.headers);
+  assert.equal(headers.get('x-genome-write-secret'), 'unit-test-genome-write-secret-at-least-32-bytes');
+  assert.equal(headers.get('authorization'), null);
+  assert.deepEqual(JSON.parse(String(calls[0].init.body)), { id: creatorId, card: erosGenomeCardFor('Creator Name') });
+});
+
+test('genome provisioning fails closed on a missing secret, invalid status, or mismatched UUID', async () => {
+  const creatorId = erosGenomeIdentityFor('creator_cuid_1');
+  const base = { NODE_ENV: 'test', EROS_ENABLED: 'true', EROS_SERVICE_URL: 'http://eros:8080', EROS_JWT_SECRET: 'unit-test-eros-jwt-secret-at-least-32-bytes' };
+  const noWriteSecret = createErosEngineClient(base, async () => Response.json({ id: creatorId }, { status: 201 }))!;
+  await assert.rejects(noWriteSecret.createGenome(creatorId, erosGenomeCardFor('Creator')), (error: unknown) => error instanceof ErosAdapterError && error.code === 'eros_genome_write_not_configured');
+  const badStatus = createErosEngineClient({ ...base, EROS_GENOME_WRITE_SECRET: 'unit-test-genome-write-secret-at-least-32-bytes' }, async () => new Response(null, { status: 204 }))!;
+  await assert.rejects(badStatus.createGenome(creatorId, erosGenomeCardFor('Creator')), (error: unknown) => error instanceof ErosAdapterError && error.code === 'eros_genome_write_failed');
+  const wrongId = createErosEngineClient({ ...base, EROS_GENOME_WRITE_SECRET: 'unit-test-genome-write-secret-at-least-32-bytes' }, async () => Response.json({ id: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc0' }, { status: 200 }))!;
+  await assert.rejects(wrongId.createGenome(creatorId, erosGenomeCardFor('Creator')), (error: unknown) => error instanceof ErosAdapterError && error.code === 'eros_genome_response_invalid');
+});
+
+test('stock genome POST accepts idempotent 200 and PUT updates only the exact stable UUID', async () => {
+  const genomeId = erosGenomeIdentityFor('creator_cuid_1');
+  const calls: Array<{ url: string; method?: string; body: unknown }> = [];
+  const client = createErosEngineClient({
+    NODE_ENV: 'test', EROS_ENABLED: 'true', EROS_SERVICE_URL: 'http://eros:8080',
+    EROS_JWT_SECRET: 'unit-test-eros-jwt-secret-at-least-32-bytes',
+    EROS_GENOME_WRITE_SECRET: 'unit-test-genome-write-secret-at-least-32-bytes',
+  }, async (input, init = {}) => {
+    calls.push({ url: String(input), method: init.method, body: JSON.parse(String(init.body)) });
+    return Response.json({ id: genomeId }, { status: 200 });
+  })!;
+  const card = erosGenomeCardFor('Updated Creator');
+  assert.equal(await client.createGenome(genomeId, card), genomeId);
+  assert.equal(await client.updateGenome(genomeId, card), genomeId);
+  assert.deepEqual(calls, [
+    { url: 'http://eros:8080/svc/v1/genomes', method: 'POST', body: { id: genomeId, card } },
+    { url: `http://eros:8080/svc/v1/genomes/${genomeId}`, method: 'PUT', body: { card } },
+  ]);
+});
+
+test('stock genome write preserves 400 and 403 rejection statuses', async () => {
+  const genomeId = erosGenomeIdentityFor('creator_cuid_1');
+  const base = {
+    NODE_ENV: 'test', EROS_ENABLED: 'true', EROS_SERVICE_URL: 'http://eros:8080',
+    EROS_JWT_SECRET: 'unit-test-eros-jwt-secret-at-least-32-bytes',
+    EROS_GENOME_WRITE_SECRET: 'unit-test-genome-write-secret-at-least-32-bytes',
+  };
+  for (const status of [400, 403]) {
+    const client = createErosEngineClient(base, async () => new Response(null, { status }))!;
+    await assert.rejects(client.createGenome(genomeId, erosGenomeCardFor('Creator')),
+      (error: unknown) => error instanceof ErosAdapterError && error.code === 'eros_genome_write_failed' && error.status === status);
+  }
+});
 
 test('Eros client uses the configured bounded request timeout', async () => {
   let observedTimeout: number | undefined;
@@ -208,7 +291,7 @@ test('relationship instance mapping is looked up from GPoint by owner and creato
   assert.deepEqual(observed, [['user_cuid_1', 'creator_cuid_1']]);
 });
 
-test('relationship preparation fails closed when persona has not been seeded by stock Eros CLI', async () => {
+test('relationship preparation fails closed when persona has not been provisioned through stock Eros API', async () => {
   let started = false;
   let saved = false;
   const client = { async startSession() { started = true; throw new Error('must not call Eros'); } };

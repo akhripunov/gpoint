@@ -30,7 +30,9 @@ SECRET_KEYS = (
     'EROS_RUNTIME_PASSWORD',
     'EROS_MIGRATOR_PASSWORD',
     'EROS_DATABASE_IDENTITY',
+    'GENOME_WRITE_SECRET',
 )
+ADDITIVE_SECRET_KEYS = frozenset({'GENOME_WRITE_SECRET'})
 MANAGED_KEYS = frozenset((*SECRET_KEYS, 'EROS_RUNTIME_DATABASE_URL',
                           'EROS_MIGRATOR_DATABASE_URL', 'EROS_SOURCE_SHA', 'EROS_IMAGE', 'EROS_TENANT_ID',
                           'EROS_TEST_USER_IDS', 'EROS_TEST_CREATOR_IDS'))
@@ -87,6 +89,12 @@ def _validate_release_identity(source_sha, image):
         raise ValueError('immutable Eros GHCR image digest is required')
 
 
+def _validate_genome_write_secret(values):
+    secret = values.get('GENOME_WRITE_SECRET', '')
+    if secret and len(secret.encode('utf-8')) < 32:
+        raise RuntimeError('Eros genome write secret is too short')
+
+
 def _source_tenant(path):
     values = {}
     try:
@@ -126,16 +134,19 @@ def check_prerequisites(path=ENV_PATH, *, source_sha, image, tenant_id=None,
     values = read_env(path)
     if not values:
         raise RuntimeError('Eros protected environment is empty')
-    missing = set(MANAGED_KEYS) - set(values) - {
+    missing = set(MANAGED_KEYS) - set(values) - ADDITIVE_SECRET_KEYS - {
         'EROS_TENANT_ID', 'EROS_TEST_USER_IDS', 'EROS_TEST_CREATOR_IDS'}
     if missing:
         raise RuntimeError('Eros protected environment is incomplete; credential recovery is required')
-    if any(not values.get(key) for key in SECRET_KEYS):
+    if any(not values.get(key) for key in set(SECRET_KEYS) - ADDITIVE_SECRET_KEYS):
         raise RuntimeError('Eros protected environment has an empty credential')
+    if any(key in values and not values[key] for key in ADDITIVE_SECRET_KEYS):
+        raise RuntimeError('Eros protected environment has an empty credential')
+    _validate_genome_write_secret(values)
     existing = values.get('EROS_TENANT_ID') or tenant
     if existing != tenant:
         raise RuntimeError('Eros protected environment tenant differs from the GPoint tenant')
-    return 'EXISTING'
+    return 'EXISTING_ADD_SECRET' if ADDITIVE_SECRET_KEYS - set(values) else 'EXISTING'
 
 
 def provision(path=ENV_PATH, *, source_sha, image, tenant_id=None, source_env=SOURCE_ENV_PATH):
@@ -159,7 +170,7 @@ def provision(path=ENV_PATH, *, source_sha, image, tenant_id=None, source_env=SO
         if path == ENV_PATH and metadata.st_uid != 0:
             raise RuntimeError('Eros protected environment file must be root-owned')
         values = read_env(path)
-        missing = set(MANAGED_KEYS) - set(values) - {'EROS_TENANT_ID', 'EROS_TEST_USER_IDS', 'EROS_TEST_CREATOR_IDS'}
+        missing = set(MANAGED_KEYS) - set(values) - ADDITIVE_SECRET_KEYS - {'EROS_TENANT_ID', 'EROS_TEST_USER_IDS', 'EROS_TEST_CREATOR_IDS'}
         if missing and values:
             raise RuntimeError('Eros protected environment is incomplete; credential recovery is required')
     else:
@@ -168,6 +179,8 @@ def provision(path=ENV_PATH, *, source_sha, image, tenant_id=None, source_env=SO
     if not values:
         values = _new_values(source_sha, image, tenant_id or _source_tenant(source_env))
     else:
+        for key in ADDITIVE_SECRET_KEYS - set(values):
+            values[key] = secrets.token_urlsafe(48)
         if any(not values.get(key) for key in SECRET_KEYS):
             raise RuntimeError('Eros protected environment has an empty credential')
         values['EROS_SOURCE_SHA'] = source_sha
@@ -195,6 +208,8 @@ def provision(path=ENV_PATH, *, source_sha, image, tenant_id=None, source_env=SO
                     or dsn.path != '/eros' or dsn.username != username
                     or unquote(dsn.password or '') != values[password_key]):
                 raise RuntimeError('Eros database URL and protected credential disagree')
+
+    _validate_genome_write_secret(values)
 
     fd, staged = tempfile.mkstemp(prefix='.eros.env.', dir=str(path.parent))
     try:
@@ -357,6 +372,7 @@ def write_native_engine_env(path=ENV_PATH, output=NATIVE_ENV_PATH):
         'GPOINT_WORKER_BRIDGE_SIGNING_SECRET': values['EROS_WORKER_SIGNING_SECRET'],
         'GPOINT_WORKER_TENANT_ID': values['EROS_TENANT_ID'],
         'EROS_BRIDGE_API_KEY': values['EROS_BRIDGE_API_KEY'],
+        'GENOME_WRITE_SECRET': values['GENOME_WRITE_SECRET'],
         'OPENROUTER_API_KEY': '',
         'SUPABASE_JWT_SECRET': values['EROS_JWT_SECRET'],
         'MODEL_CONFIG_PATH': '/etc/eros-engine/model_config.toml',
@@ -390,7 +406,8 @@ def write_native_api_env(path=ENV_PATH, source_env=SOURCE_ENV_PATH, output=NATIV
     """Create the Core API's Eros bridge environment without exposing values."""
     values = read_env(Path(path))
     required_secrets = {'EROS_JWT_SECRET', 'EROS_BRIDGE_API_KEY', 'EROS_EMBEDDING_API_KEY',
-                        'EROS_WORKER_SIGNING_SECRET', 'EROS_WORKER_GATEWAY_TOKEN', 'EROS_TENANT_ID'}
+                        'EROS_WORKER_SIGNING_SECRET', 'EROS_WORKER_GATEWAY_TOKEN',
+                        'GENOME_WRITE_SECRET', 'EROS_TENANT_ID'}
     if not required_secrets.issubset(values) or any(not values.get(key) for key in required_secrets):
         raise RuntimeError('Eros protected environment is incomplete')
     source = {}
@@ -411,6 +428,7 @@ def write_native_api_env(path=ENV_PATH, source_env=SOURCE_ENV_PATH, output=NATIV
         'EROS_DATA_MODE': 'gpoint-owned',
         'EROS_SERVICE_URL': 'http://gpoint-eros:8080',
         'EROS_JWT_SECRET': values['EROS_JWT_SECRET'],
+        'EROS_GENOME_WRITE_SECRET': values['GENOME_WRITE_SECRET'],
         'EROS_BRIDGE_API_KEY': values['EROS_BRIDGE_API_KEY'],
         'EROS_EMBEDDING_API_KEY': values['EROS_EMBEDDING_API_KEY'],
         'EROS_WORKER_SIGNING_SECRET': values['EROS_WORKER_SIGNING_SECRET'],

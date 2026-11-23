@@ -6,6 +6,7 @@ import { signBridgeIdentity } from './eros-worker-contract.js';
 const USER_NAMESPACE = 'b92c2772-7534-5a7c-8eed-ec08e0a9c45b';
 const CREATOR_NAMESPACE = 'c9568a43-7e99-58a2-a41e-50e031eac7bc';
 const RELATIONSHIP_NAMESPACE = '8a275e5e-c6dd-5d56-9dc8-d5642d06d9d0';
+const EROS_GENOME_NAMESPACE = '63cb8c6b-8b46-5c13-b3d6-c1df307b6f83';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const GPOINT_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const MESSAGE_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
@@ -40,6 +41,37 @@ export function erosIdentityFor(input: { userId: string; creatorId: string }): E
     userId: uuidV5(USER_NAMESPACE, input.userId),
     creatorId: uuidV5(CREATOR_NAMESPACE, input.creatorId),
     relationshipId: uuidV5(RELATIONSHIP_NAMESPACE, `${input.userId}\0${input.creatorId}`),
+  };
+}
+
+export function erosGenomeIdentityFor(creatorId: string): string {
+  if (!GPOINT_ID_PATTERN.test(creatorId)) throw new ErosAdapterError('eros_identity_invalid', 400);
+  return uuidV5(EROS_GENOME_NAMESPACE, creatorId);
+}
+
+export interface ErosGenomeCard {
+  spec: 'eros-character';
+  spec_version: '1.1';
+  data: {
+    name: string;
+    system_prompt: string;
+    tip_personality: null;
+    art_metadata: Record<string, never>;
+  };
+}
+
+export function erosGenomeCardFor(displayName: string): ErosGenomeCard {
+  const name = typeof displayName === 'string' ? displayName.trim().slice(0, 160) : '';
+  if (!name) throw new ErosAdapterError('eros_genome_card_invalid', 400);
+  return {
+    spec: 'eros-character',
+    spec_version: '1.1',
+    data: {
+      name,
+      system_prompt: 'You are a creator on GPoint. Speak naturally and respectfully. Do not invent personal facts; ask when information is missing. Respect applicable safety and privacy rules.',
+      tip_personality: null,
+      art_metadata: {},
+    },
   };
 }
 
@@ -164,6 +196,7 @@ interface ErosClientOptions {
   jwtSecret: string;
   workerSigningSecret?: string;
   workerTenantId?: string;
+  genomeWriteSecret?: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
 }
@@ -362,6 +395,7 @@ export class ErosEngineClient {
   private readonly secret: Uint8Array;
   private readonly workerSecret?: Uint8Array;
   private readonly workerTenantId?: string;
+  private readonly genomeWriteSecret?: string;
 
   constructor(options: ErosClientOptions) {
     const url = new URL(options.baseUrl);
@@ -374,6 +408,10 @@ export class ErosEngineClient {
     this.timeoutMs = Math.max(1_000, Math.min(options.timeoutMs ?? 15_000, MAX_EROS_REQUEST_TIMEOUT_MS));
     this.secret = new TextEncoder().encode(options.jwtSecret);
     if (this.secret.byteLength < 32) throw new Error('eros_jwt_secret_too_short');
+    if (options.genomeWriteSecret !== undefined) {
+      this.genomeWriteSecret = options.genomeWriteSecret;
+      if (new TextEncoder().encode(this.genomeWriteSecret).byteLength < 32) throw new Error('eros_genome_write_secret_too_short');
+    }
     if (options.workerSigningSecret !== undefined) {
       this.workerSecret = new TextEncoder().encode(options.workerSigningSecret);
       if (this.workerSecret.byteLength < 32) throw new Error('eros_worker_signing_secret_too_short');
@@ -419,6 +457,38 @@ export class ErosEngineClient {
       throw new ErosAdapterError(parseSafeCode(code), response.status >= 400 && response.status < 600 ? response.status : 503);
     }
     return response;
+  }
+
+  private async writeGenome(method: 'POST' | 'PUT', genomeId: string, card: ErosGenomeCard): Promise<string> {
+    if (!UUID_PATTERN.test(genomeId)) throw new ErosAdapterError('eros_identity_invalid', 400);
+    if (!this.genomeWriteSecret) throw new ErosAdapterError('eros_genome_write_not_configured', 503);
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/svc/v1/genomes${method === 'PUT' ? `/${encodeURIComponent(genomeId)}` : ''}`, {
+        method,
+        headers: { 'content-type': 'application/json', accept: 'application/json', 'x-genome-write-secret': this.genomeWriteSecret },
+        body: JSON.stringify(method === 'POST' ? { id: genomeId, card } : { card }),
+        redirect: 'error', signal: AbortSignal.timeout(this.timeoutMs),
+      });
+    } catch (error) {
+      if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) throw new ErosAdapterError('eros_timeout', 504);
+      throw new ErosAdapterError('eros_transport_error', 503);
+    }
+    if ((method === 'POST' && response.status !== 200 && response.status !== 201) || (method === 'PUT' && response.status !== 200)) {
+      throw new ErosAdapterError('eros_genome_write_failed', response.status >= 400 && response.status < 600 ? response.status : 503);
+    }
+    let result: { id?: unknown };
+    try { result = await response.json() as { id?: unknown }; } catch { throw new ErosAdapterError('eros_genome_response_invalid'); }
+    if (result.id !== genomeId) throw new ErosAdapterError('eros_genome_response_invalid');
+    return genomeId;
+  }
+
+  createGenome(genomeId: string, card: ErosGenomeCard): Promise<string> {
+    return this.writeGenome('POST', genomeId, card);
+  }
+
+  updateGenome(genomeId: string, card: ErosGenomeCard): Promise<string> {
+    return this.writeGenome('PUT', genomeId, card);
   }
 
   async startSession(userId: string, genomeId: string | null | undefined, instanceId?: string): Promise<{ sessionId: string; instanceId: string }> {
@@ -625,6 +695,7 @@ export function createErosEngineClient(env: NodeJS.ProcessEnv = process.env, fet
     jwtSecret: env.EROS_JWT_SECRET,
     workerSigningSecret: env.EROS_WORKER_SIGNING_SECRET,
     workerTenantId: env.EROS_WORKER_TENANT_ID,
+    genomeWriteSecret: env.EROS_GENOME_WRITE_SECRET,
     timeoutMs,
     fetchImpl,
   });

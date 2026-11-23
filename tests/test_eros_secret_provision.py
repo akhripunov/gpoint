@@ -56,8 +56,8 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertEqual(values['DATABASE_URL'], secrets['EROS_RUNTIME_DATABASE_URL'])
             self.assertEqual(values['GPOINT_API_KEY'], secrets['EROS_BRIDGE_API_KEY'])
             self.assertEqual(values['SUPABASE_JWT_SECRET'], secrets['EROS_JWT_SECRET'])
-            self.assertEqual(values['EROS_PILOT_EMBEDDING_PROBE_URL'],
-                             'http://172.31.254.1:11434/api/embed')
+            self.assertNotIn('EROS_PILOT_EMBEDDING_PROBE_URL', values)
+            self.assertEqual(values['MODEL_CONFIG_PATH'], '/etc/eros-engine/model_config.toml')
             self.assertEqual(values['OPENROUTER_API_KEY'], '')
             self.assertNotIn('EROS_MIGRATOR_DATABASE_URL', values)
 
@@ -111,6 +111,57 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertEqual(values['GPOINT_EROS_WORKER_TOKEN'], secrets['EROS_WORKER_GATEWAY_TOKEN'])
             self.assertNotIn('GPOINT_AGATA_WORKER_TOKEN', values)
             self.assertNotIn(secrets['EROS_WORKER_GATEWAY_TOKEN'], result)
+
+    def test_genome_write_secret_is_additively_generated_and_only_mapped_to_native_services(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'eros.env'
+            engine_output = root / 'eros-engine.env'
+            api_output = root / 'eros-api.env'
+            production = root / 'production.env'
+            production.write_text('')
+            tenant = '12345678-1234-4234-8234-123456789abc'
+            MODULE.provision(source, source_sha='a' * 40,
+                             image='ghcr.io/akhripunov/gpoint-eros@sha256:' + 'b' * 64,
+                             tenant_id=tenant)
+            previous = MODULE.read_env(source)
+            previous.pop('GENOME_WRITE_SECRET', None)
+            source.write_text(''.join(f'{key}={value}\n' for key, value in previous.items()))
+            source.chmod(0o600)
+
+            self.assertEqual(MODULE.check_prerequisites(source, source_sha='a' * 40,
+                             image='ghcr.io/akhripunov/gpoint-eros@sha256:' + 'b' * 64,
+                             tenant_id=tenant), 'EXISTING_ADD_SECRET')
+            MODULE.provision(source, source_sha='c' * 40,
+                             image='ghcr.io/akhripunov/gpoint-eros@sha256:' + 'd' * 64,
+                             tenant_id=tenant)
+            upgraded = MODULE.read_env(source)
+            self.assertGreaterEqual(len(upgraded['GENOME_WRITE_SECRET'].encode()), 32)
+            for key, value in previous.items():
+                if key in {'EROS_SOURCE_SHA', 'EROS_IMAGE', 'EROS_TEST_USER_IDS', 'EROS_TEST_CREATOR_IDS'}:
+                    continue
+                self.assertEqual(upgraded[key], value, key)
+            MODULE.write_native_engine_env(source, engine_output)
+            MODULE.write_native_api_env(source, production, api_output)
+            engine = dict(line.split('=', 1) for line in engine_output.read_text().splitlines())
+            api = dict(line.split('=', 1) for line in api_output.read_text().splitlines())
+            self.assertEqual(engine['GENOME_WRITE_SECRET'], upgraded['GENOME_WRITE_SECRET'])
+            self.assertEqual(api['EROS_GENOME_WRITE_SECRET'], upgraded['GENOME_WRITE_SECRET'])
+
+    def test_genome_write_secret_must_be_at_least_32_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'eros.env'
+            MODULE.provision(source, source_sha='a' * 40,
+                             image='ghcr.io/akhripunov/gpoint-eros@sha256:' + 'b' * 64,
+                             tenant_id='12345678-1234-4234-8234-123456789abc')
+            values = MODULE.read_env(source)
+            values['GENOME_WRITE_SECRET'] = 'x' * 31
+            source.write_text(''.join(f'{key}={value}\n' for key, value in values.items()))
+            source.chmod(0o600)
+            with self.assertRaisesRegex(RuntimeError, 'genome write secret is too short'):
+                MODULE.check_prerequisites(source, source_sha='a' * 40,
+                             image='ghcr.io/akhripunov/gpoint-eros@sha256:' + 'b' * 64,
+                             tenant_id='12345678-1234-4234-8234-123456789abc')
 
     def test_native_api_environment_ignores_obsolete_geographic_policy_values(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -328,13 +379,17 @@ class ErosProductionSecretTests(unittest.TestCase):
         self.assertIn('--gateway', calls[1])
         self.assertEqual(calls[4][-5:], ['connect', '--alias', 'gpoint-eros-db', 'gpoint_eros_data', 'shared_postgres_1'])
 
-    def test_existing_eros_network_with_wrong_relay_gateway_fails_closed(self):
+    def test_existing_eros_data_network_outside_private_database_contract_fails_closed(self):
         wrong = [{"Driver": "bridge", "Internal": True,
                   "IPAM": {"Config": [{"Subnet": "172.31.0.0/16", "Gateway": "172.31.0.1"}]}}]
         with patch.object(MODULE.subprocess, 'run', return_value=SimpleNamespace(
-                returncode=0, stdout=__import__('json').dumps(wrong), stderr='')):
-            with self.assertRaisesRegex(RuntimeError, 'private relay gateway contract'):
+                returncode=0, stdout=__import__('json').dumps(wrong), stderr='')) as run:
+            with self.assertRaisesRegex(
+                    RuntimeError, 'private database network contract'):
                 MODULE.ensure_postgres_network()
+        run.assert_called_once_with(
+            ['docker', 'network', 'inspect', 'gpoint_eros_data'],
+            text=True, capture_output=True, timeout=30)
 
 
 if __name__ == '__main__':

@@ -209,6 +209,45 @@ class ErosNativeDatabaseTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "exact upstream migration history"):
             DB._validate_v270_history(damaged)
 
+    def test_official_v281_history_requires_the_exact_0086_and_0087_checksums(self):
+        rows = [ledger(version, *reversed(DB.EROS_V281_HISTORY[version]))[0]
+                for version in DB.EROS_V281_HISTORY]
+        self.assertEqual(DB._validate_v281_history(rows), rows)
+        self.assertEqual([row["version"] for row in rows], [0, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87])
+        damaged = [dict(row) for row in rows]
+        damaged[-1]["checksum"] = "0" * 96
+        with self.assertRaisesRegex(RuntimeError, "exact upstream migration history"):
+            DB._validate_v281_history(damaged)
+
+    def test_v281_migration_rehearsal_starts_only_from_a_known_empty_or_v270_history(self):
+        image = "ghcr.io/akhripunov/gpoint-eros@sha256:" + "b" * 64
+        known = [ledger(version, *reversed(DB.EROS_V270_HISTORY[version]))[0]
+                 for version in DB.EROS_V270_HISTORY]
+        unsupported = known + [ledger(90, "a" * 96, "unknown")[0]]
+        with patch.object(DB, "_image_upstream_sha", return_value=DB.EROS_V281_SHA):
+            self.assertEqual(DB._migration_stage_images([], image), [(image, DB.EROS_V281_SHA)])
+            self.assertEqual(DB._migration_stage_images(known, image), [(image, DB.EROS_V281_SHA)])
+            current = [ledger(version, *reversed(DB.EROS_V281_HISTORY[version]))[0]
+                       for version in DB.EROS_V281_HISTORY]
+            self.assertEqual(DB._migration_stage_images(current, image), [(image, DB.EROS_V281_SHA)])
+            with self.assertRaisesRegex(RuntimeError, "unknown or unsupported"):
+                DB._migration_stage_images(unsupported, image)
+
+    def test_v270_to_v281_rehearsal_applies_and_readbacks_only_official_0086_and_0087(self):
+        before = [ledger(version, *reversed(DB.EROS_V270_HISTORY[version]))[0]
+                  for version in DB.EROS_V270_HISTORY]
+        target = [ledger(version, *reversed(DB.EROS_V281_HISTORY[version]))[0]
+                  for version in DB.EROS_V281_HISTORY]
+        image = "ghcr.io/akhripunov/gpoint-eros@sha256:" + "b" * 64
+        with patch.object(DB, "_image_upstream_sha", return_value=DB.EROS_V281_SHA), \
+             patch.object(DB, "_run_migrator") as migrate, \
+             patch.object(DB, "_ledger", return_value=target):
+            actual, pending, receipts = DB._run_migration_chain(image, "eros_check_1_1", {}, before)
+        self.assertEqual(actual, target)
+        self.assertEqual([row["version"] for row in pending], [86, 87])
+        migrate.assert_called_once_with(image, "eros_check_1_1", {})
+        self.assertEqual(receipts[0]["upstreamSha"], DB.EROS_V281_SHA)
+
     def test_v221_to_v270_rehearsal_uses_only_pinned_official_migrators_in_order(self):
         before = [ledger(version, f"{version:096x}", f"migration_{version}")[0]
                   for version in range(72)]
