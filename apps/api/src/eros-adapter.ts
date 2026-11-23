@@ -50,21 +50,28 @@ export function erosGenomeIdentityFor(creatorId: string): string {
 }
 
 export interface ErosGenomeCard {
-  schema: 'eros-character';
-  schema_version: '1.1';
-  name: string;
-  system_prompt: string;
-  tip_personality: null;
-  art_metadata: Record<string, never>;
+  spec: 'eros-character';
+  spec_version: '1.1';
+  data: {
+    name: string;
+    system_prompt: string;
+    tip_personality: null;
+    art_metadata: Record<string, never>;
+  };
 }
 
 export function erosGenomeCardFor(displayName: string): ErosGenomeCard {
   const name = typeof displayName === 'string' ? displayName.trim().slice(0, 160) : '';
   if (!name) throw new ErosAdapterError('eros_genome_card_invalid', 400);
   return {
-    schema: 'eros-character', schema_version: '1.1', name,
-    system_prompt: 'You are a creator on GPoint. Speak naturally and respectfully. Do not invent personal facts; ask when information is missing. Respect applicable safety and privacy rules.',
-    tip_personality: null, art_metadata: {},
+    spec: 'eros-character',
+    spec_version: '1.1',
+    data: {
+      name,
+      system_prompt: 'You are a creator on GPoint. Speak naturally and respectfully. Do not invent personal facts; ask when information is missing. Respect applicable safety and privacy rules.',
+      tip_personality: null,
+      art_metadata: {},
+    },
   };
 }
 

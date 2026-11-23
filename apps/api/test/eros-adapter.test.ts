@@ -11,12 +11,14 @@ test('Creator genomes use a stable identity namespace and a non-invented stock c
   assert.notEqual(genomeId, erosIdentityFor({ userId: 'user_cuid_1', creatorId: 'creator_cuid_1' }).creatorId);
   assert.notEqual(genomeId, erosIdentityFor({ userId: 'user_cuid_1', creatorId: 'creator_cuid_2' }).relationshipId);
   assert.deepEqual(erosGenomeCardFor('  Creator Name  '), {
-    schema: 'eros-character',
-    schema_version: '1.1',
-    name: 'Creator Name',
-    system_prompt: 'You are a creator on GPoint. Speak naturally and respectfully. Do not invent personal facts; ask when information is missing. Respect applicable safety and privacy rules.',
-    tip_personality: null,
-    art_metadata: {},
+    spec: 'eros-character',
+    spec_version: '1.1',
+    data: {
+      name: 'Creator Name',
+      system_prompt: 'You are a creator on GPoint. Speak naturally and respectfully. Do not invent personal facts; ask when information is missing. Respect applicable safety and privacy rules.',
+      tip_personality: null,
+      art_metadata: {},
+    },
   });
   assert.throws(() => erosGenomeCardFor('  '), /eros_genome_card_invalid/);
 });
