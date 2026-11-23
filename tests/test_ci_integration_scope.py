@@ -17,6 +17,8 @@ REVIEWED_CI_EXEMPTIONS = {
     "scripts/classify-release-prepush.py",
     "scripts/prepush.py",
     "scripts/verify_native_eros_image.py",
+    "scripts/check-kamal-configs.sh",
+    "scripts/verify-eros-runtime-labels.py",
     "scripts/verify_native_rollback_evidence.py",
 }
 
@@ -51,12 +53,16 @@ def test_integration_filter_is_infrastructure_minus_only_reviewed_safe_paths():
     ({"scripts/prepush.py"}, (False, False, False)),
     ({"scripts/verify_native_rollback_evidence.py"}, (False, False, False)),
     ({"scripts/verify_native_eros_image.py"}, (True, False, False)),
+    ({"scripts/verify-eros-runtime-labels.py"}, (True, False, False)),
+    ({"scripts/check-kamal-configs.sh"}, (False, False, False)),
     ({"README.md"}, (False, False, False)),
     ({"apps/miniapp/src/main.tsx"}, (False, True, False)),
     ({"services/eros-engine/upstream.sha"}, (True, False, False)),
     ({"packages/db/prisma/schema.prisma"}, (False, True, True)),
     ({"config/deploy.eros.yml"}, (True, True, True)),
     ({".github/filters/native-release.json"}, (True, True, True)),
+    ({".github/workflows/gpoint-operations.yml"}, (False, True, True)),
+    ({"scripts/check-kamal-configs.sh", "apps/miniapp/src/page.tsx"}, (False, True, False)),
     ({".github/workflows/gpoint-release.yml"}, (True, True, True)),
     ({"scripts/unreviewed-new-helper.py"}, (False, True, True)),
     ({".github/actionlint.yaml", "packages/db/prisma/schema.prisma"}, (False, True, True)),
@@ -86,6 +92,7 @@ def test_expensive_steps_share_reviewed_scope_and_fail_closed_guards():
         assert "steps.filter.outputs.infrastructure" not in condition
         assert "github.event_name == 'workflow_dispatch'" in condition
         assert "github.event.before == '0000000000000000000000000000000000000000'" in condition
+    assert steps["Validate pinned Kamal configs and shared proxy routing"]["if"] == ("matrix.suite == 'workspace'")
     assert "steps.eros_scope.outputs.required == 'true'" in steps[
         "Run stock Eros SQLx and synthetic conversation E2E"]["if"]
     assert steps["Run workflow, Native First and Kamal boundary tests"]["if"] == (
