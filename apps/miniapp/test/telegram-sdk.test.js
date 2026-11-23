@@ -13,6 +13,18 @@ test('production entrypoint loads the Telegram WebApp SDK before the app', async
   assert.ok(html.indexOf(html.match(sdk)[0]) < html.indexOf('<script type="module"'));
 });
 
+test('Telegram native loader is dismissed on DOM bootstrap and after a late SDK arrival', async () => {
+  const html = await readFile(join(root, 'index.html'), 'utf8');
+  const client = await readFile(join(root, 'src/api/client.ts'), 'utf8');
+  assert.match(html, /document\.addEventListener\("DOMContentLoaded"/);
+  assert.match(html, /typeof app\.ready === "function"/);
+  assert.match(html, /app\.ready\(\)/);
+  assert.match(client, /function notifyTelegramReady\(webApp:TelegramWebApp\|undefined\)/);
+  assert.match(client, /notifyTelegramReady\(webApp\);/);
+  assert.match(client, /telegramReadyNotified=true/);
+  assert.doesNotMatch(client, /if\(attempt===0\)webApp\?\.ready\?\.\(\)/);
+});
+
 test('API client disables conditional caching and bounds request time', async () => {
   const source = await readFile(join(root, 'src/api/client.ts'), 'utf8');
   assert.match(source, /cache:'no-store'/);

@@ -26,6 +26,14 @@
   </head>
   <body>
     <div id="root"><main class="gpoint-boot-splash" role="status" aria-live="polite"><span class="gpoint-boot-indicator" aria-hidden="true"></span><span>Открываем GPoint…</span></main></div>
+    <script>
+      // Reveal the existing dark boot surface even if the React module fails
+      // before authentication starts. The deferred SDK runs before DOMContentLoaded.
+      document.addEventListener("DOMContentLoaded", function () {
+        var app = window.Telegram && window.Telegram.WebApp;
+        if (app && typeof app.ready === "function") app.ready();
+      }, { once: true });
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
