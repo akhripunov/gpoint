@@ -2,7 +2,7 @@
 # One-shot GPoint Bot bootstrap inside the protected existing release transaction.
 set -euo pipefail
 
-authorization=".release-authorizations/gpoint-bot-restore-20261123-001.json"
+authorization=".release-authorizations/gpoint-bot-restore-20261123-002.json"
 if [[ "$GITHUB_EVENT_NAME" != push || "$GITHUB_REF" != refs/heads/main ]]; then
   echo "GPOINT_BOT_BOOTSTRAP=SKIPPED event"
   exit 0
@@ -21,18 +21,19 @@ fi
 : "${GPOINT_SSH_KEY:?}"
 : "${GPOINT_KNOWN_HOSTS_FILE:?}"
 [[ "$GPOINT_PRODUCTION_HOST" == "95.133.236.59" ]] || { echo "BOT_BOOTSTRAP=BLOCKED host" >&2; exit 1; }
-test -f "$GPOINT_SSH_KEY" && test -f "$GPOINT_KNOWN_HOSTS_FILE"
+[[ "$GPOINT_SSH_KEY" == "/root/.ssh/id_ed25519" && "$GPOINT_KNOWN_HOSTS_FILE" == "/root/.ssh/known_hosts" ]] || { echo "BOT_BOOTSTRAP=BLOCKED unpinned Kamal SSH path" >&2; exit 1; }
+test -f "$HOME/.ssh/id_ed25519" && test -f "$HOME/.ssh/known_hosts" || { echo "BOT_BOOTSTRAP=BLOCKED runner SSH credentials missing" >&2; exit 1; }
 
 before="$(ssh -T "root@$GPOINT_PRODUCTION_HOST" python3 - < "$GITHUB_WORKSPACE/scripts/verify-kamal-production-baseline.py")"
 details="$(python3 - "$authorization" "$before" <<'PY'
 import json, re, sys
 record=json.load(open(sys.argv[1], encoding="utf-8"))
 live=json.loads(sys.argv[2])
-allowed={".github/workflows/gpoint-release.yml", "scripts/gpoint-bot-bootstrap.sh", "scripts/native_release_intent.py", "docs/release/automation.md",
-         "tests/test_gpoint_bot_bootstrap.py", ".release-authorizations/gpoint-bot-restore-20261123-001.json"}
+allowed={"scripts/gpoint-bot-bootstrap.sh", "tests/test_gpoint_bot_bootstrap.py",
+         ".release-authorizations/gpoint-bot-restore-20261123-002.json"}
 risk=record.get("risk_contracts",{}).get("release_infrastructure",{})
 if (record.get("schema_version")!=3 or record.get("project")!="gpoint"
-    or record.get("authorization_id")!="gpoint-bot-restore-20261123-001"
+    or record.get("authorization_id")!="gpoint-bot-restore-20261123-002"
     or record.get("authorization_mode")!="TASK_SCOPED_AUTO"
     or record.get("owner_instruction_scope")!="FULL_PRODUCTION_CYCLE"
     or record.get("environment")!="production" or record.get("state")!="ACTIVE"
