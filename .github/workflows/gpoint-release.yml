@@ -726,8 +726,7 @@ jobs:
           echo "GITHUB_ENV_SECRET_GPOINT_TELEGRAM_BOT_TOKEN_PRESENT=$GH_GPOINT_TELEGRAM_BOT_TOKEN_EXISTS"
           echo "GITHUB_ENV_SECRET_GPOINT_BOT_TOKEN_PRESENT=$GH_GPOINT_BOT_TOKEN_EXISTS"
           scanner="$(mktemp "$RUNNER_TEMP/gpoint-token-source-audit.XXXXXX.py")"
-          old_hosts="$(mktemp "$RUNNER_TEMP/gpoint-legacy-host.XXXXXX")"
-          trap 'rm -f "$scanner" "$old_hosts"' EXIT
+          trap 'rm -f "$scanner"' EXIT
           cat > "$scanner" <<'PY'
           import os, re, json, pathlib, subprocess
           from collections import defaultdict
@@ -789,22 +788,6 @@ jobs:
           PY
           echo 'SOURCE_HOST=current_layer7'
           ssh -T "root@$GPOINT_PRODUCTION_HOST" python3 - < "$scanner"
-          # Previous GPoint VPS, observed in the 2026-10-30 Compose migration. Only
-          # connect if its ED25519 fingerprint STILL matches the historic trusted key.
-          if command -v ssh-keyscan >/dev/null && ssh-keyscan -T 4 -t ed25519 38.180.110.92 > "$old_hosts" 2>/dev/null &&
-            [[ "$(ssh-keygen -lf "$old_hosts" -E sha256 2>/dev/null | awk '{print $2}')" == 'SHA256:JohpmafQdtGeGnCwwqCiRB/Oqu+w9Hetiq0nCKOVMvU' ]]; then
-            echo 'LEGACY_VPS_HOST_KEY=VERIFIED'
-            if ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
-              -o UserKnownHostsFile="$old_hosts" -o ConnectTimeout=6 "root@38.180.110.92" true </dev/null >/dev/null 2>&1; then
-              echo 'SOURCE_HOST=legacy_gpoint_vps'
-              ssh -T -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
-                -o UserKnownHostsFile="$old_hosts" -o ConnectTimeout=6 "root@38.180.110.92" python3 - < "$scanner"
-            else
-              echo 'LEGACY_VPS_ACCESS=NO_USABLE_CURRENT_KEY'
-            fi
-          else
-            echo 'LEGACY_VPS_HOST_KEY=NOT_VERIFIED_OR_UNREACHABLE'
-          fi
           echo 'TOKEN_SOURCE_AUDIT=COMPLETE_READ_ONLY'
           
       - name: Restore absent GPoint Bot once from verified installed Core
