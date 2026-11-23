@@ -1,0 +1,264 @@
+{
+  "schema_version": 3,
+  "project": "gpoint",
+  "authorization_id": "gpoint-eros-v281-provisioning-20261123-001",
+  "authorization_mode": "TASK_SCOPED_AUTO",
+  "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+  "source_instruction_identifier": "OWNER_GPOINT_P1_EROS_V281_RELEASE_20261123",
+  "owner_task_reference": "GPoint P1 — завершить Eros v2.8.1 и automatic Creator provisioning; direct OWNER task in pasted attachment 7e541c23-7054-4988-925d-b565d323f7c2/Вставленный текст.txt",
+  "task": "Use the prepared Eros v2.8.1 Creator provisioning implementation as source, reapply it after this authorization commit, pass the existing GPoint Release Pipeline gates, merge only after required CI, and complete the one standard automatic production release with exact runtime verification. Do not create a new workflow/controller, perform direct production DB edits, change secrets outside the additive GENOME_WRITE_SECRET path, or enable real-user Eros chat unless all existing security and Worker gates are closed.",
+  "environment": "production",
+  "production_baseline_sha": "82c3367f58f42a703e088d9850a3c109c4eb7859",
+  "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+  "allowed_paths": [
+    ".release-authorizations/gpoint-eros-v281-provisioning-20261123-001.json",
+    "apps/api/package.json",
+    "apps/api/src/creator-platform.ts",
+    "apps/api/src/eros-adapter.ts",
+    "apps/api/src/eros-genome-provisioning.ts",
+    "apps/api/src/main.ts",
+    "apps/api/src/telegram-channel.ts",
+    "apps/api/test/eros-adapter.test.ts",
+    "apps/api/test/eros-genome-provisioning.test.ts",
+    "packages/db/prisma/migrations/20261123090000_eros_genome_provisioning_job/migration.sql",
+    "packages/db/prisma/production-approved-migrations.json",
+    "packages/db/prisma/schema.prisma",
+    "scripts/eros-native-database.py",
+    "scripts/eros-production-secrets.py",
+    "services/eros-engine/MIGRATION_AUDIT.md",
+    "services/eros-engine/README.md",
+    "services/eros-engine/compose.local-test.yml",
+    "services/eros-engine/local-e2e.test.mjs",
+    "services/eros-engine/local-test-e2e.mjs",
+    "services/eros-engine/run-local-e2e.sh",
+    "services/eros-engine/upstream.sha",
+    "tests/test_eros_native_database.py",
+    "tests/test_eros_native_database_workflow.py",
+    "tests/test_eros_secret_provision.py"
+  ],
+  "allowed_operations": [
+    "integrate",
+    "prepare",
+    "preflight",
+    "deploy",
+    "verify",
+    "rollback",
+    "recovery",
+    "publish_evidence"
+  ],
+  "acceptance_criteria": [
+    "Automatic provisioning follows verified Telegram channel connection through Creator, durable DB job, official stock Eros POST /svc/v1/genomes, exact persisted genome UUID, and existing relationship/chat flow.",
+    "Retry, process restart, response loss, concurrent channel requests, reconnect, existing Creator backfill and displayName synchronization are idempotent; HTTP calls occur outside open DB transactions.",
+    "Pinned stock Eros upstream is exactly v2.8.1 SHA c7d63d77e9b52d7ae4952b8374512f571da065d5; exact SQLx 0086/0087 checksums and Prisma migration history are verified by CI and protected release gates.",
+    "The existing GPoint workflow supplies isolated SQLx/synthetic E2E, TypeScript, Prisma, Buildx/GHCR immutable digest, backup/restore, migration and Runtime Verify evidence; no Docker Desktop local build, new workflow or harness.",
+    "Only changed Core and Eros services are deployed with stock Kamal; Mini App, unrelated services, DB volumes and existing persistent data remain intact.",
+    "No real-user chat is enabled unless the existing privacy, security and Worker gates are independently closed."
+  ],
+  "exclusions": [
+    "MAXIBOT, unrelated GPoint services, new Worker, broker, custom provisioning API, Eros fork or BYOC",
+    "new release workflow/controller or local Docker Desktop build/test of Eros",
+    "manual SQL migration, direct container lifecycle operation, data deletion, secret rotation or secret disclosure",
+    "real-user Eros chat activation while security/privacy/Worker gates remain open",
+    "force push, bypassed branch protection or bypassed production backup/migration/release gates"
+  ],
+  "risk_contracts": {
+    "release_infrastructure": {
+      "allowed_operations": [
+        "integrate",
+        "prepare",
+        "preflight",
+        "deploy",
+        "verify",
+        "rollback",
+        "recovery",
+        "publish_evidence"
+      ],
+      "allowed_paths": [
+        ".release-authorizations/gpoint-eros-v281-provisioning-20261123-001.json",
+        "packages/db/prisma/production-approved-migrations.json",
+        "scripts/eros-native-database.py",
+        "scripts/eros-production-secrets.py",
+        "services/eros-engine/MIGRATION_AUDIT.md",
+        "services/eros-engine/README.md",
+        "services/eros-engine/compose.local-test.yml",
+        "services/eros-engine/local-e2e.test.mjs",
+        "services/eros-engine/local-test-e2e.mjs",
+        "services/eros-engine/run-local-e2e.sh",
+        "services/eros-engine/upstream.sha"
+      ],
+      "baseline_sha": "82c3367f58f42a703e088d9850a3c109c4eb7859",
+      "risk_description": "The Eros image upgrade and provisioning job touch the shared GPoint production database and the running Core/Eros services. Use only exact current-main Native First V3 Buildx/GHCR/Kamal flow, with current live per-component identity, immutable digests, DB backup/migration gates, one production concurrency lock, read-only reconciliation and runtime verification.",
+      "required_gates": [
+        "exact current main SHA",
+        "required PR and main Tests",
+        "Buildx immutable GHCR images with digest/read-back",
+        "read-only component and database baseline reconciliation",
+        "production lock and protected Environment",
+        "stock Kamal health checks",
+        "Runtime Verify and public smoke",
+        "single Bot/Worker identity verification",
+        "post-apply reconciliation on any failure"
+      ],
+      "backup_plan": "Before any Prisma Apply, use the existing Native release-backup gate to create a fresh encrypted release backup of the active production database, verify the manifest and isolated restore against Prisma head 20261105100000_gpoint_chat_policy_and_history_fences, enforce its 26-hour freshness policy, and compare backup and live baseline. Before Eros SQLx Apply, the existing scripts/eros-native-database.py prepare mode must create an encrypted run-scoped Eros dump, read back its checksum, restore it to a disposable database, apply the exact target chain and verify the complete ledger. Never store backup data in GitHub artifacts or GHCR.",
+      "rollback_plan": "Never roll back database schema or delete volumes. The Prisma change is additive (one job table and indexes). For Eros, do not assume v2.7.0 binary rollback after SQLx 86/87; only use the existing protected Eros rollback compatibility check if it proves the exact retained prior image can run against the current database. Otherwise stop, reconcile read-only, keep the database untouched and use only an owner-authorized recovery plan based on the verified encrypted backup. Apply no blind retry.",
+      "stop_conditions": [
+        "current live component source/digests or database identities differ from the recorded baseline or cannot be reconciled",
+        "Prisma baseline is not exactly 23 successful migrations at the recorded head, contains unfinished rows, or is not the active API database",
+        "Eros SQLx ledger differs from versions 0,78-85 with every row successful, or any checksum/owner/cluster identity differs",
+        "required backup, isolated restore, migration rehearsal, old-image compatibility decision, image provenance, GitHub approval or health check is absent or fails",
+        "any partial/ambiguous Apply, missing runtime secret mapping, unknown route or requirement to change another service, database, secret or volume"
+      ]
+    },
+    "database_migration": {
+      "allowed_paths": [
+        "packages/db/prisma/schema.prisma",
+        "packages/db/prisma/migrations/20261123090000_eros_genome_provisioning_job/migration.sql",
+        "packages/db/prisma/production-approved-migrations.json",
+        "scripts/eros-native-database.py",
+        "services/eros-engine/upstream.sha",
+        "tests/test_eros_native_database.py",
+        "tests/test_eros_native_database_workflow.py"
+      ],
+      "production_database_baselines": [
+        {
+          "database": "gpoint_staging",
+          "role": "active Core API production DATABASE_URL target (historical DB name; do not infer a separate staging environment)",
+          "prisma_head": "20261105100000_gpoint_chat_policy_and_history_fences",
+          "applied_successful_migrations": 23,
+          "unfinished_or_failed_migrations": 0,
+          "source_sha": "82c3367f58f42a703e088d9850a3c109c4eb7859"
+        },
+        {
+          "database": "eros",
+          "role": "active Eros SQLx database",
+          "upstream_sha": "83a54d1dba57874d55ecaa9756473f126b62844f",
+          "sqlx_versions": [
+            0,
+            78,
+            79,
+            80,
+            81,
+            82,
+            83,
+            84,
+            85
+          ],
+          "successful": 9,
+          "failed": 0,
+          "head": 85,
+          "postgres_container": "shared_postgres_1",
+          "data_volume": "gpoint-layer7-staging-postgres"
+        }
+      ],
+      "target_heads_and_digests": [
+        {
+          "system": "Prisma",
+          "head": "20261123090000_eros_genome_provisioning_job",
+          "sha256": "f4497eb7d180580c3ed50f726cd8c9f67a3b859ad84accfca1e6ce7fd0550609",
+          "operation": "add ErosGenomeProvisioningJob, its primary/foreign/check constraints and two indexes"
+        },
+        {
+          "system": "Eros SQLx",
+          "upstream_version": "2.8.1",
+          "upstream_sha": "c7d63d77e9b52d7ae4952b8374512f571da065d5",
+          "head": 87,
+          "migration_0086_sha384": "3c957f7e862d7e9a72faa10bb22c69ac5227cb80a803853436e151eedad513c7e6c8b7531eac0f8872c958589a882f15",
+          "migration_0087_sha384": "0bca779c4c9cb2e9b06636ca902723530ae5301fcdadad5538f0faf559b802391148c0525109e09dae35cce9ad0c3a7a"
+        }
+      ],
+      "risk_description": "One additive GPoint durable-job table migration plus the exact official stock Eros 2.7.0 to 2.8.1 SQLx transition. Existing Creator/profile and Eros relationship/message data is not backfilled, copied, deleted or rewritten by SQL. The provisioning queue is populated by the verified Telegram handler and existing API backfill worker after the new Core image runs.",
+      "required_gates": [
+        "hosted Prisma schema/migration consistency tests",
+        "live migration count/head/checksum baseline equals the recorded inventory",
+        "exact approved migration name and SHA-256 in production allowlist",
+        "isolated PostgreSQL migration test and protected release-backup isolated restore",
+        "exact Eros v2.7.0 ledger/checksum baseline",
+        "stock v2.8.1 SQLx transition on isolated restored backup produces exactly 86/87",
+        "post-Apply Prisma and SQLx ledgers read back at exact heads",
+        "no database downgrade; read-only reconciliation before any recovery action"
+      ],
+      "backup_plan": "See release_infrastructure backup_plan; must prove both Prisma production backup/restore and Eros encrypted run-scoped SQLx dump/restore before each Apply.",
+      "rollback_plan": "Prisma table and indexes are additive and the old Core schema does not depend on them; retain them on application rollback. Never reverse SQLx history. Eros image rollback to v2.7.0 is permitted only after the exact existing rollback compatibility gate passes on the current ledger; otherwise no image rollback or second Apply.",
+      "stop_conditions": [
+        "unexpected migration, checksum, schema object, live DB identity, applied head or failed row",
+        "no same-baseline backup/isolated restore and exact Eros rehearsal",
+        "any migration DDL modifies or deletes existing user data or is not additive",
+        "the release planner cannot approve the exact one Prisma path and official 0086/0087 SQLx set",
+        "rollback compatibility is assumed rather than proven; a failed/ambiguous apply is never repeated"
+      ]
+    },
+    "secrets": {
+      "allowed_paths": [
+        "scripts/eros-production-secrets.py",
+        "tests/test_eros_secret_provision.py",
+        "apps/api/src/eros-adapter.ts",
+        "config/deploy.eros.yml",
+        "config/deploy.eros-api.yml"
+      ],
+      "secret": "GENOME_WRITE_SECRET; new additive 48-byte URL-safe secret created only on VPS by the existing secret provisioner",
+      "storage": "/opt/gpoint/env/eros.env mode 0600; existing secret values preserved and never logged",
+      "runtime_targets": {
+        "Eros": "GENOME_WRITE_SECRET in /opt/gpoint/env/eros-engine.env",
+        "Core API": "EROS_GENOME_WRITE_SECRET in /opt/gpoint/env/eros-api.env"
+      },
+      "risk_description": "A dedicated secret authenticates only GPoint's official stock Eros genome create/update endpoint. It does not replace other credentials or alter the administrative model. Only its name and >=32-byte validation are reported; values never enter Git, CI output, image layers, Mini App or runtime manifests.",
+      "required_gates": [
+        "hosted secret provisioning tests",
+        "production read-only prerequisite confirms existing protected file integrity and tenant identity",
+        "secret added additively without rotating existing credentials",
+        "mode/owner checks and min 32-byte validation",
+        "runtime config maps the same secret only to Eros and Core API",
+        "post-Kamal API/Eros readiness verification without printing any secret values"
+      ],
+      "backup_plan": "Preserve existing protected env files; use the existing release run's protected configuration backup/recovery path. Never read values into logs or overwrite existing secrets.",
+      "rollback_plan": "Retain the newly generated additive credential and file; no rotation/revocation. If routing is incorrect, stop before Apply or use the protected previous image/config only after verifying compatibility. Never print or copy secret values.",
+      "stop_conditions": [
+        "secret absent, shorter than 32 bytes, wrong owner/permissions, changed existing value, leakage in output/image/config outside two targets",
+        "unverified active database tenant, mismatched host/tenant, missing protected environment or failed release preflight"
+      ]
+    }
+  },
+  "preauthorized_commits": [
+    "96b5ab3f819c2536e052f7561656c2776be835bc"
+  ],
+  "state": "ACTIVE",
+  "revoked": false,
+  "consumed": false,
+  "production_component_baselines": {
+    "CORE": {
+      "source_sha": "82c3367f58f42a703e088d9850a3c109c4eb7859",
+      "ghcr_digest": "sha256:4871533b51710ed507e7ab9499fb40f3589b39b9e3073cf90dfb381b7a0e6d40",
+      "roles": {
+        "api": 1,
+        "worker": 1,
+        "bot": 1
+      },
+      "restart_count": 0
+    },
+    "MINIAPP": {
+      "source_sha": "66ed5fcd61af29dabadc2948886ccb40ee1c2f33",
+      "ghcr_digest": "sha256:64fcb955d80532c1c393dcec8e202e760aaf080e7ff08719cf2ef9acd57dcd2e",
+      "roles": {
+        "web": 1
+      },
+      "restart_count": 0
+    },
+    "EROS": {
+      "source_sha": "f389145043d82eaeb1ff49d07e0ea2d60fb70a2c",
+      "upstream_sha": "83a54d1dba57874d55ecaa9756473f126b62844f",
+      "ghcr_digest": "sha256:2e9c9346cacc59ae7bf3834786ab072123a0e086bdcf5a88a16392681e4f9c95",
+      "roles": {
+        "engine": 1
+      },
+      "restart_count": 0
+    },
+    "shared_services": {
+      "kamal_proxy": "running",
+      "postgres": "healthy",
+      "redis": "healthy",
+      "public_api_live_http": 200,
+      "public_miniapp_http": 200
+    }
+  },
+  "owner_task_commitment_sha256": "8b4f70c21de4366055977e6aa5c051adc838966be41a20ba69beae86fe3fa2d6"
+}
