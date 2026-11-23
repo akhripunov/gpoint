@@ -1,0 +1,7 @@
+{
+  "project": "GPoint",
+  "test": "eros-native-container-replacement",
+  "attempt": "eros-container-replacement-proof-20261123",
+  "scope": "EROS",
+  "effect": "metadata-only"
+}
