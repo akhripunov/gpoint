@@ -184,6 +184,7 @@ async function assertCompleteHistory(token, stage, expectedTurns = 17) {
 }
 
 if (process.argv.includes('--history-only')) {
+  await loadSyntheticCreatorMapping();
   const token = await authenticate();
   await assertCompleteHistory(token, 'post-restart');
   const restartedHistory = await readHistory(token);

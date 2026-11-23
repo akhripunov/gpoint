@@ -73,6 +73,11 @@ test('synthetic E2E signs Telegram initData with its disposable bot token', () =
   assert.doesNotMatch(runner, /initData: 'synthetic local E2E'/);
 });
 
+test('post-restart history E2E restores the persisted Creator mapping in its new process', () => {
+  const runner = readFileSync(new URL('local-test-e2e.mjs', directory), 'utf8');
+  assert.match(runner, /if \(process\.argv\.includes\('--history-only'\)\) \{\s*await loadSyntheticCreatorMapping\(\);\s*const token = await authenticate\(\);/);
+});
+
 test('only the disposable Eros migrator receives database CREATE privilege', () => {
   const init = readFileSync(new URL('local-test-init.sql', directory), 'utf8');
   const erosInit = init.split('\\connect gpoint_test')[0];
