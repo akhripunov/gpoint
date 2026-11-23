@@ -112,7 +112,7 @@ test('creator cleanup retains the GPoint-owned Eros relationship reference', () 
   const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
   const profileDelete = runner.indexOf('DELETE FROM \"CreatorProfile\"');
   const creatorDelete = runner.indexOf('DELETE FROM \"Creator\"');
-  assert.match(runner, /DELETE FROM \"CreatorProfile\"[^\n]*eros_test_profile/);
+  assert.match(runner, /DELETE FROM \"CreatorProfile\"[^\n]*20000000-0000-4000-8000-000000000002/);
   const historyCheck = runner.indexOf('--history-only');
   assert.ok(historyCheck >= 0 && profileDelete > historyCheck && creatorDelete > profileDelete);
   assert.match(runner, /ErosRelationshipMapping_creatorId_fkey/);
@@ -295,6 +295,9 @@ test('Compose exposes no test service outside the internal Docker network', (con
     EROS_TEST_BRIDGE_SIGNING_SECRET: 'synthetic-only-bridge-signing-secret-at-least-32-bytes',
     EROS_TEST_TENANT_ID: '7508f36f-774a-48aa-8c6b-42f6f160415d',
     EROS_TEST_SUPABASE_JWT_SECRET: 'synthetic-only-jwt-secret-at-least-32-bytes',
+    EROS_TEST_GENOME_WRITE_SECRET: 'synthetic-only-genome-write-secret-at-least-32-bytes',
+    EROS_TEST_TELEGRAM_BOT_TOKEN: 'synthetic-only-telegram-token',
+    EROS_TEST_TELEGRAM_WEBHOOK_SECRET: 'synthetic-only-webhook-secret',
     EROS_TEST_WORKER_TOKEN: 'synthetic-only-worker',
     EROS_TEST_AGATA_TOKEN: 'synthetic-only-agata',
     EROS_TEST_OPENROUTER_API_KEY: '',
@@ -423,17 +426,24 @@ test('the Eros patch applier is disabled and the stock builder pins a clean sour
   assert.match(builder, /patch-set\.sha256=none/);
 });
 
-test('the local fixture provisions stock persona data with the official seed CLI and maps it in GPoint', () => {
+test('the local fixture provisions through the stock genome-write API and verifies the GPoint mapping', () => {
   const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
-  const persona = readFileSync(new URL('test-personas/synthetic-eros-persona.toml', directory), 'utf8');
+  const compose = readFileSync(new URL('compose.local-test.yml', directory), 'utf8');
+  const e2e = readFileSync(new URL('local-test-e2e.mjs', directory), 'utf8');
   const schema = readFileSync(new URL('../../packages/db/prisma/schema.prisma', directory), 'utf8');
-  assert.match(runner, /eros-engine seed-personas \/etc\/eros-engine\/test-personas/);
-  assert.match(runner, /LOCAL_E2E_STOCK_PERSONA_SEED=PASS/);
-  assert.match(runner, /grep 'Synthetic Eros Persona'/);
-  assert.match(runner, /CreatorProfile.*erosGenomeId/s);
-  assert.match(persona, /name = "Synthetic Eros Persona"/);
+  assert.doesNotMatch(runner, /seed-personas/);
+  assert.match(runner, /LOCAL_E2E_STOCK_PERSONA_PROVISIONING=PASS created_by_telegram_connect=YES/);
+  assert.match(runner, /LOCAL_E2E_GPOINT_GENOME_MAPPING=PASS/);
+  assert.match(compose, /GENOME_WRITE_SECRET: \$\{EROS_TEST_GENOME_WRITE_SECRET/);
+  assert.match(compose, /EROS_GENOME_WRITE_SECRET: \$\{EROS_TEST_GENOME_WRITE_SECRET/);
+  assert.match(e2e, /createGenome\(expected, erosGenomeCardFor\('Synthetic Eros Persona'\)\)/);
+  assert.match(e2e, /TelegramChannelVerificationController/);
+  assert.match(e2e, /myChatMember/);
+  assert.match(e2e, /LOCAL_E2E_TELEGRAM_CHANNEL_CONNECT=PASS/);
+  assert.match(e2e, /creatorOwner\.findFirst/);
   assert.match(schema, /model ErosRelationshipMapping/);
   assert.match(schema, /erosGenomeId String\? @unique @db\.Uuid/);
+  assert.match(schema, /model ErosGenomeProvisioningJob/);
 });
 
 test('restart-history assertions cover all turns and initial temporal facts', () => {

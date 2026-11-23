@@ -85,6 +85,21 @@ plus this GPoint-owned queue table. A fresh full-chain run reaching that exact
 combined state is still required. The existing count/size table above reflects
 the measured Eros-only fixture, not the queue table.
 
+## v2.8.1 upgrade review (2026-11-23)
+
+The selected official stock source is `c7d63d77e9b52d7ae4952b8374512f571da065d5`.
+The SQLx lifecycle gate recognizes the exact v2.7.0 ledger and permits only
+the official v2.8.1 delta: migration 86 `fk indexes` with SHA-384
+`3c957f7e862d7e9a72faa10bb22c69ac5227cb80a803853436e151eedad513c7e6c8b7531eac0f8872c958589a882f15`,
+and migration 87 `function search path` with SHA-384
+`0bca779c4c9cb2e9b06636ca902723530ae5301fcdadad5538f0faf559b802391148c0525109e09dae35cce9ad0c3a7a`.
+The read-back gate validates the entire resulting ledger and rejects any
+unrecognized prior history. Migration 86 adds foreign-key indexes; migration
+87 sets an empty search path on two functions. Neither migration intentionally
+rewrites application rows. These checks establish source-level compatibility
+only: a disposable PostgreSQL backup/restore and stock-image rehearsal has not
+run in this worktree, and production remains untouched.
+
 **Migration boundary:** this proves fresh Eros bootstrap coexists with the
 current synthetic Prisma/Alembic schemas. An older Eros installation with
 `engine.*` tables but only a public SQLx ledger is rejected before migration;

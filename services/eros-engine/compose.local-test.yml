@@ -70,7 +70,10 @@ services:
       EROS_TEST_CREATOR_IDS: 20000000-0000-4000-8000-000000000002
       EROS_SERVICE_URL: http://eros:8080
       EROS_JWT_SECRET: ${EROS_TEST_SUPABASE_JWT_SECRET:?set synthetic JWT secret}
+      EROS_GENOME_WRITE_SECRET: ${EROS_TEST_GENOME_WRITE_SECRET:?set synthetic genome-write secret}
       EROS_REQUEST_TIMEOUT_MS: "45000"
+      TELEGRAM_BOT_TOKEN: ${EROS_TEST_TELEGRAM_BOT_TOKEN:?set synthetic Telegram token}
+      TELEGRAM_WEBHOOK_SECRET: ${EROS_TEST_TELEGRAM_WEBHOOK_SECRET:?set synthetic webhook secret}
       EROS_WORKER_SIGNING_SECRET: ${EROS_TEST_BRIDGE_SIGNING_SECRET:?set synthetic signing key}
       EROS_WORKER_TENANT_ID: ${EROS_TEST_TENANT_ID:?set synthetic tenant UUID}
       AGATA_TENANT_ID: ${EROS_TEST_TENANT_ID:?set synthetic tenant UUID}
@@ -141,6 +144,7 @@ services:
       # a credential and Docker has no external egress.
       OPENROUTER_API_KEY: ${EROS_TEST_OPENROUTER_API_KEY-}
       SUPABASE_JWT_SECRET: ${EROS_TEST_SUPABASE_JWT_SECRET:?set synthetic JWT secret}
+      GENOME_WRITE_SECRET: ${EROS_TEST_GENOME_WRITE_SECRET:?set synthetic genome-write secret}
       MODEL_CONFIG_PATH: /etc/eros-engine/model_config.toml
       RUST_LOG: info
       DREAMING_TICK_SECS: "2"

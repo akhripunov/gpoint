@@ -65,6 +65,7 @@ model Creator {
   codexDeviceAuthorizations CodexDeviceAuthorization[]
   erosRelationships ErosRelationshipMapping[]
   erosAssistantMessageStates ErosAssistantMessageState[]
+  erosGenomeProvisioningJob ErosGenomeProvisioningJob?
 }
 
 // Contains only revocable, hashed Codex capability tokens. Conversation data remains in AGATA.
@@ -113,6 +114,23 @@ model CreatorProfile {
   moderatedByUserId String?
   moderatedAt DateTime?
   creator Creator @relation(fields: [creatorId], references: [id])
+}
+
+// Durable, idempotent work to provision/synchronize a Creator's stock Eros genome.
+model ErosGenomeProvisioningJob {
+  creatorId String @id
+  genomeId String @unique @db.Uuid
+  syncRequested Boolean @default(false)
+  generation Int @default(1)
+  attempts Int @default(0)
+  nextAttemptAt DateTime @default(now())
+  leaseToken String? @db.Uuid
+  leaseExpiresAt DateTime?
+  lastErrorCode String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  creator Creator @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  @@index([nextAttemptAt, leaseExpiresAt])
 }
 
 // Maps a GPoint user/persona relationship to the instance created by stock Eros.

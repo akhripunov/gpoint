@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { createErosEngineClient, ErosAdapterError, erosIdentityFor } from '../../apps/api/src/eros-adapter.ts';
+import { PrismaClient } from '@prisma/client';
+import { createErosEngineClient, ErosAdapterError, erosGenomeCardFor, erosIdentityFor } from '../../apps/api/src/eros-adapter.ts';
 
 const api = 'http://127.0.0.1:3000';
-const creator = '20000000-0000-4000-8000-000000000002';
+const userId = '10000000-0000-4000-8000-000000000001';
+let creator;
 
 async function request(url, { method = 'GET', token, body } = {}) {
   const response = await fetch(url, {
@@ -36,7 +38,7 @@ async function readHistory(token) {
 async function assertStockApiUserIsolation() {
   const client = createErosEngineClient(process.env);
   assert.ok(client, 'Eros client is configured in the isolated API container');
-  const ownerIdentity = erosIdentityFor({ userId: '10000000-0000-4000-8000-000000000001', creatorId: creator });
+  const ownerIdentity = erosIdentityFor({ userId, creatorId: creator });
   const foreignUserId = randomUUID();
   const [ownerSessions, foreignSessions] = await Promise.all([
     client.sessions(ownerIdentity.userId),
@@ -56,6 +58,81 @@ async function assertStockApiUserIsolation() {
   const ownerHistory = await client.history(ownerIdentity.userId, ownSession.sessionId, 1);
   assert.equal(ownerHistory.messages.length, 1, 'the owner still reads their own session');
   console.log('LOCAL_E2E_STOCK_API_USER_ISOLATION=PASS distinct_jwt_subjects=2 concurrent_denials=2 owner_read=PASS');
+}
+
+async function assertStockGenomeWriteIdempotency() {
+  const expected = process.env.EROS_TEST_EXPECTED_GENOME_ID;
+  assert.match(expected ?? '', /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  const client = createErosEngineClient(process.env);
+  assert.ok(client);
+  assert.equal(await client.createGenome(expected, erosGenomeCardFor('Synthetic Eros Persona')), expected);
+  console.log('LOCAL_E2E_STOCK_GENOME_POST_IDEMPOTENCY=PASS exact_uuid=YES');
+}
+
+async function connectSyntheticTelegramChannelAndProvisionGenome() {
+  const db = new PrismaClient();
+  const challengeId = 'eros_test_connect_challenge';
+  const telegramChatId = '-1002000000002';
+  const expiresAt = new Date(Date.now() + 10 * 60_000);
+  await db.telegramConnectionChallenge.create({ data: { id: challengeId, requestId: 900000002, userId, expiresAt } });
+  await db.creatorChannelInstallAttempt.create({ data: { id: challengeId, gpointUserId: userId, telegramUserId: 900000001n, expiresAt } });
+
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    if (url.hostname !== 'api.telegram.org') return nativeFetch(input, init);
+    const method = url.pathname.split('/').at(-1);
+    const requestBody = JSON.parse(String(init?.body ?? '{}'));
+    let result;
+    if (method === 'getChat') result = { id: Number(telegramChatId), type: 'channel', title: 'Synthetic Eros Persona', username: 'eros_test_persona' };
+    else if (method === 'getMe') result = { id: 900000099 };
+    else if (method === 'getChatMember' && String(requestBody.user_id) === '900000001') result = { status: 'administrator', can_manage_chat: true };
+    else if (method === 'getChatMember') result = { status: 'administrator', can_post_messages: true };
+    else throw new Error(`unexpected synthetic Telegram method: ${method}`);
+    return Response.json({ ok: true, result });
+  };
+  try {
+    const { TelegramChannelVerificationController } = await import('../../apps/api/src/telegram-channel.ts');
+    const controller = new TelegramChannelVerificationController();
+    await db.creator.create({
+      data: {
+        id: '20000000-0000-4000-8000-000000000002', displayName: 'Synthetic Eros Persona', slug: 'eros-test-persona',
+        profile: { create: { status: 'DRAFT', bio: 'Synthetic local E2E persona', tagsJson: '[]' } },
+        owners: { create: { userId } },
+      },
+    });
+    const result = await controller.myChatMember({ 'x-telegram-webhook-secret': process.env.TELEGRAM_WEBHOOK_SECRET }, {
+      updateId: 900000002, from: { id: 900000001 },
+      chat: { id: telegramChatId, type: 'channel', title: 'Synthetic Eros Persona', username: 'eros_test_persona' },
+      old_chat_member: { status: 'left' },
+      new_chat_member: { status: 'administrator', can_post_messages: true, can_manage_chat: true },
+    });
+    assert.equal(result.status, 'CONNECTED');
+    assert.equal(result.erosProvisioning, 'READY');
+    const owner = await db.creatorOwner.findFirst({ where: { userId }, include: { creator: { include: { profile: true } } } });
+    assert.ok(owner?.creator, 'verified channel connection creates and owns the Creator');
+    assert.equal(owner.creator.slug, 'eros-test-persona');
+    assert.match(owner.creator.profile.erosGenomeId, /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    creator = owner.creatorId;
+    process.env.EROS_TEST_EXPECTED_GENOME_ID = owner.creator.profile.erosGenomeId;
+    console.log(`LOCAL_E2E_GPOINT_GENOME_MAPPING=PASS stable_uuid=${owner.creator.profile.erosGenomeId}`);
+    console.log('LOCAL_E2E_TELEGRAM_CHANNEL_CONNECT=PASS creator_created=YES eros_genome=READY');
+  } finally {
+    globalThis.fetch = nativeFetch;
+    await db.$disconnect();
+  }
+}
+
+async function loadSyntheticCreatorMapping() {
+  const db = new PrismaClient();
+  try {
+    const owner = await db.creatorOwner.findFirst({ where: { userId }, include: { creator: { include: { profile: true } } } });
+    assert.ok(owner?.creator?.profile?.erosGenomeId, 'synthetic Creator has a persisted Eros genome mapping');
+    creator = owner.creatorId;
+    process.env.EROS_TEST_EXPECTED_GENOME_ID = owner.creator.profile.erosGenomeId;
+  } finally {
+    await db.$disconnect();
+  }
 }
 
 async function assertCompleteHistory(token, stage, expectedTurns = 17) {
@@ -85,6 +162,10 @@ if (process.argv.includes('--history-only')) {
   console.log('LOCAL_E2E_RESTART_HISTORY=PASS');
   process.exit(0);
 }
+
+if (process.argv.includes('--history-only') || process.argv.includes('--recall-only')) await loadSyntheticCreatorMapping();
+else await connectSyntheticTelegramChannelAndProvisionGenome();
+await assertStockGenomeWriteIdempotency();
 
 if (process.argv.includes('--recall-only')) {
   const token = await authenticate();

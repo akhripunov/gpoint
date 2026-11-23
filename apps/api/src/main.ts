@@ -21,8 +21,9 @@ import { AgataWorkerGatewayController } from './agata-worker-gateway.js';
 import { CodexChatController } from './codex-chat.js';
 import { ErosWorkerGatewayController } from './eros-worker-gateway.js';
 import { GpointWorkerGatewayController } from './gpoint-worker-gateway.js';
+import { startErosGenomeProvisioning } from './eros-genome-provisioning.js';
 @Module({ controllers: [HealthController, DiagnosticsController, SearchController, ExploreController, AuthController, MeController, CreatorController, PersonalizedReelsController, VipController, CreatorPlatformController, AdminPlatformController, MediaReadController, EngagementController, FollowingController, DiscoveryHealthController, PreferencesController, TelegramIngestionController, TelegramChannelController, TelegramChannelVerificationController, TelegramConnectionController, FeedController, MessagesController, AgeAssuranceController, AgataWorkerGatewayController, GpointWorkerGatewayController, CodexChatController, ErosWorkerGatewayController] }) class AppModule {}
-export async function bootstrap() { const app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter()); app.enableCors({ origin: process.env.MINIAPP_ORIGIN?.split(',') ?? true, methods: ['GET', 'HEAD', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }); await app.listen({ port: Number(process.env.API_PORT ?? 3000), host: process.env.API_HOST ?? '0.0.0.0' }); return app; }
+export async function bootstrap() { const app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter()); app.enableCors({ origin: process.env.MINIAPP_ORIGIN?.split(',') ?? true, methods: ['GET', 'HEAD', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }); await app.listen({ port: Number(process.env.API_PORT ?? 3000), host: process.env.API_HOST ?? '0.0.0.0' }); startErosGenomeProvisioning(); return app; }
 if (process.env.NODE_ENV !== 'test') bootstrap();
 
 // OWNER-requested migration smoke: force this candidate's Core image through Build and Kamal.

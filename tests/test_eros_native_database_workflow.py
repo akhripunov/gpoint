@@ -78,7 +78,7 @@ def test_runtime_verify_uses_executable_eros_label_helper_and_ci_exercises_docke
 
 def test_eros_runtime_label_helper_passes_valid_docker_templates_and_fails_closed():
     helper = ROOT / "scripts/verify-eros-runtime-labels.py"
-    upstream = "83a54d1dba57874d55ecaa9756473f126b62844f"
+    upstream = "c7d63d77e9b52d7ae4952b8374512f571da065d5"
     with tempfile.TemporaryDirectory() as temporary:
         fake_docker = Path(temporary) / "docker"
         fake_docker.write_text(

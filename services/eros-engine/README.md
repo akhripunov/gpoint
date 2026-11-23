@@ -3,7 +3,7 @@
 ## Owner decision
 
 Use the unmodified upstream `etherfunlab/eros-engine` source at
-`83a54d1dba57874d55ecaa9756473f126b62844f` (v2.7.0). Do not apply Rust
+`c7d63d77e9b52d7ae4952b8374512f571da065d5` (v2.8.1). Do not apply Rust
 patches, maintain a fork, replace the installed GPOINT Mac Product Worker, or
 add an EROS Worker/lane. The files in `patches/` are retained as historical
 audit evidence only. `apply-patches.sh` now fails closed without changing its
@@ -14,7 +14,7 @@ Build a local stock image from a clean exact upstream checkout:
 ```sh
 services/eros-engine/build-stock-image.sh \
   /path/to/clean-eros-engine-checkout \
-  gpoint-eros:stock-83a54d1ba57874d55ecaa9756473f126b62844f
+  gpoint-eros:stock-c7d63d77e9b52d7ae4952b8374512f571da065d5
 ```
 
 The script verifies the upstream commit and clean Git tree before invoking the
@@ -119,7 +119,7 @@ offline `print-openapi` command and full local Compose E2E passed. Evidence:
 `LOCAL_E2E_MEMORY_RECALL=PASS`, and `LOCAL_E2E_CLEANUP=PASS`.
 That historical run used the v2.2.1 `memory_extraction` config. It does not
 validate the new v2.7.0 `dreaming_scan` and `arc_rewrite` configuration; the
-updated Docker/PostgreSQL E2E has not yet run.
+v2.8.1 Docker/PostgreSQL E2E has not yet run in this worktree.
 `OPENROUTER_API_KEY` was empty, with no credential; the inference test network
 had no egress. Real inference was not run. The GPoint queue tenant RLS test
 passed with a non-bypass worker role; Eros has no per-user RLS, and the API
@@ -138,7 +138,7 @@ tunnel, or policy responsible. No DNS, VPN, route, or Worker settings were
 changed. A new limited OWNER grant is required after the network path is
 confirmed healthy.
 
-The adapter provisions the persona with stock `seed-personas` and uses stock
+The adapter provisions Creator personas through stock v2.8.1 `POST /svc/v1/genomes` and uses stock
 `POST /comp/chat/start` to create or resume a user instance. GPoint stores the
 creator-to-genome and user/creator-to-instance mappings in its own database;
 runtime persona and relationship operations no longer query Eros tables. The
@@ -149,8 +149,14 @@ reactivate an archived instance. Since stock session listing omits archived
 sessions and genome IDs, an initial rollout must use a fresh, dedicated Eros
 database with no historical instances. Existing Eros history cannot be safely
 mapped through the public API alone. Each enabled creator profile also needs
-its `erosGenomeId` provisioned by `seed-personas` before routing is enabled;
-there is no stock genome-provisioning HTTP endpoint or safe runtime fallback.
+its `erosGenomeId` confirmed by the stock genome-write API before routing is enabled.
+GPoint records a stable UUIDv5 mapping and durable provisioning job in its own
+database. The existing API process claims due jobs with a short database lease,
+calls Eros outside any database transaction, then persists the confirmed UUID
+in a short transaction. Failed calls retry with bounded exponential backoff;
+the same caller-supplied UUID makes retries idempotent. The same job path
+recovers connected Creator profiles missing a mapping. No Eros database SQL
+access or additional worker/broker is used.
 
 The stock API has no operation for selected-message read receipts or unread
 counts, and `POST /comp/chat/{session_id}/read` marks the whole session. The

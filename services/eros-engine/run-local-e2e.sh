@@ -21,6 +21,9 @@ provider=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
 signing=$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')
 tenant=$(python3 -c 'import uuid;print(uuid.uuid4())')
 jwt=$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')
+genome_write=$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')
+telegram_bot_token=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
+telegram_webhook_secret=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
 worker_token=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
 agata=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
 umask 077; envfile="$tmp/compose.env"
@@ -32,11 +35,14 @@ EROS_TEST_GPOINT_API_KEY=$provider
 EROS_TEST_BRIDGE_SIGNING_SECRET=$signing
 EROS_TEST_TENANT_ID=$tenant
 EROS_TEST_SUPABASE_JWT_SECRET=$jwt
+EROS_TEST_GENOME_WRITE_SECRET=$genome_write
+EROS_TEST_TELEGRAM_BOT_TOKEN=$telegram_bot_token
+EROS_TEST_TELEGRAM_WEBHOOK_SECRET=$telegram_webhook_secret
 EROS_TEST_WORKER_TOKEN=$worker_token
 EROS_TEST_AGATA_TOKEN=$agata
 EROS_TEST_OPENROUTER_API_KEY=
 EOF
-unset admin provider signing jwt agata
+unset admin provider signing jwt genome_write telegram_bot_token telegram_webhook_secret agata
 compose(){ env -i PATH="$PATH" HOME="$HOME" DOCKER_CONFIG="$docker_config" DOCKER_CONTEXT="$local_context" docker compose --env-file "$envfile" -p "$project" -f "$repo/services/eros-engine/compose.local-test.yml" --profile test "$@"; }
 . "$repo/services/eros-engine/local-e2e-image-tools.sh"
 run_manifest="$tmp/resources.manifest"
@@ -263,18 +269,7 @@ SQL
   exit 1
 }
 echo "LOCAL_E2E_EROS_DB_API_ISOLATION=PASS api_role_connect=false schema_usage=false table_privileges=0 column_privileges=0 sequence_privileges=0"
-seed_output=$(compose exec -T eros /usr/local/bin/eros-engine seed-personas /etc/eros-engine/test-personas 2>&1) || {
-  printf '%s\n' "$seed_output" >&2
-  echo LOCAL_E2E_STOCK_PERSONA_SEED=FAIL >&2
-  exit 1
-}
-printf '%s\n' "$seed_output"
-genome_id=$(printf '%s\n' "$seed_output" | grep 'Synthetic Eros Persona' | grep -Eo '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | tail -1)
-[[ "$genome_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || {
-  echo LOCAL_E2E_STOCK_PERSONA_SEED=FAIL reason=genome_id_missing >&2
-  exit 1
-}
-echo LOCAL_E2E_STOCK_PERSONA_SEED=PASS
+echo LOCAL_E2E_STOCK_GENOME_WRITE_ROUTE=READY
 eros_rls_stats=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT count(*) || '|' || count(*) FILTER (WHERE c.relrowsecurity) || '|' || count(*) FILTER (WHERE c.relforcerowsecurity) || '|' || (SELECT count(*) FROM pg_policies WHERE schemaname='engine') FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='engine' AND c.relkind IN ('r','p');")
 IFS='|' read -r eros_tables eros_rls_enabled eros_rls_forced eros_policy_count <<EOF
 $eros_rls_stats
@@ -293,7 +288,6 @@ GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA engine TO gpoint_worker_t
 SQL
 compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 <<'SQL'
 INSERT INTO "User" (id,"telegramUserId","telegramUsername","firstName","createdAt","updatedAt") VALUES ('10000000-0000-4000-8000-000000000001',900000001,'eros_test_dialogue','Synthetic',now(),now());
-INSERT INTO "Creator" (id,"displayName",slug,"createdAt") VALUES ('20000000-0000-4000-8000-000000000002','Synthetic Eros Persona','eros-test-persona',now());
 SQL
 compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 <<SQL
 INSERT INTO "GpointChatPolicyProfile"
@@ -302,8 +296,6 @@ VALUES
   ('eros_test_gpoint_policy','$tenant',1,'gpoint-terms-v1','gpoint-privacy-v1','active',now(),
    '{"minimum_age":18,"ai_disclosure_required":true,"self_attestation_allowed":true,"adult_only_features":[],"disclosure_repeat_hours":24}'::jsonb);
 SQL
-compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c \
-  "INSERT INTO \"CreatorProfile\" (id,\"creatorId\",status,bio,\"tagsJson\",\"erosGenomeId\") VALUES ('eros_test_profile','20000000-0000-4000-8000-000000000002','APPROVED','Local synthetic test persona','[]','$genome_id'::uuid);"
 postgres_id=$(compose ps -q postgres)
 api_image=$(compose images -q gpoint-api)
   docker_local run --name "$integration_container" --label "com.docker.compose.project=$project" --network "container:$postgres_id" \
@@ -318,6 +310,11 @@ echo LOCAL_E2E_GPOINT_QUEUE_RLS_TENANT_ISOLATION=PASS fixture_role=gpoint_worker
 compose --profile worker up -d --no-deps gpoint-worker
 if ! compose exec -w /workspace/apps/api -T gpoint-api node --import tsx /workspace/services/eros-engine/local-test-e2e.mjs >"$tmp/e2e.out" 2>&1; then tail -40 "$tmp/e2e.out" >&2; exit 1; fi
 cat "$tmp/e2e.out"
+genome_id=$(sed -n 's/^LOCAL_E2E_GPOINT_GENOME_MAPPING=PASS stable_uuid=//p' "$tmp/e2e.out" | tail -1)
+[[ "$genome_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || { echo LOCAL_E2E_GPOINT_GENOME_MAPPING=FAIL reason=invalid_reported_uuid >&2; exit 1; }
+eros_genome_count=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -qAtc "SELECT count(*) FROM engine.persona_genomes WHERE id='$genome_id'::uuid;")
+[ "$eros_genome_count" = 1 ] || { echo LOCAL_E2E_EROS_GENOME_CREATE=FAIL reason=id_not_present >&2; exit 1; }
+echo LOCAL_E2E_STOCK_PERSONA_PROVISIONING=PASS created_by_telegram_connect=YES
 relationship_mapping_count=$(compose exec -T postgres psql -U eros_test_admin -d gpoint_test -Atc 'SELECT count(*) FROM "ErosRelationshipMapping";')
 [ "$relationship_mapping_count" = 1 ] || { echo "LOCAL_E2E_GPOINT_RELATIONSHIP_MAPPING=FAIL count=$relationship_mapping_count" >&2; exit 1; }
 echo LOCAL_E2E_GPOINT_RELATIONSHIP_MAPPING=PASS
@@ -382,7 +379,7 @@ if compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_S
   exit 1
 fi
 grep -q 'ErosRelationshipMapping_userId_fkey' "$tmp/user-delete.out" || { echo LOCAL_E2E_GPOINT_MAPPING_OWNERSHIP=FAIL user_reference_constraint_missing >&2; exit 1; }
-compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "CreatorProfile" WHERE id = '\''eros_test_profile'\''' >/dev/null
+compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "CreatorProfile" WHERE "creatorId" = '\''20000000-0000-4000-8000-000000000002'\''' >/dev/null
 if compose exec -T postgres psql -U eros_test_admin -d gpoint_test -v ON_ERROR_STOP=1 -c 'DELETE FROM "Creator" WHERE id = '\''20000000-0000-4000-8000-000000000002'\''' >"$tmp/creator-delete.out" 2>&1; then
   echo LOCAL_E2E_GPOINT_MAPPING_OWNERSHIP=FAIL creator_reference_was_not_restricted >&2
   exit 1
