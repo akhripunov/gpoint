@@ -820,20 +820,7 @@ jobs:
         run: |
           set -euo pipefail
           kamal() {
-            docker run --rm \
-              --pull=never \
-              --platform linux/amd64 \
-              --volume "$GITHUB_WORKSPACE:/workdir" \
-              --volume "$HOME/.ssh:/root/.ssh:ro" \
-              --volume "$HOME/.ssh:$HOME/.ssh:ro" \
-              --workdir /workdir \
-              --env GPOINT_COMMIT_SHA \
-              --env GPOINT_APP_SOURCE_SHA \
-              --env KAMAL_REGISTRY_PASSWORD \
-              --env GPOINT_PRODUCTION_HOST \
-              --env GPOINT_SSH_KEY \
-              --env GPOINT_KNOWN_HOSTS_FILE \
-              "$KAMAL_IMAGE" "$@"
+            bash "$GITHUB_WORKSPACE/scripts/run-pinned-kamal.sh" inventory . "$@"
           }
           role_inventory="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - \
             < "$GITHUB_WORKSPACE/scripts/verify-kamal-production-baseline.py")"
@@ -1420,12 +1407,7 @@ jobs:
           done
           echo "GPOINT_KAMAL_COMPONENT_SCOPE=$DEPLOY_SCOPE" >> "$GITHUB_STEP_SUMMARY"
           kamal() {
-            docker run --rm --volume "$GITHUB_WORKSPACE:/workdir" --volume "$HOME/.ssh:/root/.ssh:ro" --volume "$HOME/.ssh:$HOME/.ssh:ro" \
-              --workdir /workdir --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA --env GPOINT_PRODUCTION_HOST \
-              --env GPOINT_SSH_KEY --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD \
-              --env GPOINT_KAMAL_EXPECTED_DIGEST --env GPOINT_KAMAL_SERVICE --env GPOINT_WORKER_PROXY_DIGEST --env KAMAL_ROLES \
-              --env GPOINT_KAMAL_CORE_API_VERSION --env GPOINT_KAMAL_CORE_API_SOURCE_SHA \
-              ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 "$@"
+            bash "$GITHUB_WORKSPACE/scripts/run-pinned-kamal.sh" apply . "$@"
           }
           verify_single_running_role() {
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$@" \
@@ -2221,11 +2203,7 @@ jobs:
           set -euo pipefail
           kamal() {
             local checkout="$1"; shift
-            docker run --rm --volume "$GITHUB_WORKSPACE/$checkout:/workdir" --volume "$HOME/.ssh:/root/.ssh:ro" --volume "$HOME/.ssh:$HOME/.ssh:ro" --workdir /workdir \
-              --env GPOINT_COMMIT_SHA --env GPOINT_APP_SOURCE_SHA --env GPOINT_PRODUCTION_HOST --env GPOINT_SSH_KEY \
-              --env GPOINT_KNOWN_HOSTS_FILE --env KAMAL_REGISTRY_PASSWORD --env GPOINT_KAMAL_EXPECTED_DIGEST \
-              --env GPOINT_KAMAL_SERVICE --env KAMAL_ROLES \
-              ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625 "$@"
+            bash "$GITHUB_WORKSPACE/scripts/run-pinned-kamal.sh" rollback "$checkout" "$@"
           }
           verify_role() {
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$1" "$2" "$3" \
