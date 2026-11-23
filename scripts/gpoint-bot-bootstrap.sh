@@ -7,11 +7,11 @@ if [[ "$GITHUB_EVENT_NAME" != push || "$GITHUB_REF" != refs/heads/main ]]; then
   echo "GPOINT_BOT_BOOTSTRAP=SKIPPED event"
   exit 0
 fi
-[[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_EVENT_BEFORE" =~ ^[0-9a-f]{40}$ ]] || {
+[[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$BOT_AUTH_EVENT_BEFORE" =~ ^[0-9a-f]{40}$ ]] || {
   echo "BOT_BOOTSTRAP=BLOCKED invalid push identities" >&2; exit 1;
 }
 # A new, specifically approved record in THIS push is the sole activation trigger.
-change="$(git diff --name-status --no-renames "$GITHUB_EVENT_BEFORE" "$GITHUB_SHA" -- "$authorization")"
+change="$(git diff --name-status --no-renames "$BOT_AUTH_EVENT_BEFORE" "$GITHUB_SHA" -- "$authorization")"
 if [[ "$change" != $'A\t'"$authorization" ]]; then
   echo "GPOINT_BOT_BOOTSTRAP=SKIPPED no new authorization"
   exit 0
