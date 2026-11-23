@@ -100,6 +100,8 @@
     "!.github/workflows/sync-agents-to-linear.yml",
     "!scripts/classify-release-prepush.py",
     "!scripts/prepush.py",
+    "!scripts/check-kamal-configs.sh",
+    "!scripts/verify-eros-runtime-labels.py",
     "!scripts/verify_native_eros_image.py",
     "!scripts/verify_native_rollback_evidence.py"
   ]
