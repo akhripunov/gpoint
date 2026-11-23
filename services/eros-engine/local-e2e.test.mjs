@@ -51,6 +51,12 @@ test('local E2E topology has API, Eros, Worker and isolated PostgreSQL', () => {
   assert.doesNotMatch(compose, /ports:|host\.docker\.internal|external:\s*true/i);
 });
 
+test('synthetic E2E loads Prisma from the API workspace package', () => {
+  const runner = readFileSync(new URL('local-test-e2e.mjs', directory), 'utf8');
+  assert.match(runner, /createRequire\(new URL\('\.\.\/\.\.\/apps\/api\/package\.json', import\.meta\.url\)\)/);
+  assert.match(runner, /requireApi\('@prisma\/client'\)/);
+});
+
 test('only the disposable Eros migrator receives database CREATE privilege', () => {
   const init = readFileSync(new URL('local-test-init.sql', directory), 'utf8');
   const erosInit = init.split('\\connect gpoint_test')[0];

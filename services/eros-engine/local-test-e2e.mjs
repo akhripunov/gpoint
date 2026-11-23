@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { PrismaClient } from '@prisma/client';
+import { createRequire } from 'node:module';
 import { createErosEngineClient, ErosAdapterError, erosGenomeCardFor, erosIdentityFor } from '../../apps/api/src/eros-adapter.ts';
+
+const requireApi = createRequire(new URL('../../apps/api/package.json', import.meta.url));
+const { PrismaClient } = requireApi('@prisma/client');
 
 const api = 'http://127.0.0.1:3000';
 const userId = '10000000-0000-4000-8000-000000000001';
