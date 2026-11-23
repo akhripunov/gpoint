@@ -402,6 +402,8 @@ jobs:
           tests/test_native_environment_deployment.py
           tests/test_kamal_release_config.py
           tests/test_kamal_ordinary_manifest.py
+          tests/test_pinned_kamal_invoker.py
+          tests/test_native_remote_role_verification.py
       - name: Run isolated PostgreSQL 16 migration and integration suites
         if: matrix.suite == 'python' && (steps.filter.outputs.database == 'true' || steps.filter.outputs.integration_infrastructure == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
         run: |
