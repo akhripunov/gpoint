@@ -404,7 +404,8 @@ def test_kamal_pre_app_boot_checks_the_pulled_digest_before_boot():
     assert 'app_source_sha="${GPOINT_APP_SOURCE_SHA:?GPOINT_APP_SOURCE_SHA is required}"' in hook
     assert 'test "$source_sha" = "$app_source_sha"' in hook
     assert 'test "$platform" = linux/amd64' in hook
-    assert "--env GPOINT_KAMAL_EXPECTED_DIGEST" in workflow
+    assert "--env GPOINT_KAMAL_EXPECTED_DIGEST" in (ROOT / "scripts/run-pinned-kamal.sh").read_text()
+    assert "run-pinned-kamal.sh" in workflow
     assert 'GPOINT_KAMAL_EXPECTED_DIGEST="$APP_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-core' in workflow
     assert "gpoint-agata" not in workflow
     assert "gpoint-eros-relay:relay" not in workflow
