@@ -196,7 +196,7 @@ def test_kamal_network_hook_joins_only_allowed_core_roles_and_internal_ollama():
     assert "gpoint-core:api) networks='gpoint_app:api,shared_internal:'" not in hook
     assert "gpoint-agata" not in hook
     assert "gpoint-eros-relay" not in hook
-    assert "gpoint-core:api) networks='gpoint_app:api,shared_internal:,gpoint_ollama_internal:'" in hook
+    assert "gpoint-core:api) networks='kamal:gpoint-core-api,gpoint_app:api,shared_internal:,gpoint_ollama_internal:'" in hook
     assert "docker network connect --alias \"$alias\" \"$network\" \"$id\"" in hook
     assert "StrictHostKeyChecking=yes" in hook
     assert "gsales" not in hook.lower()
