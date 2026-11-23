@@ -135,9 +135,9 @@ def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
     assert jobs["deploy"]["needs"] == ["tests", "build"]
     assert jobs["deploy"]["environment"] == {
         "name": "production",
+        "deployment": "${{ inputs.mode == 'rollback' }}",
         "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
-    assert "deployment" not in jobs["deploy"]["environment"]
 
 
 def test_kamal_uses_attempt_scoped_tag_with_buildkit_digest_verification():
@@ -817,21 +817,26 @@ def test_native_release_runs_kamal_after_successful_main_push():
     assert "always()" in deploy["if"] and "needs.build.result == 'success'" in deploy["if"]
     assert deploy["environment"] == {
         "name": "production",
+        "deployment": "${{ inputs.mode == 'rollback' }}",
         "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
     deploy_script = "\n".join(step.get("run", "") for step in deploy["steps"])
     assert 'test "$APPROVE_PRODUCTION" = true' in deploy_script
     assert 'test "$REQUESTED_SHA" = "$WORKFLOW_SHA"' in deploy_script
-    assert "Resolve exact GitHub environment Deployment ID" in [step.get("name") for step in deploy["steps"]]
-    assert 'repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses' not in deploy_script
+    names = [step.get("name") for step in deploy["steps"]]
+    assert names.index("Create exact GitHub production Deployment") < names.index("Verify public routes and exact running services")
+    assert names.index("Verify public routes and exact running services") < names.index("Publish verified GitHub production Deployment")
+    assert 'repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses' in deploy_script
 
     rollback_workflow = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
     rollback = rollback_workflow["jobs"]["deploy"]
-    assert rollback["environment"] == {
-        "name": "production", "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
-    }
+    assert rollback["environment"]["deployment"] == "${{ inputs.mode == 'rollback' }}"
+    guarded = [step for step in rollback["steps"] if step.get("name") in
+               ("Create exact GitHub production Deployment", "Publish verified GitHub production Deployment",
+                "Publish unsuccessful GitHub production Deployment")]
+    assert len(guarded) == 3
+    assert all("inputs.mode != 'rollback'" in step["if"] for step in guarded)
     rollback_script = "\n".join(step.get("run", "") for step in rollback["steps"])
-    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in rollback_script
     assert "gpoint-runtime-target-sha=" in rollback_script
 
 
