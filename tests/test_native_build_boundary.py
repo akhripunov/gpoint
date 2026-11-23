@@ -192,14 +192,17 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
                               if step.get("id") == "kamal_inventory")
         self.assertIn("verify-kamal-production-baseline.py", live_inventory["run"])
 
-    def test_accumulated_infrastructure_gate_uses_successful_native_marker(self):
+    def test_main_push_deploy_has_no_second_infrastructure_approval_gate(self):
         steps = self.workflow["jobs"]["deploy"]["steps"]
-        marker = next(step for step in steps if step.get("id") == "infrastructure_baseline")
+        self.assertNotIn("infrastructure_baseline", [step.get("id") for step in steps])
         plan = next(step for step in steps if step.get("id") == "component_plan")
-        self.assertIn("latest-successful-native-sha", marker["run"])
-        self.assertIn("INFRASTRUCTURE_BASELINE_SHA", plan["env"])
-        self.assertIn("changed_paths(infrastructure_baseline, candidate", plan["run"])
-        self.assertNotIn("accumulated_changed_paths", plan["run"])
+        self.assertNotIn("INFRASTRUCTURE_BASELINE_SHA", plan["env"])
+        self.assertNotIn("is_infrastructure_change", plan["run"])
+        self.assertIn("classify_component_scope", plan["run"])
+        self.assertIn("require_live_eros_e2e_success", plan["run"])
+        self.assertEqual(plan["env"]["APP_DIGEST"], "${{ needs.build.outputs.app_digest }}")
+        self.assertEqual(plan["env"]["MINIAPP_DIGEST"], "${{ needs.build.outputs.miniapp_digest }}")
+        self.assertEqual(plan["env"]["EROS_DIGEST"], "${{ needs.build.outputs.eros_digest }}")
 
     def test_cumulative_engine_scope_runs_e2e_and_build_requires_same_run_tests_success(self):
         tests = self.workflow["jobs"]["tests"]

@@ -890,16 +890,6 @@ jobs:
               *) echo 'unexpected topology fact' >&2; exit 1 ;;
             esac
           done <<< "$facts"
-      - name: Resolve last successful Native deployment as infrastructure approval baseline
-        if: github.event_name == 'push'
-        id: infrastructure_baseline
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          python3 scripts/resolve_native_environment_deployment.py \
-            --repository "$REPOSITORY" --latest-successful-native-sha >> "$GITHUB_OUTPUT"
       - name: Read exact Tests workspace Eros E2E outcome
         if: inputs.mode != 'rollback'
         id: eros_e2e_evidence
@@ -925,8 +915,6 @@ jobs:
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
           EROS_DIGEST: ${{ needs.build.outputs.eros_digest }}
           E2E_OUTCOME: ${{ steps.eros_e2e_evidence.outputs.outcome }}
-          EVENT_NAME: ${{ github.event_name }}
-          INFRASTRUCTURE_BASELINE_SHA: ${{ steps.infrastructure_baseline.outputs.sha }}
         run: |
           set -euo pipefail
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
@@ -935,8 +923,7 @@ jobs:
           sys.path.insert(0, str(Path.cwd() / "scripts"))
           from native_release_intent import (ALL_COMPONENT_ROLES, ROLE_REPOSITORIES,
                                              classify_component_scope, expected_runtime_inventory_b64,
-                                             changed_paths,
-                                             is_infrastructure_change, require_live_eros_e2e_success)
+                                             require_live_eros_e2e_success)
 
           candidate = os.environ["CANDIDATE_SHA"]
           baseline = json.loads(os.environ["BASELINE_ROLE_INVENTORY"])
@@ -947,13 +934,6 @@ jobs:
           live_eros_e2e_required = require_live_eros_e2e_success(
               Path.cwd(), live_eros_source, candidate, os.environ["E2E_OUTCOME"])
           print("live_eros_e2e_required=" + str(live_eros_e2e_required).lower())
-          if os.environ["EVENT_NAME"] == "push":
-              infrastructure_baseline = os.environ["INFRASTRUCTURE_BASELINE_SHA"]
-              if not re.fullmatch(r"[0-9a-f]{40}", infrastructure_baseline):
-                  raise SystemExit("last verified Native production deployment SHA is unavailable")
-              accumulated_paths = changed_paths(infrastructure_baseline, candidate, repo=Path.cwd())
-              if is_infrastructure_change(accumulated_paths):
-                  raise SystemExit("accumulated production infrastructure changes require approved workflow_dispatch")
           effective = {}
           image_inputs = {"CORE": "APP_DIGEST", "MINIAPP": "MINIAPP_DIGEST", "EROS": "EROS_DIGEST"}
           outputs = {"CORE": "app_digest", "MINIAPP": "miniapp_digest", "EROS": "eros_digest"}

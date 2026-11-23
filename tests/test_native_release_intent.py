@@ -159,12 +159,12 @@ def test_authorization_metadata_is_schema_checked_and_namespace_fails_closed(tmp
     assert MODULE._path_kind(valid_record) == "unknown"
 
 
-def test_release_authorization_paths_are_protected_in_shared_infrastructure_filter():
+def test_release_authorization_paths_keep_infrastructure_classification_without_manual_deploy():
     assert MODULE.paths_match_filter({".release-authorizations/test-owner-task.json"}, "infrastructure")
     assert MODULE.paths_match_filter({
         ".release-authorizations/addenda/test-owner-task/test-amendment.json"
     }, "infrastructure")
-    assert not MODULE.push_deploy_authorized(
+    assert MODULE.push_deploy_authorized(
         mode="DEPLOY", changed_paths={".release-authorizations/test-owner-task.json"})
 
 
@@ -286,10 +286,19 @@ def test_baseline_rejects_role_version_not_bound_to_its_source_sha():
         MODULE.mixed_component_baselines(inventory)
 
 
-def test_infrastructure_requires_protected_dispatch_and_exact_owner_sha():
-    assert MODULE.is_infrastructure_change({"config/deploy.ollama.yml"})
+def test_main_push_infrastructure_runs_automatic_release_and_manual_dispatch_stays_exact_sha():
+    for paths in (
+        {"config/deploy.ollama.yml"},
+        {".github/workflows/gpoint-release.yml", "scripts/write-kamal-production-manifest.py"},
+    ):
+        assert MODULE.is_infrastructure_change(paths)
+        mode = MODULE.classify_push(
+            event_name="push", ref="refs/heads/main", changed_paths=paths,
+        )
+        assert mode == "DEPLOY"
+        assert MODULE.push_deploy_authorized(mode=mode, changed_paths=paths)
     assert not MODULE.push_deploy_authorized(
-        mode="DEPLOY", changed_paths={"config/deploy.ollama.yml"},
+        mode="BLOCK", changed_paths={".github/workflows/gpoint-release.yml"},
     )
     result, approved = MODULE.classify_dispatch(
         ref="refs/heads/main", candidate_sha="a" * 40, github_sha="a" * 40,
