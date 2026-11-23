@@ -69,6 +69,7 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "scripts/gpoint-scheduled-backup.py",
     "scripts/native_release_intent.py",
     "scripts/prepush.py",
+    "scripts/run-pinned-kamal.sh",
     "scripts/prisma_migration_checksums.py",
     "scripts/prisma_migration_release_plan.py",
     "scripts/resolve_native_build_scope.py",
