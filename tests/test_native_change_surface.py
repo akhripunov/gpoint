@@ -78,7 +78,7 @@ def test_core_api_joins_the_ollama_network_only_in_eros_aware_config():
     ).read_text()
 
 
-def test_retired_relay_paths_never_select_an_image_or_deploy():
+def test_retired_relay_paths_are_non_runtime_and_ollama_can_auto_release():
     sys.path.insert(0, str(ROOT / "scripts"))
     import native_release_intent as intent
 
@@ -94,7 +94,7 @@ def test_retired_relay_paths_never_select_an_image_or_deploy():
     assert intent._component_paths("config/deploy.ollama.yml") == set()
     assert intent._known_non_runtime_path("config/deploy.ollama.yml")
     assert intent.is_infrastructure_change({"config/deploy.ollama.yml"})
-    assert not intent.push_deploy_authorized(mode="DEPLOY", changed_paths={"config/deploy.ollama.yml"})
+    assert intent.push_deploy_authorized(mode="DEPLOY", changed_paths={"config/deploy.ollama.yml"})
     assert intent.push_deploy_authorized(mode="DEPLOY", changed_paths={"apps/api/src/messages.ts"})
 
 

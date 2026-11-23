@@ -286,6 +286,17 @@ def test_baseline_rejects_role_version_not_bound_to_its_source_sha():
         MODULE.mixed_component_baselines(inventory)
 
 
+def test_eros_upstream_pin_uses_pinned_source_and_existing_eros_e2e_gates():
+    path = "services/eros-engine/upstream.sha"
+    assert MODULE._component_paths(path) == {"EROS"}
+    assert MODULE.paths_match_filter({path}, "eros_e2e")
+    mode = MODULE.classify_push(
+        event_name="push", ref="refs/heads/main", changed_paths={path},
+    )
+    assert mode == "DEPLOY"
+    assert MODULE.push_deploy_authorized(mode=mode, changed_paths={path})
+
+
 def test_main_push_infrastructure_runs_automatic_release_and_manual_dispatch_stays_exact_sha():
     for paths in (
         {"config/deploy.ollama.yml"},

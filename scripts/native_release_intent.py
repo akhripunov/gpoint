@@ -334,8 +334,8 @@ def classify_push(*, event_name: str, ref: str,
     if markers & LEGACY_RELEASE_MARKERS:
         # Retired staging and artifact markers cannot authorize production Apply.
         return "BLOCK"
-    if EROS_UPSTREAM_PIN in changed_paths:
-        return "BLOCK"
+    # A changed Eros upstream pin is validated by the pinned-source check
+    # and cumulative synthetic Eros E2E within the existing Tests job.
     # Prisma schema changes must reach hosted Tests, which compare the full
     # migration history with schema.prisma before Build. Production Apply still
     # requires an exact migration set in the approved migration manifest.
