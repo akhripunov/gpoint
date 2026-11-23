@@ -29,7 +29,7 @@ import sys
 
 args = sys.argv[1:]
 with open(os.environ["FAKE_DOCKER_TRACE"], "a") as trace:
-    trace.write(json.dumps(args) + "\n")
+    trace.write(json.dumps(args) + chr(10))
 
 if args[0] == "ps":
     print(os.environ.get("FAKE_DOCKER_NAMES", ""))
