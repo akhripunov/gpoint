@@ -1,0 +1,92 @@
+{
+  "schema_version": 3,
+  "project": "gpoint",
+  "authorization_id": "gpoint-bot-restore-20261123-001",
+  "authorization_mode": "TASK_SCOPED_AUTO",
+  "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+  "source_instruction_identifier": "OWNER_GPOINT_BOT_RESTORE_CHAT_20261123",
+  "owner_task_reference": "ChatGPT GPoint, user instruction 'Исправь это' followed by 'Делай' on 2026-11-23",
+  "task": "Restore the absent production GPoint Telegram Bot so /start responds and refreshes the current Mini App launch button. Use existing GitHub Actions protected Deploy and pinned stock Kamal. Bootstrap only gpoint-core-bot from the verified already-installed Core image, preserving API/Worker/MiniApp/Eros.",
+  "environment": "production",
+  "production_baseline_sha": "66ed5fcd61af29dabadc2948886ccb40ee1c2f33",
+  "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+  "allowed_paths": [
+    ".github/workflows/gpoint-release.yml",
+    "scripts/gpoint-bot-bootstrap.sh",
+    "tests/test_gpoint_bot_bootstrap.py",
+    ".release-authorizations/gpoint-bot-restore-20261123-001.json"
+  ],
+  "allowed_operations": [
+    "integrate",
+    "prepare",
+    "preflight",
+    "deploy",
+    "verify",
+    "publish_evidence",
+    "recovery"
+  ],
+  "acceptance_criteria": [
+    "A single exact main-push admission; no subsequent pushes can retrigger Bot bootstrap.",
+    "No Bot start before exact live Core/MiniApp/Eros identities and Telegram credentials/webhook/host process checks pass.",
+    "Bot uses the immutable already-installed Core image and installed version, with no other role restarted.",
+    "Kamal verifies one Bot, same Core SHA/image; /health/ready returns ready after Telegram polling starts.",
+    "Normal Runtime Verify still proves Core, Mini App and Eros unchanged; real user /start and original old WebApp button require subsequent mobile smoke."
+  ],
+  "exclusions": [
+    "MAXIBOT and other projects",
+    "database migrations/schema/data changes",
+    "secret rotation, disclosure or logging",
+    "webhook removal or replacement",
+    "restarting or redeploying Core API, Core Worker, Mini App or Eros",
+    "new release controller, manually dispatched duplicate, repeated blind retry"
+  ],
+  "risk_contracts": {
+    "release_infrastructure": {
+      "allowed_operations": [
+        "integrate",
+        "prepare",
+        "preflight",
+        "deploy",
+        "verify",
+        "publish_evidence",
+        "recovery"
+      ],
+      "allowed_paths": [
+        ".github/workflows/gpoint-release.yml",
+        "scripts/gpoint-bot-bootstrap.sh",
+        "tests/test_gpoint_bot_bootstrap.py",
+        ".release-authorizations/gpoint-bot-restore-20261123-001.json"
+      ],
+      "baseline_sha": "66ed5fcd61af29dabadc2948886ccb40ee1c2f33",
+      "risk_description": "Enabling an absent Telegram Bot can create competing polling consumers or use stale production credentials. The one-shot operation must stop without mutation when its approved live baseline, Telegram API identity/webhook or local process checks fail.",
+      "required_gates": [
+        "exact current main",
+        "owner task-scoped authorization",
+        "required Python and workspace CI",
+        "protected production environment",
+        "same VPS pinned SSH identity",
+        "live Core and MiniApp and Eros version/digest readback",
+        "exact immutable live Core image for Bot",
+        "GPoint bot token and username identity",
+        "HTTPS origin and ingress URL",
+        "Telegram webhook absent",
+        "no running other Bot process",
+        "Kamal Bot single-instance verification",
+        "Bot polling readiness",
+        "runtime/public route parity"
+      ],
+      "backup_plan": "No database or persistent volume mutation. Retain existing PostgreSQL/Redis backups and immutable Core/MiniApp/Eros images; do not alter production env values.",
+      "rollback_plan": "If Bot readiness or post-deploy verification fails after creation, mark recovery required and inspect exact live state; only stop the newly created Bot through a separate verified owner-authorized stock Kamal operation. Never roll back databases or restart other roles.",
+      "stop_conditions": [
+        "Live SHA or digest differs from the exact known production baseline.",
+        "Missing or mismatched Telegram credentials, hostname, webhook, local process inventory or expected role absence.",
+        "Any concurrent release, unknown polling consumer, failed Bot readiness, duplicate Bot, missing immutable image, missing protected environment approval, or partial Apply.",
+        "Any operation would restart Core API/Worker, Mini App, Eros, touch secrets or change schema."
+      ]
+    }
+  },
+  "preauthorized_commits": [],
+  "state": "ACTIVE",
+  "revoked": false,
+  "consumed": false
+}
