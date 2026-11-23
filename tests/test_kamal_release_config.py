@@ -196,7 +196,7 @@ def test_kamal_network_hook_joins_only_allowed_core_roles_and_internal_ollama():
     assert "gpoint-core:api) networks='gpoint_app:api,shared_internal:'" not in hook
     assert "gpoint-agata" not in hook
     assert "gpoint-eros-relay" not in hook
-    assert "gpoint-core:api) networks='gpoint_app:api,shared_internal:,gpoint_ollama_internal:'" in hook
+    assert "gpoint-core:api) networks='kamal:gpoint-core-api,gpoint_app:api,shared_internal:,gpoint_ollama_internal:'" in hook
     assert "docker network connect --alias \"$alias\" \"$network\" \"$id\"" in hook
     assert "StrictHostKeyChecking=yes" in hook
     assert "gsales" not in hook.lower()
@@ -1196,3 +1196,16 @@ def test_runtime_prisma_readbacks_resolve_the_api_workspace_dependencies():
              if 'docker exec' in line and 'require("@prisma/client")' in line]
     assert len(calls) == 3
     assert all('docker exec --workdir /app/apps/api ' in line for line in calls)
+
+def test_ordinary_core_api_preserves_worker_proxy_alias_on_default_kamal_network():
+    # The worker tunnel accessory resolves gpoint-core-api on the default
+    # Kamal network. A custom options.network would redirect --network-alias.
+    core = yaml.safe_load((ROOT / "config/deploy.yml").read_text())
+    api_options = core["servers"]["api"]["options"]
+    assert api_options["network-alias"] == "gpoint-core-api"
+    assert "network" not in api_options
+    tunnel = (ROOT / "apps/api/src/gpoint-worker-tunnel-proxy.mjs").read_text()
+    assert "upstreamHost = 'gpoint-core-api'" in tunnel
+    hook = (ROOT / ".kamal/hooks/post-app-boot").read_text()
+    assert "kamal:gpoint-core-api,gpoint_app:api,shared_internal:,gpoint_ollama_internal:" in hook
+

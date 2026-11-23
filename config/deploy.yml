@@ -11,6 +11,8 @@ servers:
       clear:
         RELEASE_SHA: <%= ENV.fetch("GPOINT_APP_SOURCE_SHA") %>
     options:
+      # Stable upstream name for the Kamal-network Worker tunnel on every API redeploy.
+      network-alias: gpoint-core-api
       env-file:
         - /opt/gpoint/env/production.env
       volume: /opt/gpoint/layer7-staging/media:/data/media
