@@ -452,21 +452,30 @@ def test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails
     status = ordinary.split("name: Report recovery guidance after ordinary release", 1)[1]
     assert "RECOVERY_REQUIRED" in status
     assert "automatic database downgrade is prohibited" in status
-    assert "deployments/$DEPLOYMENT_ID/statuses" not in status
+    assert "Publish unsuccessful GitHub production Deployment" in status
+    assert "steps.deployment_success.outcome != 'success'" in status
 
 
-def test_ordinary_deployment_uses_native_environment_status_after_verify():
+def test_ordinary_deployment_uses_exact_api_status_only_after_verify():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     deploy = workflow["jobs"]["deploy"]
     names = [step.get("name", "") for step in deploy["steps"]]
-    resolve = names.index("Resolve exact GitHub environment Deployment ID")
+    create = names.index("Create exact GitHub production Deployment")
     verify = names.index("Verify public routes and exact running services")
-    assert resolve < verify
+    publish = names.index("Publish verified GitHub production Deployment")
+    failure = names.index("Publish unsuccessful GitHub production Deployment")
+    assert names.index("Plan the exact approved Prisma migration set") < create < verify < publish < failure
+    assert deploy["environment"]["deployment"] == "${{ inputs.mode == 'rollback' }}"
     assert "steps.verify.outputs.environment_url" in deploy["environment"]["url"]
-    deployment_steps = "\n".join(step.get("run", "") for step in deploy["steps"])
-    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in deployment_steps
-    assert "gpoint-manifest-sha256=" in deployment_steps
-    assert "GITHUB_RUN_ATTEMPT" in deploy["steps"][resolve]["run"]
+    assert "GITHUB_RUN_ATTEMPT" in deploy["steps"][create]["run"]
+    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments"' in deploy["steps"][create]["run"]
+    assert "required_contexts: []" in deploy["steps"][create]["run"]
+    assert 'auto_merge: false' in deploy["steps"][create]["run"]
+    assert 'deployments/$DEPLOYMENT_ID/statuses' not in deploy["steps"][verify]["run"]
+    assert 'deployments/$DEPLOYMENT_ID/statuses' in deploy["steps"][publish]["run"]
+    assert 'steps.verify.outcome == \'success\'' in deploy["steps"][publish]["if"]
+    assert 'gpoint-manifest-sha256=' in deploy["steps"][verify]["run"]
+    assert 'steps.deployment_success.outcome != \'success\'' in deploy["steps"][failure]["if"]
 
 
 def test_manual_rollback_uses_native_environment_deployment_and_target_metadata():
@@ -474,19 +483,21 @@ def test_manual_rollback_uses_native_environment_deployment_and_target_metadata(
     rollback = _ROLLBACK["jobs"]["deploy"]
     assert rollback["environment"] == {
         "name": "production",
+        "deployment": "${{ inputs.mode == 'rollback' }}",
         "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
     body = "\n".join(step.get("run", "") for step in rollback["steps"])
-    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in body
-    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses' not in body
+    for name in ("Create exact GitHub production Deployment",
+                 "Publish verified GitHub production Deployment",
+                 "Publish unsuccessful GitHub production Deployment"):
+        guarded_step = next(step for step in rollback["steps"] if step.get("name") == name)
+        assert "inputs.mode != 'rollback'" in guarded_step["if"]
     assert "gpoint-runtime-target-sha=" in body
     assert "gpoint-core-source-sha=$CORE_SOURCE_SHA" in body
     assert "gpoint-miniapp-source-sha=$MINIAPP_SOURCE_SHA" in body
     assert "gpoint-eros-source-sha=$EROS_SOURCE_SHA" in body
     for key in ("core_version", "miniapp_version", "eros_version"):
         assert f"steps.evidence.outputs.{key}" in yaml.safe_dump(rollback)
-    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments' not in body
-    assert 'gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses' not in body
 
 
 def test_production_mutations_share_one_non_cancelling_lock():
@@ -691,7 +702,9 @@ def test_protected_rollback_uses_only_verified_prior_target_and_shared_lock():
     assert "inputs.mode == 'rollback'" in rollback["if"]
     assert "inputs.mode == 'rollback'" in rollback["if"]
     assert rollback["environment"] == {
-        "name": "production", "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
+        "name": "production",
+        "deployment": "${{ inputs.mode == 'rollback' }}",
+        "url": "${{ inputs.mode == 'rollback' && steps.rollback_verify.outputs.environment_url || steps.verify.outputs.environment_url }}",
     }
     assert "gpoint-production-release" in rollback["concurrency"]["group"]
     assert rollback["concurrency"]["cancel-in-progress"] is False
