@@ -706,7 +706,7 @@ jobs:
       - name: Restore absent GPoint Bot once from verified installed Core
         if: github.event_name == 'push' && inputs.mode != 'rollback'
         env:
-          GITHUB_EVENT_BEFORE: ${{ github.event.before || '' }}
+          BOT_AUTH_EVENT_BEFORE: ${{ github.event.before || '' }}
         run: |
           bash scripts/gpoint-bot-bootstrap.sh
       - name: Read live application version with Kamal
