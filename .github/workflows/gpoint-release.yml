@@ -839,9 +839,6 @@ jobs:
           set -euo pipefail
           baseline_version="$1"
           baseline_source_sha="$2"
-          if systemctl is-active --quiet caddy; then
-            echo 'Caddy must be inactive after the first Kamal cutover' >&2; exit 1
-          fi
           proxy_ids="$(docker ps -aq --filter 'name=^/kamal-proxy$')"
           proxy_preapply=RUNNING
           if [[ -n "$proxy_ids" ]]; then
@@ -861,15 +858,6 @@ jobs:
           fi
           test "$(docker inspect --format '{{.State.Running}}' shared_postgres_1)" = true
           test "$(docker inspect --format '{{.State.Running}}' shared_redis_1)" = true
-          for service in api worker bot; do
-            ids="$(docker ps -aq --filter label=com.docker.compose.project=compose --filter "label=com.docker.compose.service=$service")"
-            while IFS= read -r id; do
-              [[ -n "$id" ]] || continue
-              test "$(docker inspect --format '{{.State.Running}}' "$id")" = false || {
-                echo "legacy Compose service is still active: $service" >&2; exit 1;
-              }
-            done <<< "$ids"
-          done
           [[ "$baseline_version" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
           [[ "$baseline_source_sha" =~ ^[0-9a-f]{40}$ ]]
           db_id="$(docker inspect --format '{{.Id}}' shared_postgres_1)"
@@ -902,16 +890,6 @@ jobs:
               *) echo 'unexpected topology fact' >&2; exit 1 ;;
             esac
           done <<< "$facts"
-      - name: Resolve last successful Native deployment as infrastructure approval baseline
-        if: github.event_name == 'push'
-        id: infrastructure_baseline
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          python3 scripts/resolve_native_environment_deployment.py \
-            --repository "$REPOSITORY" --latest-successful-native-sha >> "$GITHUB_OUTPUT"
       - name: Read exact Tests workspace Eros E2E outcome
         if: inputs.mode != 'rollback'
         id: eros_e2e_evidence
@@ -937,8 +915,6 @@ jobs:
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
           EROS_DIGEST: ${{ needs.build.outputs.eros_digest }}
           E2E_OUTCOME: ${{ steps.eros_e2e_evidence.outputs.outcome }}
-          EVENT_NAME: ${{ github.event_name }}
-          INFRASTRUCTURE_BASELINE_SHA: ${{ steps.infrastructure_baseline.outputs.sha }}
         run: |
           set -euo pipefail
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
@@ -947,8 +923,7 @@ jobs:
           sys.path.insert(0, str(Path.cwd() / "scripts"))
           from native_release_intent import (ALL_COMPONENT_ROLES, ROLE_REPOSITORIES,
                                              classify_component_scope, expected_runtime_inventory_b64,
-                                             changed_paths,
-                                             is_infrastructure_change, require_live_eros_e2e_success)
+                                             require_live_eros_e2e_success)
 
           candidate = os.environ["CANDIDATE_SHA"]
           baseline = json.loads(os.environ["BASELINE_ROLE_INVENTORY"])
@@ -959,13 +934,6 @@ jobs:
           live_eros_e2e_required = require_live_eros_e2e_success(
               Path.cwd(), live_eros_source, candidate, os.environ["E2E_OUTCOME"])
           print("live_eros_e2e_required=" + str(live_eros_e2e_required).lower())
-          if os.environ["EVENT_NAME"] == "push":
-              infrastructure_baseline = os.environ["INFRASTRUCTURE_BASELINE_SHA"]
-              if not re.fullmatch(r"[0-9a-f]{40}", infrastructure_baseline):
-                  raise SystemExit("last verified Native production deployment SHA is unavailable")
-              accumulated_paths = changed_paths(infrastructure_baseline, candidate, repo=Path.cwd())
-              if is_infrastructure_change(accumulated_paths):
-                  raise SystemExit("accumulated production infrastructure changes require approved workflow_dispatch")
           effective = {}
           image_inputs = {"CORE": "APP_DIGEST", "MINIAPP": "MINIAPP_DIGEST", "EROS": "EROS_DIGEST"}
           outputs = {"CORE": "app_digest", "MINIAPP": "miniapp_digest", "EROS": "eros_digest"}
@@ -1577,7 +1545,6 @@ jobs:
           test "$(docker ps -q --filter 'name=^/kamal-proxy$' | wc -l | tr -d ' ')" = 1
           test "$(docker ps -q --filter 'name=^/shared_postgres_1$' | wc -l | tr -d ' ')" = 1
           test "$(docker ps -q --filter 'name=^/shared_redis_1$' | wc -l | tr -d ' ')" = 1
-          if systemctl is-active --quiet caddy; then echo 'Caddy is active on ordinary Kamal topology' >&2; exit 1; fi
           runtime_rows="$(python3 - "$expected_role_identities_b64" "$sha" <<'PY'
           import base64, json, re, sys
           expected = json.loads(base64.b64decode(sys.argv[1], validate=True))

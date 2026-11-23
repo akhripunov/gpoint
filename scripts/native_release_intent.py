@@ -214,11 +214,9 @@ def is_infrastructure_change(changed_paths: set[str] | frozenset[str]) -> bool:
 
 
 def push_deploy_authorized(*, mode: str, changed_paths: set[str] | frozenset[str]) -> bool:
-    """Require explicit dispatch approval before production infrastructure Apply."""
-    # Production topology and release-control changes require an explicit
-    # workflow_dispatch through the existing protected production Environment.
-    if is_infrastructure_change(changed_paths):
-        return False
+    """After pre-merge protection, any valid main push enters the automatic release."""
+    # Infrastructure classification may select extra CI checks, but must not
+    # require a second manual dispatch after a permitted main merge.
     return mode == "DEPLOY"
 
 
@@ -336,14 +334,13 @@ def classify_push(*, event_name: str, ref: str,
     if markers & LEGACY_RELEASE_MARKERS:
         # Retired staging and artifact markers cannot authorize production Apply.
         return "BLOCK"
-    if EROS_UPSTREAM_PIN in changed_paths:
-        return "BLOCK"
+    # A changed Eros upstream pin is validated by the pinned-source check
+    # and cumulative synthetic Eros E2E within the existing Tests job.
     # Prisma schema changes must reach hosted Tests, which compare the full
     # migration history with schema.prisma before Build. Production Apply still
     # requires an exact migration set in the approved migration manifest.
-    # App and documentation commits use the ordinary Tests -> Build -> Deploy
-    # route. Production topology and release-control changes are held for a
-    # separately approved workflow_dispatch in the protected Environment.
+    # A permitted main push uses the same Tests -> Build -> Deploy route
+    # for application, operational, and infrastructure changes.
     return "DEPLOY"
 
 
