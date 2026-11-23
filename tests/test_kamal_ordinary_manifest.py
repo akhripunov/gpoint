@@ -34,10 +34,6 @@ if args[0] == "inspect" and name == "kamal-proxy":
 elif args[0] == "inspect" and name in ("shared_postgres_1", "shared_redis_1"):
  ident="{DB_ID}" if name == "shared_postgres_1" else "{REDIS_ID}"
  print(json.dumps([{{"Id":ident,"State":{{"Running":True}}}}]))
-elif args[0] == "inspect" and name.startswith("legacy-"):
- service=name.split("-", 1)[1]
- running=(name.startswith("legacy-") and __import__("os").environ.get("ACTIVE_COMPOSE_SERVICE") == service)
- print(json.dumps([{{"Id":name,"State":{{"Running":running}}}}]))
 elif args[0] == "inspect" and name.startswith("gpoint-"):
  role,row=role_for(name)
  labels=dict(); labels["org.opencontainers.image.revision"]=row["sourceSha"]
@@ -52,14 +48,6 @@ elif args[0:2] == ["image", "inspect"]:
  row=role_for(args[2])[1]
  print(json.dumps(dict(debug=args[2], row=row)), file=sys.stderr)
  print(json.dumps([dict(RepoDigests=[row["repositoryDigest"]])]))
-elif args[0:2] == ["ps", "-aq"]:
- if (len(args) != 6 or args[2] != "--filter"
-     or args[3] != "label=com.docker.compose.project=compose"
-     or args[4] != "--filter" or not args[5].startswith("label=com.docker.compose.service=")):
-  raise SystemExit("invalid Docker filter argument contract")
- service=args[-1].split("=")[-1]
- prefix="legacy-"
- print(prefix+service)
 else: raise SystemExit(2)
 ''')
     docker.chmod(0o755)
@@ -158,9 +146,8 @@ def test_ordinary_manifest_binds_services_database_proxy_tls_and_routes(tmp_path
     assert {service["revision"] for service in manifest["runtimeServices"]} == {SHA}
     assert manifest["preservation"]["postgresContainerId"] == DB_ID
     assert manifest["preservation"]["redisContainerId"] == REDIS_ID
-    assert manifest["preservation"]["caddy"] == "INACTIVE"
-    assert manifest["preservation"]["legacyCompose"] == "STOPPED"
-    assert len(manifest["preservation"]["legacyComposeContainers"]) == 3
+    assert "caddy" not in manifest["preservation"]
+    assert "legacyCompose" not in manifest["preservation"]
     assert manifest["publicIngress"] == {"proxy": "kamal-proxy", "httpPort": 80, "httpsPort": 443,
                                          "tls": "PASS", "routes": "PASS"}
     assert "gsales" not in json.dumps(manifest).lower()
@@ -255,25 +242,12 @@ def test_ordinary_manifest_keeps_disabled_core_bot_absent_during_full_core_rollo
     assert {service["repositoryDigest"] for service in core} == {f"ghcr.io/akhripunov/gpoint-runtime@{APP}"}
 
 
-def test_ordinary_manifest_refuses_active_caddy_without_writing_output(tmp_path):
+def test_ordinary_manifest_does_not_depend_on_caddy_or_legacy_compose(tmp_path):
     result, output = run_ordinary(tmp_path, active_caddy=True)
-    assert result.returncode != 0
-    assert "Caddy must be inactive" in result.stderr
-    assert not output.exists()
-
-
-def test_ordinary_manifest_refuses_running_legacy_compose_worker(tmp_path):
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    setup_host_stubs(bin_dir)
-    output = tmp_path / "ordinary-manifest.json"
-    env = {**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}",
-           "ACTIVE_COMPOSE_SERVICE": "worker"}
-    result = subprocess.run([sys.executable, str(WRITER), *ordinary_args(output)],
-                            capture_output=True, text=True, env=env)
-    assert result.returncode != 0
-    assert "legacy Compose service must remain stopped: worker" in result.stderr
-    assert not output.exists()
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads(output.read_bytes())
+    assert "caddy" not in manifest["preservation"]
+    assert "legacyCompose" not in manifest["preservation"]
 
 
 def test_ordinary_manifest_refuses_database_migration_baseline_drift(tmp_path):

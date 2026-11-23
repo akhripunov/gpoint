@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -233,13 +232,6 @@ def main() -> int:
             "restartCount": container["RestartCount"],
         })
 
-    if not shutil.which("systemctl"):
-        raise SystemExit("cannot verify Caddy state without systemctl")
-    caddy = subprocess.run(["systemctl", "is-active", "--quiet", "caddy"], check=False)
-    if caddy.returncode == 0:
-        raise SystemExit("Caddy must be inactive on ordinary Kamal production topology")
-    if caddy.returncode != 3:
-        raise SystemExit("could not prove Caddy is inactive")
     for name, expected_id in (("shared_postgres_1", args.db_container_id),
                               ("shared_redis_1", args.redis_container_id)):
         container = docker_json("inspect", name)[0]
@@ -253,26 +245,9 @@ def main() -> int:
         bindings = ports.get(port) or []
         if not any(binding.get("HostPort") == port.split("/", 1)[0] for binding in bindings):
             raise SystemExit(f"Kamal Proxy does not own public port {port.split('/', 1)[0]}")
-    stopped_compose = []
-    for service in ("api", "worker", "bot"):
-        result = subprocess.run(["docker", "ps", "-aq", "--filter",
-                                 "label=com.docker.compose.project=compose", "--filter",
-                                 f"label=com.docker.compose.service={service}"],
-                                check=True, capture_output=True, text=True)
-        container_ids = [value for value in result.stdout.splitlines() if value]
-        if not container_ids:
-            raise SystemExit(f"expected stopped legacy Compose service is missing: {service}")
-        for container_id in container_ids:
-            container = docker_json("inspect", container_id)[0]
-            if container.get("State", {}).get("Running"):
-                raise SystemExit(f"legacy Compose service must remain stopped: {service}")
-            stopped_compose.append({"service": service, "containerId": container_id, "running": False})
     ordinary_preservation = {
         "postgresContainerId": args.db_container_id,
         "redisContainerId": args.redis_container_id,
-        "caddy": "INACTIVE",
-        "legacyCompose": "STOPPED",
-        "legacyComposeContainers": stopped_compose,
         "databaseMigrationsAppliedByRelease": bool(pending_migrations),
         "migrationCompatibility": "PASS",
     }

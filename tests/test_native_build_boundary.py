@@ -370,17 +370,19 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertNotIn("gpoint-g-sales-runtime", build_text)
         self.assertNotIn("id: gsales", build_text)
 
-    def test_ordinary_release_rejects_compose_topology_before_deploy(self):
+    def test_ordinary_release_preflights_live_kamal_data_topology_before_deploy(self):
         deploy = self.workflow["jobs"]["deploy"]
         steps = deploy["steps"]
         names = [step.get("name", "") for step in steps]
         preflight = next(i for i, name in enumerate(names) if name == "Verify installed Kamal topology before ordinary release")
         deploy_roles = next(i for i, name in enumerate(names) if name == "Deploy exact immutable images with stock Kamal")
         self.assertLess(preflight, deploy_roles)
-        self.assertIn("for service in api worker bot", steps[preflight]["run"])
-        self.assertNotIn("agata-api", steps[preflight]["run"])
+        self.assertNotIn("caddy", steps[preflight]["run"].lower())
+        self.assertNotIn("compose", steps[preflight]["run"].lower())
+        self.assertIn("kamal-proxy", steps[preflight]["run"])
         self.assertIn("shared_postgres_1", steps[preflight]["run"])
-        self.assertIn("compose.service=$service", steps[preflight]["run"])
+        self.assertIn("shared_redis_1", steps[preflight]["run"])
+        self.assertNotIn("agata-api", steps[preflight]["run"])
         self.assertNotIn("agata-memory-worker", steps[preflight]["run"])
 
     def test_stock_kamal_version_crosscheck_precedes_authoritative_docker_inspection(self):

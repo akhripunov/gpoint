@@ -774,8 +774,8 @@ def test_topology_preflight_allows_missing_bootstrap_roles_and_absent_proxy_only
     assert "gpoint-eros-relay-relay" not in inventory["run"]
     assert "ss -ltn" in topology["run"]
     assert 'publish=$port' in topology["run"] and 'for port in 80 443' in topology["run"]
-    assert "test -n \"$ids\" || { echo \"expected stopped legacy Compose service is missing" not in topology["run"]
-    assert "legacy Compose service is still active" in topology["run"]
+    assert "caddy" not in topology["run"].lower()
+    assert "compose" not in topology["run"].lower()
     assert "shared_postgres_1" in topology["run"] and "shared_redis_1" in topology["run"]
     assert "DB_MOUNTS_SHA256" in topology["run"] and "REDIS_MOUNTS_SHA256" in topology["run"]
     assert 'docker inspect --format \'{{.State.Running}}\' kamal-proxy' in topology["run"]
