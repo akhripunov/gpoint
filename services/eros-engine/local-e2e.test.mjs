@@ -66,6 +66,13 @@ test('synthetic E2E reports only safe durable provisioning retry diagnostics', (
   assert.doesNotMatch(runner, /GENOME_WRITE_SECRET.*console\.(?:log|error)/);
 });
 
+test('synthetic E2E signs Telegram initData with its disposable bot token', () => {
+  const runner = readFileSync(new URL('local-test-e2e.mjs', directory), 'utf8');
+  assert.match(runner, /createHmac\('sha256', 'WebAppData'\)/);
+  assert.match(runner, /params\.set\('hash', createHmac\('sha256', secret\)/);
+  assert.doesNotMatch(runner, /initData: 'synthetic local E2E'/);
+});
+
 test('only the disposable Eros migrator receives database CREATE privilege', () => {
   const init = readFileSync(new URL('local-test-init.sql', directory), 'utf8');
   const erosInit = init.split('\\connect gpoint_test')[0];

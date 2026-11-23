@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { createErosEngineClient, ErosAdapterError, erosGenomeCardFor, erosIdentityFor } from '../../apps/api/src/eros-adapter.ts';
 
@@ -24,9 +24,20 @@ async function request(url, { method = 'GET', token, body } = {}) {
 }
 
 async function authenticate() {
+  const params = new URLSearchParams({
+    auth_date: String(Math.floor(Date.now() / 1000)),
+    query_id: 'synthetic-local-e2e',
+    user: JSON.stringify({ id: 900000001, username: 'eros_test_dialogue', first_name: 'Synthetic' }),
+  });
+  const checkString = [...params.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`)
+    .join('\n');
+  const secret = createHmac('sha256', 'WebAppData').update(process.env.TELEGRAM_BOT_TOKEN ?? '').digest();
+  params.set('hash', createHmac('sha256', secret).update(checkString).digest('hex'));
   const response = await request(`${api}/auth/telegram`, {
     method: 'POST',
-    body: { initData: 'synthetic local E2E', devTelegramUserId: '900000001' },
+    body: { initData: params.toString() },
   });
   assert.equal(response.status, 201);
   assert.equal(response.data?.user?.id, '10000000-0000-4000-8000-000000000001');
