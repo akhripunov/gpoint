@@ -57,6 +57,13 @@ test('synthetic E2E loads Prisma from the API workspace package', () => {
   assert.match(runner, /requireApi\('@prisma\/client'\)/);
 });
 
+test('synthetic E2E reports only safe durable provisioning retry diagnostics', () => {
+  const runner = readFileSync(new URL('local-test-e2e.mjs', directory), 'utf8');
+  assert.match(runner, /LOCAL_E2E_GENOME_PROVISIONING_FAILURE=code:/);
+  assert.match(runner, /select: \{ attempts: true, lastErrorCode: true \}/);
+  assert.doesNotMatch(runner, /GENOME_WRITE_SECRET.*console\.(?:log|error)/);
+});
+
 test('only the disposable Eros migrator receives database CREATE privilege', () => {
   const init = readFileSync(new URL('local-test-init.sql', directory), 'utf8');
   const erosInit = init.split('\\connect gpoint_test')[0];

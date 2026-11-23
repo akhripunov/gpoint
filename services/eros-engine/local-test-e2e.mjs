@@ -111,6 +111,13 @@ async function connectSyntheticTelegramChannelAndProvisionGenome() {
       new_chat_member: { status: 'administrator', can_post_messages: true, can_manage_chat: true },
     });
     assert.equal(result.status, 'CONNECTED');
+    if (result.erosProvisioning !== 'READY') {
+      const job = await db.erosGenomeProvisioningJob.findUnique({
+        where: { creatorId: '20000000-0000-4000-8000-000000000002' },
+        select: { attempts: true, lastErrorCode: true },
+      });
+      console.error(`LOCAL_E2E_GENOME_PROVISIONING_FAILURE=code:${job?.lastErrorCode ?? 'no_retry_record'} attempts:${job?.attempts ?? 0}`);
+    }
     assert.equal(result.erosProvisioning, 'READY');
     const owner = await db.creatorOwner.findFirst({ where: { userId }, include: { creator: { include: { profile: true } } } });
     assert.ok(owner?.creator, 'verified channel connection creates and owns the Creator');
