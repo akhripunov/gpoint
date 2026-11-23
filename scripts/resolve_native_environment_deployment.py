@@ -41,9 +41,12 @@ def _current_attempt_deploy_job_urls(jobs: list[dict], *, repository: str,
         raise ValueError("current workflow attempt job list is invalid")
     matches = set()
     for job in jobs:
+        # GitHub Actions may report a lagging job status through the REST API
+        # even while this job is executing. The exact attempt and canonical
+        # job URL, not that eventually consistent status, identify the job.
+        # The associated Deployment must separately be in_progress.
         if (not isinstance(job, dict)
-                or job.get("name") != "Kamal production Deploy and Verify"
-                or job.get("status") != "in_progress"):
+                or job.get("name") != "Kamal production Deploy and Verify"):
             continue
         identifier = job.get("id")
         if not isinstance(identifier, int) or identifier <= 0:
