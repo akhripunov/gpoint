@@ -83,5 +83,26 @@
     ".release-authorizations/**",
     "scripts/**",
     "systemd/**"
+  ],
+  "integration_infrastructure": [
+    ".github/**",
+    ".kamal/**",
+    "config/deploy.yml",
+    "config/deploy.eros-api.yml",
+    "config/deploy.ollama.yml",
+    "config/deploy.eros.yml",
+    "config/deploy.miniapp.yml",
+    "infra/production/**",
+    ".release-authorizations/**",
+    "scripts/**",
+    "systemd/**",
+    "!.github/actionlint.yaml",
+    "!.github/workflows/sync-agents-to-linear.yml",
+    "!scripts/classify-release-prepush.py",
+    "!scripts/prepush.py",
+    "!scripts/check-kamal-configs.sh",
+    "!scripts/verify-eros-runtime-labels.py",
+    "!scripts/verify_native_eros_image.py",
+    "!scripts/verify_native_rollback_evidence.py"
   ]
 }

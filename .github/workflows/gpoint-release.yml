@@ -298,10 +298,10 @@ jobs:
         run: |
           pnpm test:release
       - name: Install Playwright Chromium
-        if: matrix.suite == 'workspace' && (steps.filter.outputs.miniapp == 'true' || steps.filter.outputs.infrastructure == 'true' || steps.filter.outputs.database == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
+        if: matrix.suite == 'workspace' && (steps.filter.outputs.miniapp == 'true' || steps.filter.outputs.integration_infrastructure == 'true' || steps.filter.outputs.database == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
         run: pnpm exec playwright install --with-deps chromium
       - name: Run Mini App end-to-end tests
-        if: matrix.suite == 'workspace' && (steps.filter.outputs.miniapp == 'true' || steps.filter.outputs.infrastructure == 'true' || steps.filter.outputs.database == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
+        if: matrix.suite == 'workspace' && (steps.filter.outputs.miniapp == 'true' || steps.filter.outputs.integration_infrastructure == 'true' || steps.filter.outputs.database == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
         run: pnpm test:e2e
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         if: matrix.suite == 'python'
@@ -338,7 +338,7 @@ jobs:
           "$install_dir/oras" version | grep -E 'Version:[[:space:]]+1\.3\.0([[:space:]]|$)' >/dev/null
           echo "ORAS_1_3_BIN=$install_dir/oras" >> "$GITHUB_ENV"
       - name: Detect pending schema dependencies before Build
-        if: matrix.suite == 'python' && (steps.filter.outputs.database == 'true' || steps.filter.outputs.infrastructure == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
+        if: matrix.suite == 'python' && (steps.filter.outputs.database == 'true' || steps.filter.outputs.integration_infrastructure == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
@@ -384,6 +384,7 @@ jobs:
           tests/test_docker_dependency_manifests.py
           tests/test_prepush_runner.py
           tests/test_release_scope_consistency.py
+          tests/test_ci_integration_scope.py
           tests/test_release_routing_matrix.py
           tests/test_backup_install_script.py
           tests/test_backup_restore_readiness.py tests/test_gpoint_scheduled_backup.py
@@ -402,7 +403,7 @@ jobs:
           tests/test_kamal_release_config.py
           tests/test_kamal_ordinary_manifest.py
       - name: Run isolated PostgreSQL 16 migration and integration suites
-        if: matrix.suite == 'python' && (steps.filter.outputs.database == 'true' || steps.filter.outputs.infrastructure == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
+        if: matrix.suite == 'python' && (steps.filter.outputs.database == 'true' || steps.filter.outputs.integration_infrastructure == 'true' || github.event_name == 'workflow_dispatch' || github.event.before == '0000000000000000000000000000000000000000')
         run: |
           unset DATABASE_URL SHADOW_DATABASE_URL
           python tests/integration/gpoint-chat-schema-docker.py --image pgvector/pgvector:0.8.6-pg16
