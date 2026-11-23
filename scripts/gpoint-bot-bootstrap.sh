@@ -28,7 +28,7 @@ details="$(python3 - "$authorization" "$before" <<'PY'
 import json, re, sys
 record=json.load(open(sys.argv[1], encoding="utf-8"))
 live=json.loads(sys.argv[2])
-allowed={".github/workflows/gpoint-release.yml", "scripts/gpoint-bot-bootstrap.sh", "scripts/native_release_intent.py",
+allowed={".github/workflows/gpoint-release.yml", "scripts/gpoint-bot-bootstrap.sh", "scripts/native_release_intent.py", "docs/release/automation.md",
          "tests/test_gpoint_bot_bootstrap.py", ".release-authorizations/gpoint-bot-restore-20261123-001.json"}
 risk=record.get("risk_contracts",{}).get("release_infrastructure",{})
 if (record.get("schema_version")!=3 or record.get("project")!="gpoint"
