@@ -65,7 +65,7 @@ case "$roles" in *[!A-Za-z0-9,_-]*) echo 'KAMAL_ROLES contains an invalid role c
 
 for role in $(printf '%s' "$roles" | tr ',' ' '); do
   case "$service:$role" in
-    gpoint-core:api) networks='gpoint_app:api,shared_internal:,gpoint_ollama_internal:' ;;
+    gpoint-core:api) networks='kamal:gpoint-core-api,gpoint_app:api,shared_internal:,gpoint_ollama_internal:' ;;
     gpoint-core:worker|gpoint-core:bot) networks='gpoint_app:,shared_internal:' ;;
     gpoint-miniapp:web) networks='gpoint_app:' ;;
     gpoint-eros-pilot:engine) networks='' ;;
