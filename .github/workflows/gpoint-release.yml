@@ -703,6 +703,93 @@ jobs:
           set -euo pipefail
           docker pull --platform linux/amd64 "$KAMAL_IMAGE"
           echo "KAMAL_IMAGE_PULL=PASS PLATFORM=linux/amd64 DIGEST=sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625"
+      - name: Audit existing GPoint Telegram token sources once (read only)
+        if: github.event_name == 'push' && inputs.mode != 'rollback'
+        env:
+          TOKEN_SOURCE_BEFORE_SHA: ${{ github.event.before || '' }}
+          GH_TELEGRAM_BOT_TOKEN_EXISTS: ${{ secrets.TELEGRAM_BOT_TOKEN != '' }}
+          GH_GPOINT_TELEGRAM_BOT_TOKEN_EXISTS: ${{ secrets.GPOINT_TELEGRAM_BOT_TOKEN != '' }}
+          GH_GPOINT_BOT_TOKEN_EXISTS: ${{ secrets.GPOINT_BOT_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          audit_path=docs/operations/gpoint-bot-token-source-audit-20261123.md
+          before="$TOKEN_SOURCE_BEFORE_SHA"
+          if [[ ! "$before" =~ ^[0-9a-f]{40}$ || ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'TOKEN_SOURCE_AUDIT=BLOCKED invalid push SHA' >&2; exit 1
+          fi
+          if [[ "$(git diff --name-status --no-renames "$before" "$GITHUB_SHA" -- "$audit_path")" != $'A\t'"$audit_path" ]]; then
+            echo 'TOKEN_SOURCE_AUDIT=SKIPPED one-time authorization not newly added'
+            exit 0
+          fi
+          echo 'TOKEN_SOURCE_AUDIT=STARTED read-only; no secret values printed'
+          echo "GITHUB_ENV_SECRET_TELEGRAM_BOT_TOKEN_PRESENT=$GH_TELEGRAM_BOT_TOKEN_EXISTS"
+          echo "GITHUB_ENV_SECRET_GPOINT_TELEGRAM_BOT_TOKEN_PRESENT=$GH_GPOINT_TELEGRAM_BOT_TOKEN_EXISTS"
+          echo "GITHUB_ENV_SECRET_GPOINT_BOT_TOKEN_PRESENT=$GH_GPOINT_BOT_TOKEN_EXISTS"
+          scanner="$(mktemp "$RUNNER_TEMP/gpoint-token-source-audit.XXXXXX.py")"
+          trap 'rm -f "$scanner"' EXIT
+          cat > "$scanner" <<'PY'
+          import os, re, json, pathlib, subprocess
+          from collections import defaultdict
+          roots=("/opt/gpoint/env","/opt/gpoint","/root","/home","/srv","/etc/gpoint")
+          avoid={".git","node_modules",".cache","cache","logs","media","pgdata","postgres","redis","ollama","backups","tmp",".venv","venv"}
+          def env_path(p):
+              n=p.name.lower()
+              return n==".env" or n.startswith(".env.") or n.endswith(".env") or n.startswith("production.env") or n.endswith(".env.bak") or n.endswith(".env.old")
+          def present(s):
+              for line in s.splitlines():
+                  m=re.match(r"^\s*(?:export\s+)?TELEGRAM_BOT_TOKEN\s*=\s*(.*?)\s*$",line)
+                  if m and m.group(1).strip().strip("\"'") and not m.group(1).lstrip().startswith("#"):
+                      return True
+              return False
+          found=set()
+          seen=set()
+          for root in roots:
+              top=pathlib.Path(root)
+              if not top.is_dir(): continue
+              for directory, dirs, files in os.walk(root,topdown=True,followlinks=False):
+                  relative=pathlib.Path(directory).relative_to(top)
+                  if len(relative.parts)>=5:
+                      dirs[:]=[]
+                  else:
+                      dirs[:]=[d for d in dirs if d not in avoid and not d.startswith("kube")]
+                  for name in files:
+                      p=pathlib.Path(directory)/name
+                      if str(p) in seen: continue
+                      seen.add(str(p))
+                      if not env_path(p) or p.is_symlink(): continue
+                      try:
+                          if not p.is_file() or p.stat().st_size>1_000_000: continue
+                          if present(p.read_text(encoding="utf8")):found.add(str(p))
+                      except (OSError,UnicodeError):pass
+          for p in sorted(found):
+              print("EXISTING_TOKEN_ENV_FILE="+p)
+          p=pathlib.Path("/opt/gpoint/env/production.env")
+          keys=("TELEGRAM_BOT_TOKEN","TELEGRAM_WEBHOOK_SECRET","PUBLIC_APP_URL","GPOINT_INGEST_URL")
+          try: lines=p.read_text().splitlines()
+          except (OSError,UnicodeError):lines=[]
+          for key in keys:
+              result=any(re.match(r"^\s*(?:export\s+)?"+re.escape(key)+r"\s*=\s*\S",line) for line in lines)
+              print("CURRENT_PRODUCTION_"+key+"_PRESENT="+str(result).lower())
+          try:
+              ps=subprocess.run(["docker","ps","-a","--format","{{.ID}}\t{{.Names}}"],capture_output=True,text=True,timeout=8)
+              if ps.returncode: raise OSError
+              for line in ps.stdout.splitlines():
+                  container_id,_,name=line.partition("\t")
+                  if not re.search(r"(^|[-_])bot($|[-_])",name,flags=re.I):continue
+                  v=subprocess.run(["docker","inspect",container_id],capture_output=True,text=True,timeout=9)
+                  if v.returncode:continue
+                  j=json.loads(v.stdout)[0]
+                  env=j.get("Config",{}).get("Env") or []
+                  if any(row.startswith("TELEGRAM_BOT_TOKEN=") and row.partition("=")[2] for row in env):
+                      print("EXISTING_TOKEN_DOCKER_CONTAINER="+name)
+          except (OSError,ValueError,subprocess.TimeoutExpired,IndexError):
+              print("DOCKER_ENV_AUDIT=UNAVAILABLE")
+          print("EXISTING_TOKEN_SOURCES="+str(len(found)))
+          PY
+          echo 'SOURCE_HOST=current_layer7'
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" python3 - < "$scanner"
+          echo 'TOKEN_SOURCE_AUDIT=COMPLETE_READ_ONLY'
+          
       - name: Restore absent GPoint Bot once from verified installed Core
         if: github.event_name == 'push' && inputs.mode != 'rollback'
         env:
