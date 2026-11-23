@@ -26,14 +26,14 @@ def test_bootstrap_can_only_run_on_new_authorization_push():
     source = SCRIPT.read_text()
     assert 'GITHUB_EVENT_NAME" != push' in source
     assert 'GITHUB_REF" != refs/heads/main' in source
-    assert '"$GITHUB_EVENT_BEFORE" "$GITHUB_SHA"' in source
+    assert '"$BOT_AUTH_EVENT_BEFORE" "$GITHUB_SHA"' in source
     assert "git diff --name-status --no-renames" in source
     assert "A\\t" in source
     env = os.environ.copy()
     env.update(GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_REF="refs/heads/main")
     result = subprocess.run(["bash", str(SCRIPT)], cwd=ROOT, env=env, text=True, capture_output=True)
     assert result.returncode == 0 and "SKIPPED event" in result.stdout
-    env.update(GITHUB_EVENT_NAME="push", GITHUB_SHA=SHA, GITHUB_EVENT_BEFORE=SHA)
+    env.update(GITHUB_EVENT_NAME="push", GITHUB_SHA=SHA, BOT_AUTH_EVENT_BEFORE=SHA)
     result = subprocess.run(["bash", str(SCRIPT)], cwd=ROOT, env=env, text=True, capture_output=True)
     assert result.returncode == 0 and "SKIPPED no new authorization" in result.stdout
 
@@ -63,7 +63,7 @@ def test_bootstrap_is_guarded_within_existing_protected_deploy():
     end = wf.index("      - name: Read live application version with Kamal", start)
     bootstrap = wf[start:end]
     assert "github.event_name == 'push'" in bootstrap
-    assert "GITHUB_EVENT_BEFORE:" in bootstrap
+    assert "BOT_AUTH_EVENT_BEFORE:" in bootstrap
     assert "bash scripts/gpoint-bot-bootstrap.sh" in bootstrap
     assert wf.index("      - name: Install verified Kamal SSH credentials") < start
     assert wf.index("      - name: Pull and verify pinned Kamal CLI image") < start
