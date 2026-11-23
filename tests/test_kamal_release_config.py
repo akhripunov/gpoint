@@ -297,10 +297,12 @@ def test_production_host_comes_from_exact_environment_and_known_hosts():
     assert "GPOINT_PRODUCTION_HOST: ${{ secrets.GPOINT_KAMAL_HOST }}" in workflow
     assert 'ssh-keygen -F "$GPOINT_PRODUCTION_HOST" -f "$HOME/.ssh/known_hosts"' in workflow
     assert 'ENV.fetch("GPOINT_PRODUCTION_HOST")' in configs
-    assert "--env GPOINT_PRODUCTION_HOST" in workflow
+    assert "--env GPOINT_PRODUCTION_HOST" in (ROOT / "scripts/run-pinned-kamal.sh").read_text()
+    assert "run-pinned-kamal.sh" in workflow
     native_workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     assert "GPOINT_APP_SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}" in native_workflow
-    assert "--env GPOINT_APP_SOURCE_SHA" in native_workflow
+    assert "--env GPOINT_APP_SOURCE_SHA" in (ROOT / "scripts/run-pinned-kamal.sh").read_text()
+    assert "run-pinned-kamal.sh" in native_workflow
 
 
 def test_native_release_rejects_non_layer7_ssh_target_before_remote_setup():
