@@ -41,6 +41,15 @@ Do not transfer secrets, personal data, sealed inputs, or private role-chat cont
 
 The root is role-neutral. Initialize exactly one role with `ROLE=DEV`, `ROLE=LAB`, or `ROLE=DEVOPS`; then read only its profile and required Linear context: [DEV](.codex/roles/dev.md), [LAB](.codex/roles/conversation-lab.md), or [DEVOPS](.codex/roles/devops.md). Without a role, ordinary research/auxiliary work is allowed, but no specialized workflow or role context loads. Titles do not select roles. Keep roles and histories separate; recommend a new chat when specialization changes unless OWNER directs otherwise. See [role initialization](docs/codex/role-bootstrap.md).
 
+## Permanent GitHub branches — OWNER decision 2026-11-24
+
+Only four permanent branches are allowed on the GPoint remote: `main`, `dev`, `release`, `dialogue-lab`.
+- `main`: stable, owner-authorized native production release source. Preserve the existing main push → hosted Tests → Build → protected Deploy → Runtime Verify workflow.
+- `dev`: shared development integration; local-first, no automatic publication or production deployment.
+- `release`: exact candidate preparation and review, not a second production pipeline. Only an explicitly authorized fast-forward publication to main starts the ordinary production release.
+- `dialogue-lab`: isolated Eros Dialogue Lab development/experiments, no automatic production deployment or inference authorization.
+- Use isolated local worktrees/temporary local branches for concurrent tasks when needed; never publish extra remote branches. Archive unmerged commits before removing obsolete remote refs. Do not merge superseded work solely to clean up branches. Preserve existing active worktrees, exact SHA evidence, owner authorization and all production gates.
+
 ## Instruction Changes — LOCAL-FIRST
 
 Keep approved instruction changes local with the code changes they govern. Publish
