@@ -1,0 +1,128 @@
+{
+  "schema_version": 3,
+  "project": "gpoint",
+  "environment": "production",
+  "authorization_id": "gpoint-eros-deploy-preflight-20261124-001",
+  "authorization_mode": "TASK_SCOPED_AUTO",
+  "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+  "source_instruction_identifier": "OWNER_GPOINT_EROS_PREFLIGHT_20261124",
+  "owner_task_reference": "Current GPoint chat: OWNER cancelled release, requested fix and new release, explicitly approved final architecture: Да, всё верно, делай вот так. Tests without Docker builds; Build images; Eros E2E in Deploy preflight exclusively when release affects Eros; no new job or duplicate Eros build.",
+  "task": "Move Eros E2E to existing protected Deploy preflight selected by exact live Eros deployment scope; reuse built images, preserve local harness and other release gates.",
+  "production_baseline_sha": "6ecab19b047cc25e74a126190c7d59b228db097c",
+  "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+  "allowed_paths": [
+    ".github/filters/native-release.json",
+    ".github/workflows/gpoint-release.yml",
+    ".release-authorizations/gpoint-direct-main-20261124-001.json",
+    ".release-authorizations/gpoint-eros-deploy-preflight-20261124-001.json",
+    "AGENTS.md",
+    "docs/RELEASE_AUTHORIZATION.md",
+    "docs/release/automation.md",
+    "scripts/native_release_intent.py",
+    "services/eros-engine/compose.release-test.yml",
+    "services/eros-engine/local-e2e.test.mjs",
+    "services/eros-engine/local-test-api-entrypoint.mjs",
+    "services/eros-engine/local-test-e2e.mjs",
+    "services/eros-engine/run-local-e2e.sh",
+    "tests/test_ci_integration_scope.py",
+    "tests/test_eros_native_database_workflow.py",
+    "tests/test_kamal_native_automatic_release.py",
+    "tests/test_kamal_release_config.py",
+    "tests/test_native_build_boundary.py",
+    "tests/test_native_change_surface.py",
+    "tests/test_native_release_intent.py",
+    "tests/test_simple_release_architecture.py"
+  ],
+  "allowed_operations": [
+    "integrate",
+    "preflight",
+    "deploy",
+    "verify",
+    "publish_evidence"
+  ],
+  "acceptance_criteria": [
+    "Exact current main and verified live component baseline; no concurrent release",
+    "Tests do not build Docker images",
+    "Build publishes the three exact candidate images once",
+    "Deploy preflight Eros E2E uses immutable same-run images and is mandatory only if the live component plan deploys Eros; no build inside preflight",
+    "All other existing Tests, production safety, migration, rollback and Runtime Verify gates remain"
+  ],
+  "exclusions": [
+    "No product changes, production data/schema modifications, secrets, permissions, MAXIBOT, unrelated runtime rollouts, force push"
+  ],
+  "risk_contracts": {
+    "release_infrastructure": {
+      "allowed_paths": [
+        ".github/filters/native-release.json",
+        ".github/workflows/gpoint-release.yml",
+        ".release-authorizations/gpoint-direct-main-20261124-001.json",
+        ".release-authorizations/gpoint-eros-deploy-preflight-20261124-001.json",
+        "AGENTS.md",
+        "docs/RELEASE_AUTHORIZATION.md",
+        "docs/release/automation.md",
+        "scripts/native_release_intent.py",
+        "services/eros-engine/compose.release-test.yml",
+        "services/eros-engine/local-e2e.test.mjs",
+        "services/eros-engine/local-test-api-entrypoint.mjs",
+        "services/eros-engine/local-test-e2e.mjs",
+        "services/eros-engine/run-local-e2e.sh",
+        "tests/test_ci_integration_scope.py",
+        "tests/test_eros_native_database_workflow.py",
+        "tests/test_kamal_native_automatic_release.py",
+        "tests/test_kamal_release_config.py",
+        "tests/test_native_build_boundary.py",
+        "tests/test_native_change_surface.py",
+        "tests/test_native_release_intent.py",
+        "tests/test_simple_release_architecture.py"
+      ],
+      "allowed_operations": [
+        "integrate",
+        "preflight",
+        "deploy",
+        "verify",
+        "publish_evidence"
+      ],
+      "baseline_sha": "6ecab19b047cc25e74a126190c7d59b228db097c",
+      "risk_description": "Explicit owner-approved routing correction; no app or runtime changes intended. Eros E2E remains mandatory for Eros rollout before mutation.",
+      "required_gates": [
+        "Exact current main and verified live component baseline; no concurrent release",
+        "Tests do not build Docker images",
+        "Build publishes the three exact candidate images once",
+        "Deploy preflight Eros E2E uses immutable same-run images and is mandatory only if the live component plan deploys Eros; no build inside preflight",
+        "All other existing Tests, production safety, migration, rollback and Runtime Verify gates remain"
+      ],
+      "backup_plan": "Preserve immutable prior Git commits and existing production backups; no new database operation authorized.",
+      "rollback_plan": "Stop on failure before Apply; inspect exact live state; no blind retries; use forward revert only with authorization and existing protected rollback if needed.",
+      "stop_conditions": [
+        "Failed validation, missing digest, unknown scope or runtime drift, active release, unexpected runtime changes, failed E2E or other protected gate"
+      ]
+    }
+  },
+  "preauthorized_commits": [
+    "4b52fbccc277105d267bc1a41352a3cce6ffef5b",
+    "fc1712016bac1613ab20aad704bb59dedf8b8781",
+    "229e7f78382200cf65facdd18fde9d3e6d112c97",
+    "bf186171b1f6949ad85ffcff73940f83bb5e8e04"
+  ],
+  "preauthorized_paths": [
+    ".github/filters/native-release.json",
+    ".github/workflows/gpoint-release.yml",
+    ".release-authorizations/gpoint-direct-main-20261124-001.json",
+    "AGENTS.md",
+    "docs/RELEASE_AUTHORIZATION.md",
+    "docs/release/automation.md",
+    "scripts/native_release_intent.py",
+    "services/eros-engine/local-e2e.test.mjs",
+    "services/eros-engine/local-test-e2e.mjs",
+    "tests/test_kamal_native_automatic_release.py",
+    "tests/test_kamal_release_config.py",
+    "tests/test_native_build_boundary.py",
+    "tests/test_native_change_surface.py",
+    "tests/test_native_release_intent.py",
+    "tests/test_simple_release_architecture.py"
+  ],
+  "state": "ACTIVE",
+  "revoked": false,
+  "consumed": false,
+  "owner_task_commitment_sha256": "7c847fa1fbe4d677ddde570f4c09d4201337da6f8af49367bba04a1e7d61574c"
+}
