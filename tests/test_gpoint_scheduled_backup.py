@@ -1,6 +1,10 @@
 import hashlib
 import importlib.util
 import json
+import re
+import subprocess
+import time
+from uuid import uuid4
 from pathlib import Path
 import shutil
 
@@ -14,6 +18,10 @@ RUNNER_PATH = Path(__file__).resolve().parents[1] / "scripts/gpoint-scheduled-ba
 RUNNER_SPEC = importlib.util.spec_from_file_location("gpoint_scheduled_backup_test", RUNNER_PATH)
 gpoint_scheduled_backup = importlib.util.module_from_spec(RUNNER_SPEC)
 RUNNER_SPEC.loader.exec_module(gpoint_scheduled_backup)
+
+
+RESTORE_SCRIPT = Path(__file__).resolve().parents[1] / "scripts/verify-gpoint-scheduled-backup-restore.sh"
+PG_IMAGE = "pgvector/pgvector:0.8.6-pg16"
 
 
 def make_manifest(tmp_path: Path, monkeypatch):
@@ -592,3 +600,143 @@ def test_backup_accepts_exact_healthy_database_container_without_compose_labels(
     facts = ["/shared_postgres_1", "a" * 64, "sha256:" + "b" * 64,
              "true", "healthy", "<no value>", "<no value>"]
     assert gpoint_scheduled_backup._verified_postgres_identity(facts) == ("a" * 64, "sha256:" + "b" * 64)
+
+
+def _restore_policy() -> str:
+    script = RESTORE_SCRIPT.read_text(encoding="utf-8")
+    match = re.search(r"(?ms)^archive_public_schema_restore_action\(\) \{\n.*?^\}", script)
+    assert match, "archive-specific public schema restore policy is missing"
+    return match.group()
+
+
+def _decision(toc: str):
+    return subprocess.run(
+        ["bash", "-c", _restore_policy() + '\narchive_public_schema_restore_action "$1"',
+         "restore-policy", toc],
+        capture_output=True, text=True, timeout=10,
+    )
+
+
+def test_restoration_decision_is_bound_to_actual_archive_toc():
+    # Full PG16 archives keep the default public schema.
+    full = "18; 1259 123 TABLE public AffiliateClick postgres\n"
+    assert _decision(full).stdout.strip() == "KEEP"
+    assert _decision(full).returncode == 0
+
+    # Schema-selected archives can carry a CREATE SCHEMA public TOC entry.
+    selective = "4; 2615 2200 SCHEMA - public pg_database_owner\n" + full
+    assert _decision(selective).stdout.strip() == "DROP"
+    assert _decision(selective).returncode == 0
+
+    # COMMENT and ACL for public must not be mistaken for CREATE SCHEMA.
+    comment = "3; 0 0 COMMENT - SCHEMA public pg_database_owner\n"
+    assert _decision(comment + full).stdout.strip() == "KEEP"
+    assert _decision(selective + selective).returncode != 0
+
+
+def test_restore_requires_pristine_bootstrap_public_and_actual_toc():
+    script = RESTORE_SCRIPT.read_text(encoding="utf-8")
+    assert "PUBLIC_SCHEMA_PRISTINE" in script
+    assert 'public_restore_action="$(archive_public_schema_restore_action "$restore_archive_toc")"' in script
+    assert 'if [[ "$public_restore_action" == DROP ]]; then' in script
+    assert "DROP SCHEMA public RESTRICT" in script
+    assert 'test "$public_restore_action" = KEEP' in script
+    assert "GPOINT_RESTORE_ARCHIVE_TOC=BLOCKED" in script
+    assert "sh -ec 'pg_restore --list; cat >/dev/null'" in script
+    assert 'pg_restore --exit-on-error --no-owner' in script
+
+
+def test_real_pg16_full_and_selected_archives_restore_without_data_loss(tmp_path):
+    """Use stock PostgreSQL tools and an isolated disposable Docker container."""
+    if not shutil.which("docker"):
+        pytest.skip("Docker CLI unavailable outside hosted integration runner")
+    name = "gpoint-public-restore-fixture-" + uuid4().hex[:12]
+
+    def docker(*args, input_bytes=None, check=True):
+        result = subprocess.run(["docker", *args], input=input_bytes, capture_output=True,
+                                timeout=45)
+        if check:
+            assert result.returncode == 0, (
+                "isolated PostgreSQL fixture command failed: "
+                + result.stderr.decode("utf-8", errors="replace")[:500]
+            )
+        return result
+
+    try:
+        docker("run", "--rm", "--pull=never", "--detach", "--name", name,
+               "--network", "none", "--env", "POSTGRES_USER=postgres",
+               "--env", "POSTGRES_DB=gpoint",
+               "--env", "POSTGRES_PASSWORD=disposable-fixture-only",
+               "--tmpfs", "/var/lib/postgresql/data:rw,exec,mode=0700",
+               "--tmpfs", "/var/run/postgresql:rw,exec,mode=0777", PG_IMAGE)
+        for _ in range(45):
+            if docker("exec", name, "pg_isready", "-U", "postgres", "-d", "gpoint",
+                      check=False).returncode == 0:
+                break
+            time.sleep(0.25)
+        else:
+            pytest.fail("isolated PostgreSQL 16 did not become ready")
+
+        docker("exec", name, "psql", "-Xq", "-v", "ON_ERROR_STOP=1",
+               "-U", "postgres", "-d", "gpoint", "-c",
+               'CREATE TABLE public."AffiliateClick" (id text PRIMARY KEY); '
+               'INSERT INTO public."AffiliateClick" VALUES (\'safe-test-row\'); '
+               'CREATE TABLE public._prisma_migrations (migration_name text); '
+               "INSERT INTO public._prisma_migrations VALUES ('test-head'); "
+               "CREATE SCHEMA agata; "
+               "CREATE TABLE agata.alembic_version(version_num text); "
+               "INSERT INTO agata.alembic_version VALUES ('agata0012'); "
+               "CREATE TABLE public.restore_pad AS SELECT i, "
+               "md5(i::text || random()::text) AS token "
+               "FROM generate_series(1,100000) AS i")
+
+        for name_suffix, options, expected_decision in (
+            ("full", (), "KEEP"), ("selected", ("--schema=public",), "DROP")
+        ):
+            dump = docker("exec", name, "pg_dump", "-U", "postgres",
+                          "-d", "gpoint", "--format=custom", "--no-owner",
+                          *options).stdout
+            assert dump
+            dump_file = tmp_path / (name_suffix + ".dump")
+            dump_file.write_bytes(dump)
+            # This pipeline intentionally uses pipefail, just like production
+            # age -> Docker. Without the drain, a multi-MB archive yields 141.
+            assert len(dump) > 1000000, "streaming test must exceed pipe capacity"
+            listing = subprocess.run(
+                ["bash", "-o", "pipefail", "-c",
+                 'cat "$1" | docker exec -i "$2" sh -ec '
+                 "'pg_restore --list; cat >/dev/null'",
+                 "restore-stream", str(dump_file), name],
+                capture_output=True, timeout=45,
+            )
+            assert listing.returncode == 0, (
+                "PG16 stream listing did not fully consume the archive"
+            )
+            toc = listing.stdout.decode()
+            action = _decision(toc)
+            assert action.returncode == 0, action.stderr
+            assert action.stdout.strip() == expected_decision
+            target = "restore_" + name_suffix
+            docker("exec", name, "createdb", "-U", "postgres", target)
+            if expected_decision == "DROP":
+                docker("exec", name, "psql", "-Xq", "-v", "ON_ERROR_STOP=1",
+                       "-U", "postgres", "-d", target, "-c",
+                       "DROP SCHEMA public RESTRICT")
+            docker("exec", "-i", name, "pg_restore", "--exit-on-error", "--no-owner",
+                   "-U", "postgres", "-d", target, input_bytes=dump)
+            restored = docker("exec", name, "psql", "-XqAt",
+                              "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d",
+                              target, "-c",
+                              'SELECT a.id || \':\' || m.migration_name FROM '
+                              'public."AffiliateClick" a CROSS JOIN '
+                              'public._prisma_migrations m').stdout.decode().strip()
+            assert restored == "safe-test-row:test-head"
+            if name_suffix == "full":
+                agata_head = docker("exec", name, "psql", "-XqAt",
+                                    "-v", "ON_ERROR_STOP=1", "-U", "postgres",
+                                    "-d", target, "-c",
+                                    "SELECT version_num FROM agata.alembic_version"
+                                    ).stdout.decode().strip()
+                assert agata_head == "agata0012"
+    finally:
+        docker("rm", "-f", name, check=False)

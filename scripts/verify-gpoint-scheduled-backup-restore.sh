@@ -623,11 +623,30 @@ else
     docker exec -i "$restore_container_id" psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint >/dev/null
 fi
 
-# The isolated PostgreSQL image creates an empty `public` schema during
-# initdb, while this archive contains its own CREATE SCHEMA entry. Remove only
-# the stock empty schema so pg_restore can recreate the archived schema ACL and
-# ownership. Never cascade: any unexpected object or customized schema state
-# fails closed before the restore continues.
+# Fresh PostgreSQL 16 databases have an empty public schema. Full pg_dump
+# relies on that existing schema; older schema-selected archives can contain
+# an explicit CREATE SCHEMA public. Detect the actual encrypted archive TOC.
+# Drain its remaining bytes after pg_restore --list: the list operation reads
+# only the header, and otherwise a large age stream fails with SIGPIPE 141.
+archive_public_schema_restore_action() {
+  local public_schema_count
+  public_schema_count="$(awk '/^[[:space:]]*[0-9]+;[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+SCHEMA - public[[:space:]]/ { n++ } END { print n+0 }' <<< "$1")"
+  case "$public_schema_count" in
+    0) echo KEEP ;;
+    1) echo DROP ;;
+    *) return 1 ;;
+  esac
+}
+if ! restore_archive_toc="$(age -d -i "$age_identity" "$restore_backup_file" |
+  docker exec -i "$restore_container_id" sh -ec 'pg_restore --list; cat >/dev/null')"; then
+  echo 'GPOINT_RESTORE_ARCHIVE_TOC=BLOCKED' >&2
+  exit 1
+fi
+if ! public_restore_action="$(archive_public_schema_restore_action "$restore_archive_toc")"; then
+  echo 'GPOINT_RESTORE_PUBLIC_SCHEMA_TOC=BLOCKED' >&2
+  exit 1
+fi
+# The existing pristine-bootstrap checks below stay mandatory in both cases.
 public_schema_state="$(docker exec -i "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 \
   -U gpoint_restore_admin -d gpoint <<'SQL'
 WITH public_schema AS (
@@ -672,10 +691,16 @@ END;
 SQL
 )"
 test "$public_schema_state" = PUBLIC_SCHEMA_PRISTINE
-docker exec "$restore_container_id" psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
-  -c 'DROP SCHEMA public RESTRICT' >/dev/null
-test "$(docker exec "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
-  -c "SELECT to_regnamespace('public') IS NULL")" = t
+if [[ "$public_restore_action" == DROP ]]; then
+  docker exec "$restore_container_id" psql -Xq -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
+    -c 'DROP SCHEMA public RESTRICT' >/dev/null
+  test "$(docker exec "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
+    -c "SELECT to_regnamespace('public') IS NULL")" = t
+else
+  test "$public_restore_action" = KEEP
+  test "$(docker exec "$restore_container_id" psql -XqAt -v ON_ERROR_STOP=1 -U gpoint_restore_admin -d gpoint \
+    -c "SELECT to_regnamespace('public') IS NOT NULL")" = t
+fi
 
 age -d -i "$age_identity" "$restore_backup_file" | \
   docker exec -i "$restore_container_id" pg_restore --exit-on-error --no-owner -U gpoint_restore_admin -d gpoint >/dev/null
