@@ -669,13 +669,22 @@ def test_real_pg16_full_and_selected_archives_restore_without_data_loss(tmp_path
                "--env", "POSTGRES_PASSWORD=disposable-fixture-only",
                "--tmpfs", "/var/lib/postgresql/data:rw,exec,mode=0700",
                "--tmpfs", "/var/run/postgresql:rw,exec,mode=0777", PG_IMAGE)
-        for _ in range(45):
-            if docker("exec", name, "pg_isready", "-U", "postgres", "-d", "gpoint",
-                      check=False).returncode == 0:
+        # pg_isready can pass against PostgreSQL's temporary initdb server,
+        # which the official entrypoint then intentionally stops. Match the
+        # production isolated-restore readiness gate: PID 1 must be postgres
+        # before accepting pg_isready, so test SQL never hits that restart gap.
+        for _ in range(90):
+            init_state = docker("exec", name, "sh", "-ec", "cat /proc/1/comm",
+                                check=False)
+            if (init_state.returncode == 0
+                    and init_state.stdout.strip() == b"postgres"
+                    and docker("exec", name, "pg_isready",
+                               "-U", "postgres", "-d", "gpoint",
+                               check=False).returncode == 0):
                 break
-            time.sleep(0.25)
+            time.sleep(0.5)
         else:
-            pytest.fail("isolated PostgreSQL 16 did not become ready")
+            pytest.fail("isolated PostgreSQL 16 main server did not become ready")
 
         docker("exec", name, "psql", "-Xq", "-v", "ON_ERROR_STOP=1",
                "-U", "postgres", "-d", "gpoint", "-c",
