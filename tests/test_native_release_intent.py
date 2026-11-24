@@ -87,6 +87,8 @@ def test_active_architecture_has_five_roles_and_three_images():
     ("apps/bot/src/main.ts", "CORE"),
     ("apps/miniapp/src/main.tsx", "MINIAPP"),
     ("services/eros-engine/runtime.rs", "EROS"),
+    ("services/eros-engine/local-test-e2e.mjs", "NONE"),
+    ("services/eros-engine/local-e2e.test.mjs", "NONE"),
     ("config/deploy.eros.yml", "EROS"),
     ("config/deploy.ollama.yml", "NONE"),
     ("config/deploy.eros-api.yml", "CORE"),
@@ -183,6 +185,8 @@ def test_recovery_authorization_metadata_is_known_non_runtime_and_push_classifie
     ("apps/api/src/main.ts", "CORE"),
     ("apps/miniapp/src/main.tsx", "MINIAPP"),
     ("services/eros-engine/runtime.rs", "EROS"),
+    ("services/eros-engine/local-test-e2e.mjs", "NONE"),
+    ("services/eros-engine/local-e2e.test.mjs", "NONE"),
     ("services/eros-engine/eros-pilot-embedding-relay.mjs", "NONE"),
     ("config/deploy.ollama.yml", "NONE"),
 ])

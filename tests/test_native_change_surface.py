@@ -43,6 +43,11 @@ def test_eros_e2e_filter_is_shared_and_excludes_independent_core_miniapp_and_rel
     import native_release_intent as intent
 
     assert intent.paths_match_filter({"services/eros-engine/src/main.rs"}, "eros_e2e")
+    for path in ("services/eros-engine/local-test-e2e.mjs", "services/eros-engine/local-e2e.test.mjs"):
+        assert intent.paths_match_filter({path}, "eros_e2e")
+        assert intent._component_paths(path) == set()
+        assert intent._known_non_runtime_path(path)
+
     assert intent.paths_match_filter({"config/deploy.eros.yml"}, "eros_e2e")
     assert intent.paths_match_filter({"config/deploy.eros-api.yml"}, "eros_e2e")
     assert not intent.paths_match_filter({"apps/api/src/messages.ts"}, "eros_e2e")

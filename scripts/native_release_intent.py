@@ -84,6 +84,8 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "scripts/verify_native_eros_image.py",
     "scripts/verify_native_rollback_evidence.py",
     "scripts/write-kamal-production-manifest.py",
+    "services/eros-engine/local-test-e2e.mjs",
+    "services/eros-engine/local-e2e.test.mjs",
     "services/gsales/tests/test_shared_worker_http.py",
     "systemd/gpoint-backup.service",
     "scripts/gpoint-backup-install.sh",

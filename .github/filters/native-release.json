@@ -43,7 +43,9 @@
     "!services/eros-engine/*.toml",
     "!services/eros-engine/eros-pilot-embedding-relay*",
     "!services/eros-engine/open-mac-ollama-tunnel.sh",
-    "!services/eros-engine/ollama-model.lock.json"
+    "!services/eros-engine/ollama-model.lock.json",
+    "!services/eros-engine/local-test-e2e.mjs",
+    "!services/eros-engine/local-e2e.test.mjs"
   ],
   "eros_config": [
     "services/eros-engine/*.toml",
