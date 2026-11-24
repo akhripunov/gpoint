@@ -808,6 +808,87 @@ jobs:
           ssh -T "root@$GPOINT_PRODUCTION_HOST" python3 - < "$scanner"
           echo 'TOKEN_SOURCE_AUDIT=COMPLETE_READ_ONLY'
           
+
+      - name: Verify existing DeepSeek provider sources once (read only)
+        if: github.event_name == 'push' && inputs.mode != 'rollback'
+        env:
+          DEEPSEEK_AUDIT_BEFORE: ${{ github.event.before || '' }}
+          GH_DEEPSEEK_KEY_PRESENT: ${{ secrets.DEEPSEEK_API_KEY != '' }}
+        run: |
+          set -euo pipefail
+          audit_path=docs/operations/gpoint-deepseek-provider-source-audit-20261124.md
+          before="$DEEPSEEK_AUDIT_BEFORE"
+          [[ "$before" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$(git diff --name-status --no-renames "$before" "$GITHUB_SHA" -- "$audit_path")" != "$(printf 'A\t%s' "$audit_path")" ]]; then
+            echo 'DEEPSEEK_SOURCE_AUDIT=SKIPPED'
+            exit 0
+          fi
+          echo "GITHUB_DEEPSEEK_API_KEY_PRESENT=$GH_DEEPSEEK_KEY_PRESENT"
+          ssh -T "root@$GPOINT_PRODUCTION_HOST" python3 - <<'PY'
+          import json, pathlib, re, subprocess, urllib.request, urllib.error
+          root = pathlib.Path("/opt/gpoint/env")
+          keys = {}
+          for base in ("eros-engine.env", "staging.env", "production.env", "eros.env"):
+              for p in sorted(root.glob(base + "*")):
+                  if p.is_symlink() or not p.is_file() or p.stat().st_size > 1000000:
+                      continue
+                  try:
+                      rows = p.read_text(encoding="utf-8").splitlines()
+                  except (OSError, UnicodeError):
+                      continue
+                  for row in rows:
+                      match = re.match(r"^\s*(?:export\s+)?DEEPSEEK_API_KEY\s*=\s*(.+?)\s*$", row)
+                      if not match:
+                          continue
+                      value = match.group(1).strip().strip("\"'")
+                      if value and not value.startswith("#"):
+                          keys.setdefault(str(p), value)
+                          break
+          def docker(*args):
+              p = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=12)
+              if p.returncode:
+                  raise RuntimeError("docker_readback_failed")
+              return p.stdout
+          try:
+              for row in docker("ps", "-a", "--format", "{{.ID}}\t{{.Names}}").splitlines():
+                  cid, _, name = row.partition("\t")
+                  if not name.startswith("gpoint-eros-pilot-engine-"):
+                      continue
+                  for v in json.loads(docker("inspect", cid))[0].get("Config", {}).get("Env", []):
+                      k, _, value = v.partition("=")
+                      if k == "DEEPSEEK_API_KEY" and value:
+                          keys["container:" + name] = value
+              for name in ("gpoint_eros_data", "gpoint_eros_api", "kamal"):
+                  try:
+                      n = json.loads(docker("network", "inspect", name))[0]
+                      print("NETWORK=" + name + " INTERNAL=" + str(n.get("Internal") is True).lower())
+                  except (RuntimeError, ValueError, IndexError, subprocess.TimeoutExpired):
+                      print("NETWORK=" + name + " UNAVAILABLE")
+          except (RuntimeError, ValueError, IndexError, subprocess.TimeoutExpired):
+              print("DOCKER_READBACK=UNAVAILABLE")
+          results = {}
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+          opener = urllib.request.build_opener(NoRedirect())
+          for source, key in keys.items():
+              if key not in results:
+                  if len(results) >= 4:
+                      results[key] = "NOT_PROBED_LIMIT"
+                  else:
+                      try:
+                          req = urllib.request.Request("https://api.deepseek.com/v1/models", headers={"Authorization": "Bearer " + key})
+                          with opener.open(req, timeout=10) as res:
+                              results[key] = "HTTP_" + str(res.status)
+                      except urllib.error.HTTPError as exc:
+                          results[key] = "HTTP_" + str(exc.code)
+                      except (OSError, ValueError):
+                          results[key] = "TRANSPORT_UNAVAILABLE"
+              print("DEEPSEEK_SOURCE=" + source + " STATUS=" + results[key])
+          print("DEEPSEEK_SOURCE_COUNT=" + str(len(keys)))
+          print("DEEPSEEK_SOURCE_AUDIT=COMPLETE_READ_ONLY")
+          PY
+
       - name: Restore absent GPoint Bot once from verified installed Core
         if: github.event_name == 'push' && inputs.mode != 'rollback'
         env:
