@@ -45,29 +45,14 @@
     "!services/eros-engine/open-mac-ollama-tunnel.sh",
     "!services/eros-engine/ollama-model.lock.json",
     "!services/eros-engine/local-test-e2e.mjs",
-    "!services/eros-engine/local-e2e.test.mjs"
+    "!services/eros-engine/local-e2e.test.mjs",
+    "!services/eros-engine/run-local-e2e.sh",
+    "!services/eros-engine/compose.release-test.yml",
+    "!services/eros-engine/local-test-api-entrypoint.mjs"
   ],
   "eros_config": [
     "services/eros-engine/*.toml",
     "services/eros-engine/ollama-model.lock.json"
-  ],
-  "eros_e2e": [
-    "services/eros-engine/**",
-    "!services/eros-engine/eros-pilot-embedding-relay*",
-    "!services/eros-engine/open-mac-ollama-tunnel.sh",
-    "config/deploy.eros.yml",
-    "config/deploy.eros-api.yml",
-    "config/deploy.ollama.yml",
-    "scripts/eros-native-database.py",
-    "scripts/eros-production-secrets.py",
-    "scripts/verify-eros-runtime-labels.py",
-    "scripts/verify_native_eros_image.py",
-    "scripts/verify-kamal-migration-parity.py",
-    "scripts/verify-kamal-production-baseline.py",
-    "scripts/native_release_intent.py",
-    ".github/filters/native-release.json",
-    ".github/workflows/gpoint-release.yml",
-    ".kamal/**"
   ],
   "database": [
     "packages/db/prisma/schema.prisma",

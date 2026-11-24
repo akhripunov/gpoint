@@ -116,33 +116,25 @@ def test_layer7_is_production_and_retired_staging_paths_cannot_deploy():
     assert any("prisma migrate deploy" in step.get("run", "") for step in deploy["steps"])
 
 
-def test_eros_builds_share_layers_without_publishing_the_test_image():
+def test_eros_image_is_built_once_and_preflight_reuses_exact_digest():
     jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
     test_steps = jobs["tests"]["steps"]
-    test_build = next(step for step in test_steps if step.get("id") == "eros_test_image")
-    verification = next(step for step in test_steps if "run-local-e2e.sh" in step.get("run", ""))
+    assert not any(step.get("uses", "").startswith("docker/build-push-action@") for step in test_steps)
+    assert not any("run-local-e2e.sh" in step.get("run", "") for step in test_steps)
     release_build = next(step for step in jobs["build"]["steps"] if step.get("id") == "eros")
-
-    test_inputs = test_build["with"]
     release_inputs = release_build["with"]
-    assert test_build["if"] == verification["if"]
-    assert test_steps.index(test_build) < test_steps.index(verification)
-    assert test_inputs["context"] == release_inputs["context"]
-    assert test_inputs["file"] == release_inputs["file"]
-    assert test_inputs["platforms"] == release_inputs["platforms"] == "linux/amd64"
-    assert test_inputs["load"] is True
-    assert test_inputs["push"] is False
-    assert "github.ref == 'refs/heads/main'" in test_inputs["cache-to"]
-    assert "github.event_name != 'pull_request'" in test_inputs["cache-to"]
-    assert "scope=gpoint-eros-test" in test_inputs["cache-from"]
-    assert "scope=gpoint-eros-test" in test_inputs["cache-to"]
-    assert "scope=gpoint-eros-test" in release_inputs["cache-from"]
-    assert "scope=gpoint-eros-release" in release_inputs["cache-from"]
-    assert "scope=gpoint-eros-release" in release_inputs["cache-to"]
-    assert "scope=gpoint-eros-test" not in release_inputs["cache-to"]
     assert release_inputs["push"] is True
     assert release_inputs["sbom"] is True
     assert release_inputs["provenance"] == "mode=max"
+    assert "scope=gpoint-eros-test" not in release_inputs["cache-from"]
+    deploy_steps = jobs["deploy"]["steps"]
+    verification = next(step for step in deploy_steps if step.get("id") == "eros_e2e")
+    assert "steps.component_plan.outputs.deploy_eros == 'true'" in verification["if"]
+    assert verification["env"]["EROS_DIGEST"] == "${{ steps.component_plan.outputs.eros_digest }}"
+    assert verification["env"]["APP_DIGEST"] == "${{ needs.build.outputs.app_digest }}"
+    assert 'run-local-e2e.sh "$image" "$core"' in verification["run"]
+    assert "docker build" not in verification["run"]
+    assert deploy_steps.index(verification) < next(i for i, step in enumerate(deploy_steps) if step.get("id") == "migration_apply")
 
 
 def test_build_unconditionally_publishes_all_three_images_and_live_inventory_scopes_apply():
@@ -175,15 +167,13 @@ def test_build_unconditionally_publishes_all_three_images_and_live_inventory_sco
 
     tests = workflow["jobs"]["tests"]
     assert "eros_e2e_required" not in tests["outputs"]
-    eros_scope = next(step for step in tests["steps"] if step.get("id") == "eros_scope")
-    assert eros_scope["if"] == "matrix.suite == 'workspace'"
-    evidence = next(step for step in deploy_steps if step.get("id") == "eros_e2e_evidence")
-    assert evidence["env"]["GH_TOKEN"] == "${{ github.token }}"
-    assert 'select(.name == "Tests (workspace)")' in evidence["run"]
-    assert 'select(.name == "Run stock Eros SQLx and synthetic conversation E2E")' in evidence["run"]
-    assert component_plan["env"]["E2E_OUTCOME"] == "${{ steps.eros_e2e_evidence.outputs.outcome }}"
-    assert "require_live_eros_e2e_success" in plan_run
-    assert "E2E_REQUIRED" not in plan_run
+    assert not any(step.get("id") == "eros_scope" for step in tests["steps"])
+    assert "E2E_OUTCOME" not in component_plan["env"]
+    evidence = next(step for step in deploy_steps if step.get("name") == "Require exact Eros preflight outcome before Apply")
+    assert evidence["env"]["E2E_OUTCOME"] == "${{ steps.eros_e2e.outcome }}"
+    assert evidence["env"]["DEPLOY_EROS"] == "${{ steps.component_plan.outputs.deploy_eros }}"
+    assert "true:success|false:skipped" in evidence["run"]
+    assert deploy_steps.index(evidence) < next(i for i, step in enumerate(deploy_steps) if step.get("id") == "migration_apply")
 
 
 def test_only_owner_can_deploy_exact_current_main_sha_automatically(tmp_path):

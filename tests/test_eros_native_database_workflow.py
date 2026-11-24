@@ -63,9 +63,7 @@ def test_ollama_network_and_eros_engine_start_before_core_api_uses_eros_config()
 def test_runtime_verify_uses_executable_eros_label_helper_and_ci_exercises_docker_templates():
     deploy = steps_for("deploy")
     verify = next(step for step in deploy if step.get("id") == "verify")
-    test_steps = steps_for("tests")
-    e2e = next(step for step in test_steps
-               if "run-local-e2e.sh" in step.get("run", ""))
+    e2e = next(step for step in deploy if step.get("id") == "eros_e2e")
     helper = (ROOT / "scripts/verify-eros-runtime-labels.py").read_text()
     assert "verify-eros-runtime-labels.py" in verify["run"]
     assert "verify-eros-runtime-labels.py" in e2e["run"]
@@ -248,18 +246,16 @@ def test_kamal_roles_share_the_private_eros_network_with_stable_service_aliases(
     assert model.count("http://gpoint-core-api:3000/eros-worker/v1/") == 2
 
 
-def test_hosted_stock_eros_e2e_uses_the_policy_approved_upstream_tag():
-    test_steps = steps_for("tests")
-    e2e = next(step["run"] for step in test_steps
-               if "run-local-e2e.sh" in step.get("run", ""))
-    build = next(step for step in test_steps if step.get("id") == "eros_test_image")
-    pin = next(step for step in test_steps if step.get("name") == "Read pinned Eros upstream source")
-    assert test_steps.index(pin) < test_steps.index(build)
-    assert "matrix.suite == 'workspace'" in build["if"]
-    assert "services/eros-engine/upstream.sha" in pin["run"]
-    assert build["with"]["tags"] == "gpoint-eros:stock-${{ env.EROS_UPSTREAM_SHA }}"
-    assert "#${{ env.EROS_UPSTREAM_SHA }}" in build["with"]["context"]
-    assert 'image="gpoint-eros:stock-$EROS_UPSTREAM_SHA"' in e2e
+def test_hosted_stock_eros_e2e_uses_exact_build_digest_and_approved_local_alias():
+    assert not any("run-local-e2e.sh" in step.get("run", "") for step in steps_for("tests"))
+    e2e = next(step for step in steps_for("deploy") if step.get("id") == "eros_e2e")
+    assert e2e["env"]["EROS_DIGEST"] == "${{ steps.component_plan.outputs.eros_digest }}"
+    assert e2e["env"]["APP_DIGEST"] == "${{ needs.build.outputs.app_digest }}"
+    assert 'services/eros-engine/upstream.sha' in e2e["run"]
+    assert 'image="gpoint-eros:stock-$upstream"' in e2e["run"]
+    assert 'docker tag "$eros" "$image"' in e2e["run"]
+    assert 'ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST' in e2e["run"]
+    assert 'run-local-e2e.sh "$image" "$core"' in e2e["run"]
 
 
 def test_ollama_preflight_does_not_send_docker_templates_over_ssh():

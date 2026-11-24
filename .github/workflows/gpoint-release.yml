@@ -144,44 +144,6 @@ jobs:
             ([.protection_rules[]?.type] | all(. == "required_reviewers" or . == "wait_timer" or . == "branch_policy"))
           ' <<< "$environment_json" >/dev/null
           echo "GPOINT_DIRECT_DEPLOYMENT_ENVIRONMENT=PASS" >> "$GITHUB_STEP_SUMMARY"
-      - name: Resolve whether cumulative changes require Eros E2E
-        id: eros_scope
-        if: matrix.suite == 'workspace'
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
-          RELEASE_MODE: ${{ inputs.mode || 'deploy' }}
-          PR_EROS_FILTER: ${{ steps.filter.outputs.eros_e2e || 'false' }}
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          required=false
-          if [[ "$EVENT_NAME" == pull_request ]]; then
-            required="$PR_EROS_FILTER"
-          elif [[ "$RELEASE_MODE" == rollback ]]; then
-            required=false
-          else
-            baseline="$(python3 scripts/resolve_native_environment_deployment.py \
-              --repository "$REPOSITORY" --latest-successful-native-sha 2>/dev/null \
-              | sed -n 's/^eros_source_sha=//p' || true)"
-            if [[ ! "$baseline" =~ ^[0-9a-f]{40}$ ]]; then
-              echo 'Eros baseline is unavailable; requiring Eros E2E as the fail-safe.'
-              required=true
-            else
-              required="$(python3 - "$baseline" "$EVENT_SHA" <<'PY'
-          from pathlib import Path
-          import sys
-          sys.path.insert(0, str(Path.cwd() / "scripts"))
-          from native_release_intent import eros_e2e_required
-          print(str(eros_e2e_required(Path.cwd(), sys.argv[1], sys.argv[2])).lower())
-          PY
-              )"
-            fi
-          fi
-          [[ "$required" == true || "$required" == false ]]
-          echo "required=$required" >> "$GITHUB_OUTPUT"
-          echo "GPOINT_EROS_E2E_REQUIRED=$required" >> "$GITHUB_STEP_SUMMARY"
       - name: Seed pinned Go 1.25.3 in Actions tool cache
         if: matrix.suite == 'workspace'
         env:
@@ -217,44 +179,6 @@ jobs:
           set -euo pipefail
           ./scripts/check-kamal-configs.sh
           ./scripts/test-kamal-proxy-integration.sh
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-        if: matrix.suite == 'workspace' && steps.eros_scope.outputs.required == 'true'
-        with:
-          platforms: linux/amd64
-      - name: Build stock Eros test image
-        id: eros_test_image
-        if: matrix.suite == 'workspace' && steps.eros_scope.outputs.required == 'true'
-        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
-        with:
-          context: https://github.com/etherfunlab/eros-engine.git#${{ env.EROS_UPSTREAM_SHA }}
-          file: docker/Dockerfile
-          platforms: linux/amd64
-          load: true
-          push: false
-          tags: gpoint-eros:stock-${{ env.EROS_UPSTREAM_SHA }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/etherfunlab/eros-engine
-            org.opencontainers.image.revision=${{ env.EROS_UPSTREAM_SHA }}
-            com.gpoint.eros.upstream-revision=${{ env.EROS_UPSTREAM_SHA }}
-            com.gpoint.source.revision=${{ github.sha }}
-            com.gpoint.eros.patch-set.sha256=none
-          cache-from: |
-            type=gha,scope=gpoint-eros-test,timeout=30s
-            type=gha,scope=gpoint-eros-release,timeout=30s
-          # PRs may read main's cache. Only runs on main export layers for releases.
-          cache-to: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && 'type=gha,scope=gpoint-eros-test,mode=max,timeout=45s,ignore-error=true' || '' }}
-      - name: Run stock Eros SQLx and synthetic conversation E2E
-        id: eros_e2e
-        if: matrix.suite == 'workspace' && steps.eros_scope.outputs.required == 'true'
-        run: |
-          set -euo pipefail
-          image="gpoint-eros:stock-$EROS_UPSTREAM_SHA"
-          test "$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
-          test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$EROS_UPSTREAM_SHA"
-          bash services/eros-engine/run-local-e2e.sh "$image"
-          test_container="$(docker create "$image")"
-          trap 'docker rm -f "$test_container" >/dev/null 2>&1 || true' EXIT
-          python3 scripts/verify-eros-runtime-labels.py "$test_container" "$EROS_UPSTREAM_SHA" none
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
         if: matrix.suite == 'workspace'
         with:
@@ -293,6 +217,9 @@ jobs:
       - name: Run workspace tests
         if: matrix.suite == 'workspace'
         run: pnpm -r --if-present test
+      - name: Validate Eros test harness without Docker builds
+        if: matrix.suite == 'workspace'
+        run: node --test services/eros-engine/local-e2e.test.mjs
       - name: Run canonical release and static-parent tests
         if: matrix.suite == 'workspace'
         run: |
@@ -528,9 +455,7 @@ jobs:
             com.gpoint.eros.upstream-revision=${{ env.EROS_UPSTREAM_SHA }}
             com.gpoint.eros.patch-set.sha256=none
             service=gpoint-eros-pilot
-          cache-from: |
-            type=gha,scope=gpoint-eros-test,timeout=30s
-            type=gha,scope=gpoint-eros-release,timeout=30s
+          cache-from: type=gha,scope=gpoint-eros-release,timeout=30s
           cache-to: type=gha,scope=gpoint-eros-release,mode=max,timeout=45s,ignore-error=true
           sbom: true
           provenance: mode=max
@@ -995,22 +920,6 @@ jobs:
               *) echo 'unexpected topology fact' >&2; exit 1 ;;
             esac
           done <<< "$facts"
-      - name: Read exact Tests workspace Eros E2E outcome
-        if: inputs.mode != 'rollback'
-        id: eros_e2e_evidence
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          outcome="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" --jq '
-            .jobs[] | select(.name == "Tests (workspace)") |
-            if .conclusion != "success" then "workspace_" + (.conclusion // "incomplete")
-            else
-              ([.steps[] | select(.name == "Run stock Eros SQLx and synthetic conversation E2E")][0].conclusion // "missing_e2e_step")
-            end')"
-          [[ "$outcome" =~ ^(success|skipped|failure|cancelled|missing_workspace_job|missing_e2e_step|workspace_[a-z]+|incomplete)$ ]]
-          echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
-          echo "GPOINT_TESTS_WORKSPACE_EROS_E2E_OUTCOME=$outcome" >> "$GITHUB_STEP_SUMMARY"
       - name: Plan exact component-scoped Kamal update from live baseline
         if: (inputs.mode != 'rollback')
         id: component_plan
@@ -1019,7 +928,6 @@ jobs:
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
           EROS_DIGEST: ${{ needs.build.outputs.eros_digest }}
-          E2E_OUTCOME: ${{ steps.eros_e2e_evidence.outputs.outcome }}
         run: |
           set -euo pipefail
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
@@ -1027,18 +935,12 @@ jobs:
           from pathlib import Path
           sys.path.insert(0, str(Path.cwd() / "scripts"))
           from native_release_intent import (ALL_COMPONENT_ROLES, ROLE_REPOSITORIES,
-                                             classify_component_scope, expected_runtime_inventory_b64,
-                                             require_live_eros_e2e_success)
+                                             classify_component_scope, expected_runtime_inventory_b64)
 
           candidate = os.environ["CANDIDATE_SHA"]
           baseline = json.loads(os.environ["BASELINE_ROLE_INVENTORY"])
           scope = classify_component_scope(Path.cwd(), candidate, baseline)
           scope_components = set(scope["scope"].split("+")) - {"NONE"}
-          live_eros = baseline["roles"].get("gpoint-eros-pilot-engine")
-          live_eros_source = live_eros.get("source_sha", "") if live_eros else ""
-          live_eros_e2e_required = require_live_eros_e2e_success(
-              Path.cwd(), live_eros_source, candidate, os.environ["E2E_OUTCOME"])
-          print("live_eros_e2e_required=" + str(live_eros_e2e_required).lower())
           effective = {}
           image_inputs = {"CORE": "APP_DIGEST", "MINIAPP": "MINIAPP_DIGEST", "EROS": "EROS_DIGEST"}
           outputs = {"CORE": "app_digest", "MINIAPP": "miniapp_digest", "EROS": "eros_digest"}
@@ -1102,6 +1004,40 @@ jobs:
               test "$(docker image inspect "$repository:$IMAGE_VERSION" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$CANDIDATE_SHA"
             fi
           done
+      - name: Run stock Eros SQLx and synthetic conversation E2E on built images
+        id: eros_e2e
+        if: steps.component_plan.outputs.deploy_eros == 'true' && inputs.mode != 'rollback'
+        env:
+          EROS_DIGEST: ${{ steps.component_plan.outputs.eros_digest }}
+          APP_DIGEST: ${{ needs.build.outputs.app_digest }}
+        run: |
+          set -euo pipefail
+          upstream="$(cat services/eros-engine/upstream.sha)"
+          [[ "$upstream" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ && "$APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          eros="ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST"
+          core="ghcr.io/akhripunov/gpoint-runtime@$APP_DIGEST"
+          test "$(docker image inspect "$eros" --format '{{index .Config.Labels "com.gpoint.source.revision"}}')" = "$CANDIDATE_SHA"
+          test "$(docker image inspect "$core" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$CANDIDATE_SHA"
+          image="gpoint-eros:stock-$upstream"
+          docker tag "$eros" "$image"
+          test "$(docker image inspect "$image" --format '{{.Id}}')" = "$(docker image inspect "$eros" --format '{{.Id}}')"
+          bash services/eros-engine/run-local-e2e.sh "$image" "$core"
+          test_container="$(docker create "$eros")"
+          trap 'docker rm -f "$test_container" >/dev/null 2>&1 || true' EXIT
+          python3 scripts/verify-eros-runtime-labels.py "$test_container" "$upstream" none
+          echo "GPOINT_EROS_DEPLOY_E2E=PASS DIGEST=$EROS_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+      - name: Require exact Eros preflight outcome before Apply
+        if: inputs.mode != 'rollback'
+        env:
+          DEPLOY_EROS: ${{ steps.component_plan.outputs.deploy_eros }}
+          E2E_OUTCOME: ${{ steps.eros_e2e.outcome }}
+        run: |
+          set -euo pipefail
+          case "$DEPLOY_EROS:$E2E_OUTCOME" in
+            true:success|false:skipped) ;;
+            *) echo 'Eros preflight outcome does not match live deployment scope' >&2; exit 1 ;;
+          esac
       - name: Verify candidate compatibility with the live database baseline
         if: (inputs.mode != 'rollback')
         id: migration_baseline

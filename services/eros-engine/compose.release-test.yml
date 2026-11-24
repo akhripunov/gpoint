@@ -1,0 +1,25 @@
+# Release preflight only: reuse immutable images, never build fixtures.
+services:
+  gpoint-api-migrate:
+    build: !reset null
+    image: ${GPOINT_E2E_CORE_IMAGE:?set exact candidate Core digest}
+    working_dir: /app
+  gpoint-api:
+    build: !reset null
+    image: ${GPOINT_E2E_CORE_IMAGE:?set exact candidate Core digest}
+    working_dir: /app
+    entrypoint: ["node", "/app/services/eros-engine/local-test-api-entrypoint.mjs"]
+    volumes:
+      - ./local-test-api-entrypoint.mjs:/app/services/eros-engine/local-test-api-entrypoint.mjs:ro
+      - ./local-test-api-routes.mjs:/app/services/eros-engine/local-test-api-routes.mjs:ro
+      - ./local-test-e2e.mjs:/app/services/eros-engine/local-test-e2e.mjs:ro
+  gpoint-worker:
+    build: !reset null
+    image: python:3.11-slim@sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce
+    working_dir: /workspace
+    entrypoint: ["python", "services/eros-engine/local-test-worker.py"]
+    environment:
+      PYTHONPATH: /test-deps
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ${GPOINT_E2E_WORKER_DEPS:?set isolated worker dependencies}:/test-deps:ro

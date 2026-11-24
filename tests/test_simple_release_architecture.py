@@ -108,11 +108,9 @@ def test_pr_candidate_runs_tests_without_production_build_or_deploy():
     assert {step.get("id") for step in images} == {"app", "miniapp", "eros"}
     assert all("if" not in step for step in images)
     tests = workflow["jobs"]["tests"]
-    eros_e2e = next(step for step in tests["steps"] if step.get("id") == "eros_e2e")
-    assert "steps.eros_scope.outputs.required == 'true'" in eros_e2e["if"]
-    eros_scope = next(step for step in tests["steps"] if step.get("id") == "eros_scope")
-    assert "steps.filter.outputs.eros_e2e" in eros_scope["env"]["PR_EROS_FILTER"]
-    assert "latest-successful-native-sha" in eros_scope["run"]
+    assert not any(step.get("id") in {"eros_test_image", "eros_e2e", "eros_scope"} for step in tests["steps"])
+    eros_e2e = next(step for step in deploy["steps"] if step.get("id") == "eros_e2e")
+    assert "steps.component_plan.outputs.deploy_eros == 'true'" in eros_e2e["if"]
     assert "eros_e2e" not in tests["outputs"]
     assert "tests" in build["needs"]
     assert "needs.tests.result == 'success'" in build["if"]

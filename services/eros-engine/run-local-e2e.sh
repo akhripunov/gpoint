@@ -1,9 +1,12 @@
 #!/bin/sh
 # LOCAL TEST ONLY: isolated API, Eros, deterministic Worker and tmpfs PostgreSQL.
 set -eu
-[ "$#" -eq 1 ] || { echo 'usage: run-local-e2e.sh <exact-built-eros-image-tag>' >&2; exit 2; }
+[ "$#" -eq 1 ] || [ "$#" -eq 2 ] || { echo 'usage: run-local-e2e.sh <exact-built-eros-image-tag> [immutable-core-image]' >&2; exit 2; }
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 image=$1
+release_core=${2:-}
+api_root=/workspace
+if [ -n "$release_core" ]; then api_root=/app; fi
 for cmd in docker python3 node; do command -v "$cmd" >/dev/null || { echo "required_tool_missing=$cmd" >&2; exit 2; }; done
 local_context=$(node "$repo/services/eros-engine/local-test-policy.mjs" context) || exit 2
 docker_config=${DOCKER_CONFIG:-$HOME/.docker}
@@ -12,6 +15,12 @@ image_id=$(node "$repo/services/eros-engine/local-test-policy.mjs" image "$image
 printf 'LOCAL_E2E_DOCKER_CONTEXT=LOCAL_UNIX:%s\n' "$local_context"
 printf 'LOCAL_E2E_EROS_IMAGE_ID=%s\n' "$image_id"
 printf 'LOCAL_E2E_STOCK_EROS_IMAGE=PASS source_sha=%s\n' "$(cat "$(dirname -- "$0")/upstream.sha")"
+if [ -n "$release_core" ]; then
+  [[ "$release_core" =~ ^ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}$ ]] || { echo 'immutable_candidate_core_required' >&2; exit 2; }
+  test "$(docker_local image inspect "$release_core" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
+  test "$(docker_local image inspect "$release_core" --format '{{index .Config.Labels "service"}}')" = gpoint-core
+  docker_local image inspect "$release_core" --format '{{json .RepoDigests}}' | grep -F "\"$release_core\"" >/dev/null
+fi
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/me36-local-e2e.XXXXXX"); chmod 700 "$tmp"
 project="me36_$(python3 -c 'import secrets;print(secrets.token_hex(10))')"
@@ -43,7 +52,16 @@ EROS_TEST_AGATA_TOKEN=$agata
 EROS_TEST_OPENROUTER_API_KEY=
 EOF
 unset admin provider signing jwt genome_write telegram_bot_token telegram_webhook_secret agata
-compose(){ env -i PATH="$PATH" HOME="$HOME" DOCKER_CONFIG="$docker_config" DOCKER_CONTEXT="$local_context" docker compose --env-file "$envfile" -p "$project" -f "$repo/services/eros-engine/compose.local-test.yml" --profile test "$@"; }
+if [ -n "$release_core" ]; then
+  printf 'GPOINT_E2E_CORE_IMAGE=%s\nGPOINT_E2E_WORKER_DEPS=%s\n' "$release_core" "$tmp/worker-deps" >> "$envfile"
+fi
+compose(){
+  if [ -n "$release_core" ]; then
+    env -i PATH="$PATH" HOME="$HOME" DOCKER_CONFIG="$docker_config" DOCKER_CONTEXT="$local_context" docker compose --env-file "$envfile" -p "$project" -f "$repo/services/eros-engine/compose.local-test.yml" -f "$repo/services/eros-engine/compose.release-test.yml" --profile test "$@"
+  else
+    env -i PATH="$PATH" HOME="$HOME" DOCKER_CONFIG="$docker_config" DOCKER_CONTEXT="$local_context" docker compose --env-file "$envfile" -p "$project" -f "$repo/services/eros-engine/compose.local-test.yml" --profile test "$@"
+  fi
+}
 . "$repo/services/eros-engine/local-e2e-image-tools.sh"
 run_manifest="$tmp/resources.manifest"
 printf 'project=%s\n' "$project" >"$run_manifest"
@@ -104,7 +122,7 @@ cleanup(){
     volumes=$(docker_local volume ls -q --filter "label=com.docker.compose.project=$project") || cleanup_failed=1
     if [ -n "${containers:-}${networks:-}${volumes:-}" ]; then cleanup_failed=1; fi
   fi
-  if [ -f "$run_manifest" ]; then
+  if [ -z "$release_core" ] && [ -f "$run_manifest" ]; then
     for service in gpoint-api gpoint-api-migrate gpoint-worker; do
       image_ref="${project}-${service}:latest"
       manifest_entry=$(awk -F'|' -v ref="$image_ref" '$1 == ref { print; exit }' "$run_manifest")
@@ -194,6 +212,31 @@ else
 fi
 run_owned=1
 mkdir -m 700 "$tmp/home"
+if [ -n "$release_core" ]; then
+  # Install existing pinned Worker dependencies into a disposable directory;
+  # use the upstream Python image directly, not a Docker build.
+  mkdir -m 755 "$tmp/worker-deps"
+  worker_base=python:3.11-slim@sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce
+  docker_local pull --platform linux/amd64 "$worker_base"
+  docker_local run --rm --platform linux/amd64 --user "$(id -u):$(id -g)" -e HOME=/tmp \
+    --mount "type=bind,src=$tmp/worker-deps,dst=/deps" "$worker_base" \
+    python -m pip install --no-cache-dir --only-binary=:all: --target /deps \
+    httpx==0.28.1 certifi==2026.7.22 anyio==4.15.1 httpcore==1.0.9 \
+    idna==3.20 h11==0.16.0 typing_extensions==4.16.0
+  # Validate merged Compose configuration before starting services.
+  compose --profile worker config --format json | python3 -c '
+import json, sys
+services = json.load(sys.stdin)["services"]
+if any(service.get("build") for service in services.values()):
+    raise SystemExit("release E2E must never build an image")
+for name in ("gpoint-api", "gpoint-api-migrate"):
+    if services[name]["image"] != sys.argv[1]:
+        raise SystemExit("release E2E Core digest mismatch")
+if services["gpoint-worker"]["image"] != sys.argv[2]:
+    raise SystemExit("release E2E Worker base mismatch")
+' "$release_core" "$worker_base"
+  echo "LOCAL_E2E_READY_IMAGES=PASS core=$release_core"
+else
 for service in gpoint-api gpoint-api-migrate gpoint-worker; do
   image_ref="${project}-${service}:latest"
   echo "LOCAL_E2E_IMAGE_BUILD=BEGIN service=$service"
@@ -206,10 +249,11 @@ for service in gpoint-api gpoint-api-migrate gpoint-worker; do
   printf '%s|%s|%s|%s\n' "$image_ref" "${image_identity%%|*}" "$project" "$service" >>"$run_manifest"
   echo "LOCAL_E2E_IMAGE_BUILD=PASS service=$service"
 done
+fi
 echo LOCAL_E2E_COMPOSE_START=BEGIN
 compose_started=1
-compose up -d --wait --wait-timeout 240 postgres
-compose up -d --no-deps eros-migrate
+compose up -d --wait --wait-timeout 240 --no-build postgres
+compose up -d --no-deps --no-build eros-migrate
 migrator_container=$(compose ps --all --quiet eros-migrate)
 [ -n "$migrator_container" ] || { echo LOCAL_E2E_STOCK_MIGRATIONS=FAIL reason=container_missing >&2; exit 1; }
 migrator_status=$(docker_local wait "$migrator_container")
@@ -228,7 +272,7 @@ GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA engine TO eros_runtime_no
 ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO eros_runtime_nobypass;
 ALTER DEFAULT PRIVILEGES FOR ROLE eros_migrator IN SCHEMA engine GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO eros_runtime_nobypass;
 SQL
-compose up -d --wait --wait-timeout 240
+compose up -d --wait --wait-timeout 240 --no-build
 echo LOCAL_E2E_COMPOSE_START=PASS
 eros_api_privileges=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -At <<'SQL'
 WITH relation_privileges AS (
@@ -290,13 +334,13 @@ api_image=$(compose images -q gpoint-api)
   -e NODE_ENV=test \
   -e DATABASE_URL='postgresql://gpoint_worker_test:local-only-gpoint-worker-test@127.0.0.1:5432/gpoint_test?schema=public' \
   -e EROS_WORKER_DISPOSABLE_TEST_DB=1 \
-  -v "$repo/apps/api/test:/workspace/apps/api/test:ro" \
-  -v "$repo/packages/db/prisma/migrations:/workspace/packages/db/prisma/migrations:ro" \
-  --entrypoint pnpm "$api_image" --filter @gpoint/api exec node --import tsx --test \
+  -v "$repo/apps/api/test:$api_root/apps/api/test:ro" \
+  -v "$repo/packages/db/prisma/migrations:$api_root/packages/db/prisma/migrations:ro" \
+  --workdir "$api_root" --entrypoint pnpm "$api_image" --filter @gpoint/api exec node --import tsx --test \
   test/eros-worker-contract.test.ts test/eros-worker-cancel.integration.test.ts
 echo LOCAL_E2E_GPOINT_QUEUE_RLS_TENANT_ISOLATION=PASS fixture_role=gpoint_worker_test
-compose --profile worker up -d --no-deps gpoint-worker
-if ! compose exec -w /workspace/apps/api -T gpoint-api node --import tsx /workspace/services/eros-engine/local-test-e2e.mjs >"$tmp/e2e.out" 2>&1; then tail -40 "$tmp/e2e.out" >&2; exit 1; fi
+compose --profile worker up -d --no-deps --no-build gpoint-worker
+if ! compose exec -w "$api_root/apps/api" -T gpoint-api node --import tsx "$api_root/services/eros-engine/local-test-e2e.mjs" >"$tmp/e2e.out" 2>&1; then tail -40 "$tmp/e2e.out" >&2; exit 1; fi
 cat "$tmp/e2e.out"
 genome_id=$(sed -n 's/^LOCAL_E2E_GPOINT_GENOME_MAPPING=PASS stable_uuid=//p' "$tmp/e2e.out" | tail -1)
 [[ "$genome_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || { echo LOCAL_E2E_GPOINT_GENOME_MAPPING=FAIL reason=invalid_reported_uuid >&2; exit 1; }
@@ -350,7 +394,7 @@ if [ "$memory_state" != "2" ]; then
 fi
 echo LOCAL_E2E_DREAMING_SCAN=PASS candidates=2
 echo LOCAL_E2E_DURABLE_MEMORY=PASS candidates=2
-if ! compose exec -w /workspace/apps/api -T gpoint-api node --import tsx /workspace/services/eros-engine/local-test-e2e.mjs --recall-only >"$tmp/recall.out" 2>&1; then tail -40 "$tmp/recall.out" >&2; exit 1; fi
+if ! compose exec -w "$api_root/apps/api" -T gpoint-api node --import tsx "$api_root/services/eros-engine/local-test-e2e.mjs" --recall-only >"$tmp/recall.out" 2>&1; then tail -40 "$tmp/recall.out" >&2; exit 1; fi
 cat "$tmp/recall.out"
 worker_id=$(compose --profile worker ps -a -q gpoint-worker)
 [ -n "$worker_id" ] || { echo LOCAL_E2E_WORKER_CONTAINER_MISSING=FAIL >&2; exit 1; }
@@ -371,8 +415,8 @@ fi
 echo LOCAL_E2E_EXISTING_GPOINT_WORKER_QUEUE=PASS
 docker_local rm "$worker_id" >/dev/null; worker_id=
 compose restart eros
-compose up -d --wait --wait-timeout 90 eros
-compose exec -w /workspace/apps/api -T gpoint-api node --import tsx /workspace/services/eros-engine/local-test-e2e.mjs --history-only
+compose up -d --wait --wait-timeout 90 --no-build eros
+compose exec -w "$api_root/apps/api" -T gpoint-api node --import tsx "$api_root/services/eros-engine/local-test-e2e.mjs" --history-only
 compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT 'EROS_CHAT_MESSAGES=' || count(*) FROM engine.chat_messages; SELECT 'EROS_DURABLE_MEMORY_ROWS=' || count(*) FROM engine.companion_memories WHERE category IS NOT NULL AND content LIKE 'SYNTH_%';"
 mapping_constraints=$(compose exec -T postgres psql -U eros_test_admin -d gpoint_test -Atc \
   "SELECT count(*) FROM pg_constraint WHERE contype = 'f' AND confdeltype = 'r' AND conname IN ('ErosRelationshipMapping_userId_fkey', 'ErosRelationshipMapping_creatorId_fkey');")

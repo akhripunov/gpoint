@@ -94,8 +94,8 @@ test('only the disposable Eros migrator receives database CREATE privilege', () 
 
 test('stock Eros migration creates engine schema before test runtime grants', () => {
   const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
-  const postgres = runner.indexOf('compose up -d --wait --wait-timeout 240 postgres');
-  const migration = runner.indexOf('compose up -d --no-deps eros-migrate');
+  const postgres = runner.indexOf('compose up -d --wait --wait-timeout 240 --no-build postgres');
+  const migration = runner.indexOf('compose up -d --no-deps --no-build eros-migrate');
   const wait = runner.indexOf('migrator_status=$(docker_local wait "$migrator_container")');
   const grants = runner.indexOf('GRANT USAGE ON SCHEMA engine TO eros_runtime, eros_runtime_nobypass;');
   const stack = runner.indexOf('compose up -d --wait --wait-timeout 240', grants + 1);
@@ -417,7 +417,8 @@ test('GitHub Prepare accepts only its pinned setup-docker Unix socket context', 
 test('Native release uses its pinned Buildx action and has no legacy Prepare workflow', () => {
   const workflow = readFileSync(new URL('../../.github/workflows/gpoint-release.yml', directory), 'utf8');
   assert.match(workflow, /uses: docker\/setup-buildx-action@[0-9a-f]{40}/);
-  assert.match(workflow, /name: Build stock Eros test image/);
+  assert.doesNotMatch(workflow, /name: Build stock Eros test image/);
+  assert.match(workflow, /name: Run stock Eros SQLx and synthetic conversation E2E on built images/);
   assert.doesNotMatch(workflow, /setup-docker-action|gpoint-setup-docker|gpoint-prepare\.yml/);
 });
 
@@ -502,7 +503,7 @@ test('stock Eros API E2E exercises owner-bound session listing and foreign-sessi
   assert.match(e2e, /client\.sessions\(foreignUserId\)/);
   assert.match(e2e, /client\.history\(foreignUserId, ownSession\.sessionId/);
   assert.match(e2e, /result\.reason\.status === 403/);
-  assert.match(runner, /exec -w \/workspace\/apps\/api -T gpoint-api node --import tsx \/workspace\/services\/eros-engine\/local-test-e2e\.mjs/);
+  assert.match(runner, /exec -w "\$api_root\/apps\/api" -T gpoint-api node --import tsx "\$api_root\/services\/eros-engine\/local-test-e2e\.mjs"/);
   assert.match(runner, /LOCAL_E2E_GPOINT_QUEUE_RLS_TENANT_ISOLATION=PASS fixture_role=gpoint_worker_test/);
   assert.match(runner, /LOCAL_E2E_EROS_DATABASE_USER_RLS=NOT_AVAILABLE stock_api_ownership_test=PASS/);
 });
@@ -760,4 +761,20 @@ printf 'status=%s output=%s\\n' "$status" "$output"
   assert.equal(empty.status, 0);
   assert.equal(empty.stdout.trim(), 'status=1 output=');
   assert.match(empty.stderr, /reason=empty_result/);
+});
+
+test('release E2E reuses built Core and a pinned Worker base without Docker builds', () => {
+  const runner = readFileSync(new URL('run-local-e2e.sh', directory), 'utf8');
+  const override = readFileSync(new URL('compose.release-test.yml', directory), 'utf8');
+  assert.equal((override.match(/build: !reset null/g) ?? []).length, 3);
+  assert.match(override, /gpoint-api-migrate:[\s\S]*?GPOINT_E2E_CORE_IMAGE/);
+  assert.match(override, /gpoint-api:[\s\S]*?GPOINT_E2E_CORE_IMAGE/);
+  assert.match(override, /python:3\.11-slim@sha256:[a-f0-9]{64}/);
+  assert.match(runner, /release E2E must never build an image/);
+  const ready = runner.indexOf('LOCAL_E2E_READY_IMAGES=PASS');
+  const local = runner.indexOf('LOCAL_E2E_IMAGE_BUILD=BEGIN');
+  assert.ok(ready >= 0 && local > ready && runner.slice(ready, local).includes('else'));
+  for (const line of runner.split('\n').filter(line => /^compose (?:--profile worker )?up /.test(line))) {
+    assert.match(line, /--no-build/);
+  }
 });

@@ -89,6 +89,9 @@ def test_active_architecture_has_five_roles_and_three_images():
     ("services/eros-engine/runtime.rs", "EROS"),
     ("services/eros-engine/local-test-e2e.mjs", "NONE"),
     ("services/eros-engine/local-e2e.test.mjs", "NONE"),
+    ("services/eros-engine/run-local-e2e.sh", "NONE"),
+    ("services/eros-engine/compose.release-test.yml", "NONE"),
+    ("services/eros-engine/local-test-api-entrypoint.mjs", "NONE"),
     ("config/deploy.eros.yml", "EROS"),
     ("config/deploy.ollama.yml", "NONE"),
     ("config/deploy.eros-api.yml", "CORE"),
@@ -187,6 +190,9 @@ def test_recovery_authorization_metadata_is_known_non_runtime_and_push_classifie
     ("services/eros-engine/runtime.rs", "EROS"),
     ("services/eros-engine/local-test-e2e.mjs", "NONE"),
     ("services/eros-engine/local-e2e.test.mjs", "NONE"),
+    ("services/eros-engine/run-local-e2e.sh", "NONE"),
+    ("services/eros-engine/compose.release-test.yml", "NONE"),
+    ("services/eros-engine/local-test-api-entrypoint.mjs", "NONE"),
     ("services/eros-engine/eros-pilot-embedding-relay.mjs", "NONE"),
     ("config/deploy.ollama.yml", "NONE"),
 ])
@@ -293,7 +299,7 @@ def test_baseline_rejects_role_version_not_bound_to_its_source_sha():
 def test_eros_upstream_pin_uses_pinned_source_and_existing_eros_e2e_gates():
     path = "services/eros-engine/upstream.sha"
     assert MODULE._component_paths(path) == {"EROS"}
-    assert MODULE.paths_match_filter({path}, "eros_e2e")
+    assert MODULE.paths_match_filter({path}, "eros_engine")
     mode = MODULE.classify_push(
         event_name="push", ref="refs/heads/main", changed_paths={path},
     )
@@ -340,49 +346,26 @@ def test_accumulated_infrastructure_uses_the_successful_deploy_sha_marker(tmp_pa
     assert not MODULE.is_infrastructure_change(applied)
 
 
-def test_eros_e2e_is_skipped_for_independent_components_and_required_for_eros_or_related_infra(tmp_path):
+def test_live_plan_selects_eros_only_for_actual_engine_rollout(tmp_path):
     repo, baseline = component_repo(tmp_path)
     miniapp = commit_change(repo, "apps/miniapp/src/page.tsx", "export const page = 2;\n")
-    assert not MODULE.eros_e2e_required(repo, baseline, miniapp)
+    assert not MODULE.classify_component_scope(repo, miniapp, make_inventory(baseline))["deploy_eros"]
     core = commit_change(repo, "apps/api/src/main.ts", "export const api = 2;\n")
-    assert not MODULE.eros_e2e_required(repo, baseline, core)
-    eros = commit_change(repo, "services/eros-engine/src/main.rs", "fn main() { println!(\"v2\"); }\n")
-    assert MODULE.eros_e2e_required(repo, baseline, eros)
-    eros_config = commit_change(repo, "config/deploy.eros.yml", "service: gpoint-eros-pilot\n")
-    assert MODULE.eros_e2e_required(repo, baseline, eros_config)
+    assert not MODULE.classify_component_scope(repo, core, make_inventory(baseline))["deploy_eros"]
+    harness = commit_change(repo, "services/eros-engine/run-local-e2e.sh", "# test-only change\n")
+    assert not MODULE.classify_component_scope(repo, harness, make_inventory(baseline))["deploy_eros"]
+    eros = commit_change(repo, "services/eros-engine/runtime.rs", "fn main() { println!(\"v2\"); }\n")
+    assert MODULE.classify_component_scope(repo, eros, make_inventory(baseline))["deploy_eros"]
 
 
-def test_eros_e2e_accumulates_after_failed_release_and_fails_safe_on_unknown_baseline(tmp_path):
+def test_live_engine_scope_accumulates_after_failed_release_and_rejects_unknown_baseline(tmp_path):
     repo, baseline = component_repo(tmp_path)
-    failed_eros_release = commit_change(repo, "services/eros-engine/src/main.rs", "fn main() {}\n// changed\n")
-    next_push = commit_change(repo, "apps/miniapp/src/page.tsx", "export const page = 3;\n")
-    assert failed_eros_release != baseline
-    assert MODULE.eros_e2e_required(repo, baseline, next_push)
-    assert MODULE.eros_e2e_required(repo, "f" * 40, next_push)
-
-
-@pytest.mark.parametrize("outcome", ["skipped", "failure", "missing"])
-def test_live_eros_baseline_divergence_blocks_without_successful_workspace_e2e(tmp_path, outcome):
-    repo, live_eros_sha = component_repo(tmp_path)
-    candidate = commit_change(repo, "services/eros-engine/src/main.rs", "fn main() {}\n// changed\n")
-    github_deployment_eros_sha = candidate
-
-    # The successful Deployment manifest claims the candidate Eros SHA, so the
-    # test planner alone would skip. The actual installed Docker/Kamal Eros SHA
-    # still has cumulative Eros changes and must require a successful E2E step.
-    assert not MODULE.eros_e2e_required(repo, github_deployment_eros_sha, candidate)
-    assert MODULE.eros_e2e_required(repo, live_eros_sha, candidate)
-    with pytest.raises(ValueError, match="live Eros baseline requires successful Eros E2E"):
-        MODULE.require_live_eros_e2e_success(repo, live_eros_sha, candidate, outcome)
-
-
-def test_live_eros_baseline_divergence_allows_successful_workspace_e2e(tmp_path):
-    repo, live_eros_sha = component_repo(tmp_path)
-    candidate = commit_change(repo, "services/eros-engine/src/main.rs", "fn main() {}\n// changed\n")
-
-    assert MODULE.require_live_eros_e2e_success(
-        repo, live_eros_sha, candidate, "success",
-    ) is True
+    commit_change(repo, "services/eros-engine/runtime.rs", "fn main() {}\n// changed\n")
+    candidate = commit_change(repo, "apps/miniapp/src/page.tsx", "export const page = 3;\n")
+    assert MODULE.classify_component_scope(repo, candidate, make_inventory(baseline))["deploy_eros"]
+    assert not MODULE.classify_component_scope(repo, candidate, make_inventory(candidate))["deploy_eros"]
+    with pytest.raises(ValueError, match="not an ancestor"):
+        MODULE.classify_component_scope(repo, candidate, make_inventory("f" * 40))
 
 
 def test_live_deploy_components_are_independently_scoped():

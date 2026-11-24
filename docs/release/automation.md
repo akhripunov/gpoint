@@ -30,8 +30,8 @@
 > согласованного обновления guard и matching host-key конфигурации; DNS lookup
 > сам по себе не подтверждает production identity.
 >
-> Необязательный PR запускает только review Tests (включая условные тестовые
-> Eros E2E images, если применимо), без production Build/GHCR publication,
+> Необязательный PR запускает только review Tests без Docker-сборок,
+> без production Build/GHCR publication,
 > production secrets и доступа к Deploy. Documentation-only
 > изменения также проходят все три Build, но live diff выбирает `NONE` и не
 > перезапускает runtime. Ошибки Build или неизвестный live baseline блокируют
@@ -241,8 +241,8 @@ job and do not receive production secrets. Only admitted owner main push or
 exact owner main deploy dispatch may enter Build.
 
 The required test matrix is exactly `workspace` and `python`. Workspace also
-contains actionlint, pinned Kamal configuration/proxy checks, and the conditional
-stock Eros SQLx/conversation test. Python owns the release-boundary tests and
+contains actionlint, pinned Kamal configuration/proxy checks and source-level Eros
+harness checks; no Docker images are built in Tests. Python owns the release-boundary tests and
 conditional isolated database suites. Every matrix run evaluates the same
 fail-closed release intent and push baseline so combined job outputs do not
 depend on matrix completion order. Every eligible main production candidate builds
@@ -294,11 +294,11 @@ set with checksum and compatibility proof, then requires the applicable backup
 and restore evidence. No pending migration means those gates are skipped. A
 failed Apply blocks Kamal; database downgrade is never automatic. Eros Engine
 changes require the exact candidate's stock Eros SQLx and synthetic conversation
-E2E. Core/MiniApp-only changes skip that long Eros suite. For main pushes, the
-workflow compares the candidate with the last successful Native source marker,
-so skipped/failed prior releases keep Eros checks pending; an unavailable or
-ambiguous marker requires the Eros suite. Live Kamal/Docker inventory still
-selects the actual Eros Deploy.
+E2E inside protected Deploy preflight, before database mutation or Kamal Apply.
+The actual live component plan selects Eros E2E only when Eros will be deployed.
+The test reuses the immutable Core and Eros images from Build, with a pinned
+Python Worker base; it never builds test images in the release. Core/MiniApp-only
+releases skip the full Eros E2E. Unknown live inventory blocks Apply.
 Infrastructure changes require explicit scoped OWNER approval and applicable risk
 contract; an authorized main push uses the same protected Deploy gates.
 
@@ -526,7 +526,7 @@ or hosted tests as production acceptance.
 
 ## Local test selection under FULL
 
-FULL is a risk level, not a mandate to run every local test. `classify-release-prepush.py` remains the canonical FAST/FULL procedure. Hosted CI uses the pinned `dorny/paths-filter` action and `.github/filters/native-release.json` as the single path map. PR Eros E2E selection uses its `eros_e2e` filter; main uses the same filter against changes accumulated since the last successful Native deployment, with E2E as the fail-safe when the marker cannot be verified. Build always creates three images. Deploy compares exact candidate changes with each component's installed Kamal/Docker source SHA and fails closed on unknown paths or ambiguous live inventory. PostgreSQL, Redis, Ollama and Kamal Proxy remain infrastructure, not images. AGATA and Eros Relay are outside the active runtime map.
+FULL is a risk level, not a mandate to run every local test. `classify-release-prepush.py` remains the canonical FAST/FULL procedure. Hosted CI uses the pinned `dorny/paths-filter` action and `.github/filters/native-release.json` as the single path map. Full Eros E2E runs in Deploy preflight only when the verified live plan selects Eros; it reuses the same-run Build images without rebuilding. Build always creates three images. Deploy compares exact candidate changes with each component's installed Kamal/Docker source SHA and fails closed on unknown paths or ambiguous live inventory. PostgreSQL, Redis, Ollama and Kamal Proxy remain infrastructure, not images. AGATA and Eros Relay are outside the active runtime map.
 
 `dorny/paths-filter` accepts one exact commit SHA as `base`. PR `base` is the exact target SHA; push filters use the event's `before` SHA. GitHub's pull-request read permission lets the pinned action obtain PR file changes. A single action invocation cannot compare each production component against its independently installed SHA. The minimal Python adapter therefore consumes the same JSON filter definitions for cumulative per-component diffs after read-only Kamal/Docker inventory; it contains no second component path table. This preserves skipped changes and rejects unmapped/deleted inputs. See the [`dorny/paths-filter` input and output contract](https://github.com/dorny/paths-filter#usage).
 

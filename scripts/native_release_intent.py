@@ -86,6 +86,9 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "scripts/write-kamal-production-manifest.py",
     "services/eros-engine/local-test-e2e.mjs",
     "services/eros-engine/local-e2e.test.mjs",
+    "services/eros-engine/run-local-e2e.sh",
+    "services/eros-engine/compose.release-test.yml",
+    "services/eros-engine/local-test-api-entrypoint.mjs",
     "services/gsales/tests/test_shared_worker_http.py",
     "systemd/gpoint-backup.service",
     "scripts/gpoint-backup-install.sh",
@@ -184,33 +187,6 @@ def paths_match_filter(paths: set[str] | frozenset[str], filter_name: str) -> bo
     if not isinstance(patterns, list):
         raise ValueError("unknown canonical path filter")
     return any(_path_filter_matches(path, patterns) for path in paths)
-
-
-def eros_e2e_required(repo: Path, baseline: str, candidate: str) -> bool:
-    """Fail safe: require Eros E2E when cumulative Eros impact is unclear."""
-    if not EXACT_SHA.fullmatch(baseline or "") or not EXACT_SHA.fullmatch(candidate or ""):
-        return True
-    if baseline == candidate:
-        return False
-    ancestor = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", baseline, candidate], cwd=repo,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    if ancestor.returncode:
-        return True
-    try:
-        return paths_match_filter(changed_paths(baseline, candidate, repo=repo), "eros_e2e")
-    except (OSError, subprocess.CalledProcessError, ValueError):
-        return True
-
-
-def require_live_eros_e2e_success(repo: Path, live_baseline: str, candidate: str,
-                                 step_outcome: str) -> bool:
-    """Fail closed when live Eros changes lack a successful workspace E2E step."""
-    required = eros_e2e_required(repo, live_baseline, candidate)
-    if required and step_outcome != "success":
-        raise ValueError("live Eros baseline requires successful Eros E2E")
-    return required
 
 
 def is_infrastructure_change(changed_paths: set[str] | frozenset[str]) -> bool:
@@ -338,8 +314,8 @@ def classify_push(*, event_name: str, ref: str,
     if markers & LEGACY_RELEASE_MARKERS:
         # Retired staging and artifact markers cannot authorize production Apply.
         return "BLOCK"
-    # A changed Eros upstream pin is validated by the pinned-source check
-    # and cumulative synthetic Eros E2E within the existing Tests job.
+    # A changed Eros upstream pin is validated by Build and the exact
+    # synthetic Eros E2E in protected Deploy preflight when Eros is selected.
     # Prisma schema changes must reach hosted Tests, which compare the full
     # migration history with schema.prisma before Build. Production Apply still
     # requires an exact migration set in the approved migration manifest.

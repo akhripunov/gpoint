@@ -144,7 +144,7 @@ await Promise.all([
 const api = spawn(
   'pnpm',
   ['--filter', '@gpoint/api', 'exec', 'tsx', 'src/main.ts'],
-  { cwd: '/workspace', env: process.env, stdio: 'inherit' },
+  { cwd: new URL('../../', import.meta.url), env: process.env, stdio: 'inherit' },
 );
 
 for (const signal of ['SIGINT', 'SIGTERM']) {

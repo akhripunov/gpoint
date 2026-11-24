@@ -144,12 +144,10 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             "mode": "${{ steps.intent.outputs.mode }}",
             "deploy": "${{ steps.intent.outputs.deploy }}",
         })
-        eros_scope = next(step for step in tests["steps"] if step.get("id") == "eros_scope")
-        self.assertEqual(eros_scope.get("if"), "matrix.suite == 'workspace'")
         required_steps = {
             "Validate GitHub Actions workflow": "workspace",
             "Validate pinned Kamal configs and shared proxy routing": "workspace",
-            "Run stock Eros SQLx and synthetic conversation E2E": "workspace",
+            "Validate Eros test harness without Docker builds": "workspace",
             "Build and typecheck workspace": "workspace",
             "Run Mini App end-to-end tests": "workspace",
             "Run workflow, Native First and Kamal boundary tests": "python",
@@ -158,15 +156,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         steps = {step.get("name"): step for step in tests["steps"]}
         for name, suite in required_steps.items():
             self.assertIn(f"matrix.suite == '{suite}'", steps[name]["if"])
-        eros = next(step for step in tests["steps"] if step.get("id") == "eros_test_image")
-        self.assertIn("matrix.suite == 'workspace'", eros["if"])
-        self.assertIn("steps.eros_scope.outputs.required == 'true'", eros["if"])
-        e2e = steps["Run stock Eros SQLx and synthetic conversation E2E"]
-        self.assertEqual(eros["if"], e2e["if"])
-        scope = next(step for step in tests["steps"] if step.get("id") == "eros_scope")
-        self.assertIn("steps.filter.outputs.eros_e2e", scope["env"]["PR_EROS_FILTER"])
-        self.assertIn("latest-successful-native-sha", scope["run"])
-        self.assertIn("eros_e2e_required", scope["run"])
+        self.assertFalse(any(step.get("uses", "").startswith("docker/build-push-action@") for step in tests["steps"]))
+        self.assertFalse(any("run-local-e2e.sh" in step.get("run", "") for step in tests["steps"]))
         self.assertNotIn("Run Eros Relay unit tests", steps)
         python = [steps[name] for name, suite in required_steps.items() if suite == "python"]
         for step in python:
@@ -203,25 +194,27 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertNotIn("INFRASTRUCTURE_BASELINE_SHA", plan["env"])
         self.assertNotIn("is_infrastructure_change", plan["run"])
         self.assertIn("classify_component_scope", plan["run"])
-        self.assertIn("require_live_eros_e2e_success", plan["run"])
+        self.assertNotIn("E2E_OUTCOME", plan["env"])
         self.assertEqual(plan["env"]["APP_DIGEST"], "${{ needs.build.outputs.app_digest }}")
         self.assertEqual(plan["env"]["MINIAPP_DIGEST"], "${{ needs.build.outputs.miniapp_digest }}")
         self.assertEqual(plan["env"]["EROS_DIGEST"], "${{ needs.build.outputs.eros_digest }}")
 
-    def test_cumulative_engine_scope_runs_e2e_and_build_requires_same_run_tests_success(self):
+    def test_live_engine_scope_runs_e2e_only_after_same_run_build_and_before_mutation(self):
         tests = self.workflow["jobs"]["tests"]
-        steps = {step.get("id"): step for step in tests["steps"] if step.get("id")}
-        self.assertNotIn("dispatch_build_scope", steps)
-        self.assertNotIn("infrastructure_baseline", steps)
-        self.assertIn("steps.eros_scope.outputs.required == 'true'", steps["eros_test_image"]["if"])
-        self.assertEqual(steps["eros_test_image"]["if"], steps["eros_e2e"]["if"])
-        self.assertNotIn("eros_e2e", tests["outputs"])
+        self.assertFalse(any(step.get("id") in {"eros_test_image", "eros_e2e", "eros_scope"} for step in tests["steps"]))
         build = self.workflow["jobs"]["build"]
         self.assertIn("tests", build["needs"])
         self.assertIn("needs.tests.result == 'success'", build["if"])
-        self.assertIn("needs.tests.outputs.deploy == 'true'", build["if"])
-        self.assertFalse(any(step.get("name") == "Require exact-candidate Eros test evidence"
-                             for step in build["steps"]))
+        deploy = self.workflow["jobs"]["deploy"]
+        self.assertIn("needs.build.result == 'success'", deploy["if"])
+        steps = deploy["steps"]
+        e2e = next(step for step in steps if step.get("id") == "eros_e2e")
+        self.assertEqual(e2e["if"], "steps.component_plan.outputs.deploy_eros == 'true' && inputs.mode != 'rollback'")
+        evidence = next(step for step in steps if step.get("name") == "Require exact Eros preflight outcome before Apply")
+        self.assertIn("true:success|false:skipped", evidence["run"])
+        self.assertLess(steps.index(e2e), steps.index(evidence))
+        for name in ("deployment", "migration_apply", "eros_database", "kamal_apply"):
+            self.assertLess(steps.index(evidence), next(i for i, step in enumerate(steps) if step.get("id") == name))
 
     def test_no_build_job_step_performs_duplicate_actions_run_lookup(self):
         steps = self.workflow["jobs"]["build"]["steps"]

@@ -15,7 +15,7 @@ Effective 2026-10-06 by explicit OWNER decision; applies to future releases.
 
 Since the explicit OWNER decision of 2026-11-24, an ordinary release uses a direct OWNER-authorized push to `main`, not a mandatory PR. Optional PRs run Tests only (no production Build/Deploy). The repository retains deletion and non-fast-forward protection; the repository owner is the only authorized main-push release actor and triggering actor. The direct push is the release trigger described in
 `docs/release/automation.md`: Workspace and Python tests run once, followed by
-immutable Build, stock Kamal Deploy and Runtime Verify. Known application,
+immutable Build, stock Kamal Deploy and Runtime Verify. No Docker builds occur in Tests. The existing protected Deploy preflight runs full Eros E2E only when the live component plan selects Eros, using the already built exact images before production mutation. Known application,
 test, documentation and release-tooling paths may ship together. A second
 manual deploy is not required just because the commit includes operational
 files. LOCAL-FIRST still requires explicit publication/production authority;
