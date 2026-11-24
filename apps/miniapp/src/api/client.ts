@@ -60,7 +60,6 @@ export const messagesState=()=>request<MessagesStateDTO>('/messages/state');
 export type AgeAssuranceDTO={required:boolean;eligible:boolean;status:'pending'|'verified'|'self_attested'|'expired'|'rejected';method:string;assertedAt:string|null;expiresAt:string|null;selfAttestationAllowed:boolean};
 export const ageAssuranceState=()=>request<AgeAssuranceDTO>('/age-assurance/state');
 export const selfAttest18Plus=()=>request<AgeAssuranceDTO>('/age-assurance/self-attest',{method:'POST',body:JSON.stringify({confirmed18Plus:true})});
-export const acceptMessagesConsent=(input:{disclosureVersion:number;termsVersion:string;privacyVersion:string})=>request<MessagesStateDTO>('/messages/consent',{method:'POST',body:JSON.stringify({chatHistory:true,longTermMemory:true,termsAccepted:true,privacyAccepted:true,...input})});
 export const revokeMessagesConsent=(purpose:'chat_history'|'long_term_memory')=>request<MessagesStateDTO>('/messages/consent/revoke',{method:'POST',body:JSON.stringify({purpose})});
 export const messages=(cursor?:string)=>request<MessageThreadListDTO>(`/messages${cursor?`?cursor=${encodeURIComponent(cursor)}`:''}`);
 export const creatorMessages=(creatorId:string,cursor?:string,limit=50)=>request<ChatHistoryDTO>(`/messages/creator/${encodeURIComponent(creatorId)}?limit=${limit}${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`);

@@ -95,7 +95,7 @@ export async function installMiniAppBrowserMocks(
         data = { required: false, eligible: true, status: "self_attested", method: "self_attested", assertedAt: "2026-09-27T10:00:00.000Z", expiresAt: null, selfAttestationAllowed: true };
       }
     }
-    else if (apiPath === "/messages/state") data = { enabled: true, chatHistory: chatHistoryAccepted, longTermMemory: memoryOptIn, disclosureRequired: !chatHistoryAccepted, onboardingCompleted: chatHistoryAccepted, disclosureVersion: 1, onboardingCompletedAt, memoryOptIn, memoryOptInAt: onboardingCompletedAt, ageAssuranceRequired, aiAvailable: options.aiAvailable ?? true };
+    else if (apiPath === "/messages/state") data = { enabled: true, chatHistory: chatHistoryAccepted, longTermMemory: memoryOptIn, memoryConsentRequired: false, termsAccepted: chatHistoryAccepted, privacyAccepted: chatHistoryAccepted, disclosureRequired: !chatHistoryAccepted, onboardingCompleted: chatHistoryAccepted, disclosureVersion: 1, onboardingCompletedAt, memoryOptIn, memoryOptInAt: onboardingCompletedAt, ageAssuranceRequired, aiAvailable: options.aiAvailable ?? true };
     else if (apiPath === "/messages/consent" && route.request().method() === "POST") {
       chatHistoryAccepted = true;
       memoryOptIn = JSON.parse(route.request().postData() || "{}").longTermMemory;
