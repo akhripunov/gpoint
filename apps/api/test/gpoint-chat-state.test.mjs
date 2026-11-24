@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildGpointMessagesState, isGpointChatPermitted } from '../src/gpoint-chat-state.js';
+import { buildGpointMessagesState, isGpointChatPermitted, isGpointMessageAgeEligible } from '../src/gpoint-chat-state.js';
 import { gpointAgeAssuranceState } from '../src/gpoint-chat-state.js';
 
 const build = (input) => buildGpointMessagesState({ ...input, erosEnabled: true });
@@ -43,6 +43,17 @@ test('GPoint message state requires an exact active disclosure and current conse
   assert.equal(state.assertedAt, null);
   assert.equal(isGpointChatPermitted(state), true);
   assert.equal(gpointAgeAssuranceState(state).assertedAt, null);
+});
+
+test('Messages access requires age assurance but does not require consent records', () => {
+  const state = build({ policies: [policy], consents: [], ages: [adult], receipts: [], now });
+  assert.equal(state.chatHistory, false);
+  assert.equal(state.termsAccepted, false);
+  assert.equal(state.privacyAccepted, false);
+  assert.equal(isGpointMessageAgeEligible(state), true);
+  assert.equal(isGpointMessageAgeEligible({ ...state, ageAssuranceRequired: true }), false);
+  assert.equal(isGpointMessageAgeEligible({ ...state, enabled: false }), false);
+  assert.equal(isGpointMessageAgeEligible({ ...state, aiAvailable: false }), false);
 });
 
 test('missing or revoked chat consent fails closed even when age and disclosure are valid', () => {

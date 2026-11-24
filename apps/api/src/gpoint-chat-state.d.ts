@@ -73,6 +73,7 @@ export function buildGpointMessagesState(input: {
 }): GpointMessagesState;
 
 export function isGpointChatPermitted(state: GpointMessagesState | null | undefined): boolean;
+export function isGpointMessageAgeEligible(state: GpointMessagesState | null | undefined): boolean;
 export function gpointAgeAssuranceState(state: GpointMessagesState | null | undefined, policySelfAttestationAllowed?: boolean): {
   required: boolean;
   eligible: boolean;

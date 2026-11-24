@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { BadRequestException, HttpException } from '@nestjs/common';
 import type { PrismaClient } from '@prisma/client';
-import { buildGpointMessagesState, gpointAgeAssuranceState, isGpointChatPermitted } from './gpoint-chat-state.js';
+import { buildGpointMessagesState, gpointAgeAssuranceState, isGpointChatPermitted, isGpointMessageAgeEligible } from './gpoint-chat-state.js';
 
 function tenantPinned(): string {
   const policyTenantId = process.env.GPOINT_CHAT_POLICY_TENANT_ID ?? '';
@@ -118,4 +118,4 @@ export async function recordGpointSelfAttestation(db: PrismaClient, userId: stri
   return loadGpointAgeAssurance(db, userId);
 }
 
-export { isGpointChatPermitted };
+export { isGpointChatPermitted, isGpointMessageAgeEligible };

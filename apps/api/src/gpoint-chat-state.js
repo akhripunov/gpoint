@@ -137,6 +137,11 @@ export function isGpointChatPermitted(state) {
     state.disclosureRequired === false && state.ageAssuranceRequired === false);
 }
 
+/** Messages access follows the age gate; chat consent fields remain factual state only. */
+export function isGpointMessageAgeEligible(state) {
+  return Boolean(state && state.enabled === true && state.aiAvailable === true && state.ageAssuranceRequired === false);
+}
+
 export function gpointAgeAssuranceState(state, policySelfAttestationAllowed = false) {
   const eligible = Boolean(state && state.ageAssuranceRequired === false);
   return {
