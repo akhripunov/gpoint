@@ -1,4 +1,4 @@
-import { randomInt } from 'node:crypto';
+import { createHash, randomInt } from 'node:crypto';
 import { BadRequestException, Body, Controller, Delete, Get, Headers, Param, Patch, Post, UnauthorizedException } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import { resolveSession } from './session.js';
@@ -97,13 +97,15 @@ async function prepareChannelAvatar(creatorId: string, chatId: string, photo?: {
   const fileId = photo?.big_file_id ?? photo?.small_file_id;
   if (!fileId) return null;
   const bytes = await telegramPhotoBytes(fileId);
-  const storageKey = `telegram/channels/${chatId}/avatar.jpg`;
-  try { await storage.putBytes(storageKey, 'image/jpeg', bytes); } catch { await storage.delete(storageKey).catch(() => undefined); await storage.putBytes(storageKey, 'image/jpeg', bytes); }
+  const version = process.env.MEDIA_STORAGE_PROVIDER === 's3' ? createHash('sha256').update(bytes).digest('hex') + '.jpg' : 'avatar.jpg';
+  const storageKey = `telegram/channels/${chatId}/${version}`;
+  if (process.env.MEDIA_STORAGE_PROVIDER === 's3') await storage.putBytes(storageKey, 'image/jpeg', bytes);
+  else { try { await storage.putBytes(storageKey, 'image/jpeg', bytes); } catch { await storage.delete(storageKey).catch(() => undefined); await storage.putBytes(storageKey, 'image/jpeg', bytes); } }
   return { storageKey, fileSize: bytes.length };
 }
 async function attachChannelAvatar(tx: any, creatorId: string, avatar: { storageKey: string; fileSize: number } | null, existingAvatarMediaId?: string | null) {
   if (!avatar) return existingAvatarMediaId ?? null;
-  const existing = await tx.mediaAsset.findFirst({ where: { creatorId, storageKey: avatar.storageKey } });
+  const existing = await tx.mediaAsset.findFirst({ where: { creatorId, storageKey: avatar.storageKey, storageProvider: process.env.MEDIA_STORAGE_PROVIDER ?? 'local' } });
   if (existing) {
     await tx.mediaAsset.update({ where: { id: existing.id }, data: { fileSize: avatar.fileSize, mimeType: 'image/jpeg', status: 'READY' } });
     return existing.id;
@@ -112,7 +114,12 @@ async function attachChannelAvatar(tx: any, creatorId: string, avatar: { storage
   return created.id;
 }
 async function hydrateConnectedChannelAvatar(channel: any) {
-  if (!channel || channel.status !== 'CONNECTED' || channel.avatarMediaId) return channel;
+  if (!channel || channel.status !== 'CONNECTED') return channel;
+  if (channel.avatarMediaId) {
+    if (process.env.MEDIA_STORAGE_PROVIDER !== 's3') return channel;
+    const previous = await prisma.mediaAsset.findFirst({ where: { id: channel.avatarMediaId, creatorId: channel.creatorId }, select: { storageProvider: true, status: true } });
+    if (previous?.storageProvider === 's3' && previous.status === 'READY') return channel;
+  }
   try {
     const chat = await telegramApi<{ photo?: { big_file_id?: string; small_file_id?: string } }>('getChat', { chat_id: channel.telegramChatId });
     const avatar = await prepareChannelAvatar(channel.creatorId, channel.telegramChatId, chat.photo);
