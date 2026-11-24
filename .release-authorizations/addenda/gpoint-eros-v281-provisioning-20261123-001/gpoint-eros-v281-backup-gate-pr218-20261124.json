@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "amendment_id": "gpoint-eros-v281-backup-gate-pr218-20261124",
+  "project": "gpoint",
+  "authorization_id": "gpoint-eros-v281-provisioning-20261123-001",
+  "source_instruction_identifier": "OWNER_GPOINT_PR218_FIX_BACKUP_GATE_MERGE_20261124",
+  "owner_decision": "OWNER explicitly requested the established GPoint Prisma backup failure be diagnosed and fixed, then publication of PR #218, then merge of this exact tested PR. Authorizes only the two previously reviewed files in e61863e9c43a2d302fdf2dea058af6e34cd2cd66 for the current Eros v2.8.1 protected release. Preserve Eros SQLx and Kamal operations, and never bypass encrypted backup or isolated restore. If gate fails again, halt before Apply.",
+  "original_authorization_record_blob_sha": "e5706e18cd488a53a3d640f6bdbd6c4fc3816c2e",
+  "scope_additions": [
+    {
+      "path": "scripts/verify-gpoint-scheduled-backup-restore.sh",
+      "source_commit_sha": "e61863e9c43a2d302fdf2dea058af6e34cd2cd66",
+      "patch_sha256": "22ac4c900af96a083db001ef87af7351ad42a40906388e3d7faa01f233404ec1",
+      "result_file_sha256": "a402a72f1873f7cc4028b65f739c6d97b0960beb8c772b258ec2a0f7d0d22827",
+      "result_blob_sha": "a324326bfb17a9ce766997ed86f60ef6f6d2b821"
+    },
+    {
+      "path": "tests/test_gpoint_native_backup_db_identity.py",
+      "source_commit_sha": "e61863e9c43a2d302fdf2dea058af6e34cd2cd66",
+      "patch_sha256": "a47cdb5654e5156a6de390a8a231732989832a93b4ab956bf466cc325f9d4b01",
+      "result_file_sha256": "19548ce523191546cd787ede7b0e97d96a8d71df978683cbd654ce580818ba26",
+      "result_blob_sha": "b454837f201f2512bcaf8ed2517562a39d8879e6"
+    }
+  ],
+  "release_infrastructure_risk_contract": {
+    "allowed_paths": [
+      "scripts/verify-gpoint-scheduled-backup-restore.sh",
+      "tests/test_gpoint_native_backup_db_identity.py"
+    ],
+    "allowed_operations": [
+      "integrate",
+      "prepare",
+      "preflight",
+      "deploy",
+      "verify",
+      "rollback",
+      "recovery",
+      "publish_evidence"
+    ],
+    "baseline_sha": "82c3367f58f42a703e088d9850a3c109c4eb7859",
+    "risk_description": "Correct the confirmed discrepancy between the active gpoint_staging PostgreSQL source and the legacy AGATA/gpoint logical backup path used only before GPoint Prisma Apply; preserve every existing fail-closed gate and do not modify stock Eros SQLx or Kamal.",
+    "required_gates": [
+      "exact main SHA and origin authorization",
+      "required Python/workspace CI",
+      "immutable Buildx/GHCR digests",
+      "read-only PostgreSQL and active API database identity",
+      "PG custom archive inspection and Prisma migration ledger proof",
+      "age encryption and ciphertext checksums",
+      "isolated PostgreSQL restore and Prisma head parity",
+      "approved one Prisma migration and Eros SQLx transitions",
+      "protected GitHub Environment and stock Kamal",
+      "post-Apply ledger and Runtime Verify"
+    ],
+    "backup_plan": "Use only the protected existing release-backup workflow on the same baseline-verified gpoint_staging PostgreSQL database. Require valid custom pg_dump archive, pg_restore --list, age-encrypted immutable release backup, SHA256, verified private restore and matching heads before any Prisma Apply. Retain separate Eros SQLx backup/restore flow unchanged.",
+    "rollback_plan": "If pre-Apply backup or restore fails, stop without database mutation; preserve prior production state. After any partial Apply, reconcile Prisma/SQLx and container state read-only; do not downgrade schema, alter live data, retry blind Apply or change other services. Release rollback uses only compatibility-verified retained images.",
+    "stop_conditions": [
+      "unknown/nonmatching active production DB identity",
+      "missing Prisma ledger or failed archive validation",
+      "failed/absent encrypted backup, SHA256 or isolated restore",
+      "changed Eros SQLx path or unrelated scope",
+      "failed required CI or native Environment approvals",
+      "any partial or ambiguous Apply, checksum mismatch or baseline drift"
+    ]
+  },
+  "amendment_commitment_sha256": "6566719d01e85cbef31178e4141e19644fc4ec42a4e1fe86fc4a640505842dcf"
+}
