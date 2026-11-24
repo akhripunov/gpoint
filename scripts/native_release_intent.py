@@ -216,9 +216,9 @@ def is_infrastructure_change(changed_paths: set[str] | frozenset[str]) -> bool:
 
 
 def push_deploy_authorized(*, mode: str, changed_paths: set[str] | frozenset[str]) -> bool:
-    """After pre-merge protection, any valid main push enters the automatic release."""
+    """An owner-authorized valid main push enters the automatic release."""
     # Infrastructure classification may select extra CI checks, but must not
-    # require a second manual dispatch after a permitted main merge.
+    # require a second manual dispatch after a permitted main push.
     return mode == "DEPLOY"
 
 
@@ -684,6 +684,10 @@ def main() -> int:
 
     try:
         if args.event == "push":
+            if args.ref == "refs/heads/main":
+                owner = args.repository_owner.lower()
+                if not owner or args.actor.lower() != owner or args.triggering_actor.lower() != owner:
+                    raise ValueError("main push and triggering actor must match the repository owner")
             paths = changed_paths(args.before, args.sha)
             mode = classify_push(event_name=args.event, ref=args.ref, changed_paths=paths,
                                  commit_message=args.commit_message)

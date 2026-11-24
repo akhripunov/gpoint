@@ -40,7 +40,11 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertEqual(jobs["build"]["needs"], ["tests"])
         self.assertEqual(jobs["deploy"]["needs"], ["tests", "build"])
         self.assertIn("outputs.mode == 'DEPLOY'", jobs["build"]["if"])
-        self.assertIn("github.event_name == 'pull_request'", jobs["build"]["if"])
+        self.assertNotIn("github.event_name == 'pull_request'", jobs["build"]["if"])
+        self.assertIn("github.event_name == 'push'", jobs["build"]["if"])
+        self.assertIn("github.ref == 'refs/heads/main'", jobs["build"]["if"])
+        self.assertIn("github.actor == github.repository_owner", jobs["build"]["if"])
+        self.assertIn("github.triggering_actor == github.repository_owner", jobs["build"]["if"])
         self.assertNotIn("ARTIFACT_PREPARE", jobs["build"]["if"])
 
     def test_native_dispatch_has_no_cross_run_prebuilt_image_inputs(self):
@@ -132,7 +136,7 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
             "matrix": {"suite": ["workspace", "python"]},
         })
         self.assertEqual(tests["runs-on"], "ubuntu-24.04")
-        # These are the exact required contexts enforced by public-main-integrity.
+        # These are mandatory hosted checks before Build, not pre-push ruleset checks.
         self.assertEqual(tests["strategy"]["matrix"]["suite"], ["workspace", "python"])
         intent = next(step for step in tests["steps"] if step.get("id") == "intent")
         self.assertNotIn("if", intent)

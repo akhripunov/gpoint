@@ -26,7 +26,9 @@ def test_main_push_runs_exact_candidate_tests_build_kamal_and_verify():
     build = workflow["jobs"]["build"]
     assert set(workflow["jobs"]) == {"tests", "build", "deploy"}
     assert build["needs"] == ["tests"]
-    assert "github.event_name == 'pull_request'" in build["if"]
+    assert "github.event_name == 'pull_request'" not in build["if"]
+    assert "github.event_name == 'push'" in build["if"]
+    assert "github.ref == 'refs/heads/main'" in build["if"]
     assert "outputs.mode == 'DEPLOY'" in build["if"]
     assert "ARTIFACT_PREPARE" not in build["if"]
     assert "LAYER7_API" not in build["if"]
@@ -184,7 +186,7 @@ def test_build_unconditionally_publishes_all_three_images_and_live_inventory_sco
     assert "E2E_REQUIRED" not in plan_run
 
 
-def test_merge_bot_can_deploy_exact_current_main_sha_automatically(tmp_path):
+def test_only_owner_can_deploy_exact_current_main_sha_automatically(tmp_path):
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     deploy = workflow["jobs"]["deploy"]
     gate = next(step for step in deploy["steps"]
@@ -204,7 +206,7 @@ def test_merge_bot_can_deploy_exact_current_main_sha_automatically(tmp_path):
             "WORKFLOW_SHA": sha,
             "APPROVE_PRODUCTION": "false",
             "OWNER_APPROVAL_ACTOR": "akhripunov",
-            "OWNER_TRIGGERING_ACTOR": "collaborator",
+            "OWNER_TRIGGERING_ACTOR": "akhripunov",
             "OWNER_REPOSITORY": "akhripunov",
         })
 
@@ -214,6 +216,13 @@ def test_merge_bot_can_deploy_exact_current_main_sha_automatically(tmp_path):
         )
 
         assert result.returncode == 0, result.stderr
+        for key in ("OWNER_APPROVAL_ACTOR", "OWNER_TRIGGERING_ACTOR"):
+            denied = subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", gate["run"]],
+                env={**env, key: "collaborator"}, capture_output=True, text=True,
+            )
+            assert denied.returncode != 0
+            assert "must match the repository owner" in denied.stderr
     finally:
         fake_gh.unlink(missing_ok=True)
 
@@ -892,3 +901,16 @@ export -f docker
                             env=env, text=True, capture_output=True)
     assert result.returncode != 0
     assert "gpoint-eros-pilot-engine" in result.stderr
+
+
+def test_native_main_push_intent_rejects_non_owner_actor_or_rerun():
+    script = ROOT / "scripts/native_release_intent.py"
+    for actor, triggering in (("collaborator", "akhripunov"), ("akhripunov", "collaborator")):
+        result = subprocess.run(
+            [__import__("sys").executable, str(script), "--event", "push", "--ref", "refs/heads/main",
+             "--sha", "a" * 40, "--before", "b" * 40, "--actor", actor,
+             "--triggering-actor", triggering, "--repository-owner", "akhripunov"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 2
+        assert "main push and triggering actor must match the repository owner" in result.stderr

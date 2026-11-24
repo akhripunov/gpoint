@@ -415,11 +415,11 @@ jobs:
     needs: [tests]
     if: >-
       !cancelled() && needs.tests.result == 'success' &&
-      ((github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)) ||
-       (github.event_name != 'pull_request' && needs.tests.outputs.mode == 'DEPLOY' &&
-        needs.tests.outputs.deploy == 'true'))
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner &&
+      needs.tests.outputs.mode == 'DEPLOY' && needs.tests.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -662,7 +662,14 @@ jobs:
             test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY" || {
               echo 'production release triggering actor must match the repository owner' >&2; exit 1;
             }
-          elif [[ "$GITHUB_EVENT_NAME" != push ]]; then
+          elif [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            test "$OWNER_APPROVAL_ACTOR" = "$OWNER_REPOSITORY" || {
+              echo 'production push actor must match the repository owner' >&2; exit 1;
+            }
+            test "$OWNER_TRIGGERING_ACTOR" = "$OWNER_REPOSITORY" || {
+              echo 'production push triggering actor must match the repository owner' >&2; exit 1;
+            }
+          else
             echo 'unsupported production release event' >&2; exit 1
           fi
           test "$REQUESTED_SHA" = "$WORKFLOW_SHA"

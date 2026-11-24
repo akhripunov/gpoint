@@ -126,7 +126,9 @@ def test_native_first_ci_build_is_preserved_and_kamal_deploy_is_downstream():
     assert not ({"workspace", "python"} & set(jobs))
     assert jobs["build"]["needs"] == ["tests"]
     assert "needs.tests.result == 'success'" in jobs["build"]["if"]
-    assert "github.event_name == 'pull_request'" in jobs["build"]["if"]
+    assert "github.event_name == 'pull_request'" not in jobs["build"]["if"]
+    assert "github.event_name == 'push'" in jobs["build"]["if"]
+    assert "github.ref == 'refs/heads/main'" in jobs["build"]["if"]
     assert "ARTIFACT_PREPARE" not in jobs["build"]["if"]
     build_steps = yaml.safe_dump(jobs["build"]["steps"])
     assert "cache-to: type=gha,scope=gpoint-runtime,mode=max" in build_steps

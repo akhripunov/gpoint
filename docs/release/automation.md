@@ -1,6 +1,6 @@
 # Как выпускать GPoint
 
-> **Native First V3 — 2026-11-21.** Единственный production-controller —
+> **Native First V3 — direct main publication, OWNER decision 2026-11-24.** Единственный production-controller —
 > `.github/workflows/gpoint-release.yml`. Layer7 — единственный
 > production VPS; отдельного staging VPS, БД, Environment или workflow нет.
 >
@@ -9,8 +9,9 @@
 > | `gpoint-release.yml` | Required Tests → выбор компонентов → Buildx/GHCR → защищённый production Deploy → Runtime Verify |
 > | `gpoint-operations.yml` | Отдельные операции migration rehearsal; это не release-controller и не Deployment |
 >
-> Каждый обычный push в `main` запускает required tests и Buildx на exact SHA.
-> Каждый продуктовый релиз и допущенный same-repository PR собирают все три
+> Обычный релиз: scoped local Pre-push → один авторизованный прямой push OWNER в `main` → hosted Tests → Buildx/GHCR → защищённый Deploy → Runtime Verify.
+> Обязательных PR, pre-merge CI и production Build до push в main нет. Ruleset main сохраняет deletion/non-fast-forward protection.
+> Каждый допущенный production Build собирает все три
 > независимых образа: Core, MiniApp и Eros. Один декларативный path map задаёт
 > область тестов и выборочного Deploy. Deploy сравнивает live Kamal/Docker image
 > identity с кандидатом и применяет только изменённые роли. Immutable digests,
@@ -29,9 +30,9 @@
 > согласованного обновления guard и matching host-key конфигурации; DNS lookup
 > сам по себе не подтверждает production identity.
 >
-> Same-repository PR от `OWNER`, `MEMBER` или `COLLABORATOR` собирает и
-> проверяет все три SHA-bound образа с GHCR readback, без production secrets и
-> без доступа к Deploy. Fork PR не получает GHCR publication. Documentation-only
+> Необязательный PR запускает только review Tests (включая условные тестовые
+> Eros E2E images, если применимо), без production Build/GHCR publication,
+> production secrets и доступа к Deploy. Documentation-only
 > изменения также проходят все три Build, но live diff выбирает `NONE` и не
 > перезапускает runtime. Ошибки Build или неизвестный live baseline блокируют
 > production Apply.
@@ -182,16 +183,17 @@ clean/scope gates. Создать локальный path-scoped commit толь
 повторить классификацию и применимые проверки.
 
 Push допускается только если OWNER явно разрешил publication/production-triggering
-push для полного проверенного кандидата и действующие правила GPoint разрешают
-этот точный путь, включая технически обеспеченное ограничение для `main`. Перед
-публикацией read-only проверить соответствующие GitHub branch protection/rulesets
-и зафиксировать реально применяемые правила. Процессная проверка разрешения не
-является доказательством server-side блокировки. Если read-only проверка недоступна
-или не доказывает требуемое техническое ограничение, остановить push и указать
-`NOT_VERIFIED`/BLOCKED; не считать это ограничение существующим. Не создавать
-rulesets, hooks, permissions или workflow для этой процедуры. После отдельно
-разрешённого push подтвердить remote SHA и соответствующий автоматически
-запущенный Native Release; вручную не дублировать CI dispatch.
+push для полного проверенного кандидата. Обычный путь — прямой fast-forward
+push точного commit в main от repository owner; PR необязателен.
+Перед публикацией read-only подтвердить отсутствие иных активных release runs,
+точный remote SHA, права доступа (неизвестный или неавторизованный write/admin
+actor блокирует публикацию), активный main ruleset с deletion/non_fast_forward,
+без обязательных PR и pre-merge status checks. Не менять rulesets или права
+доступа в рамках обычного релиза. Изменение защиты — отдельная явно
+авторизованная операция. Workflow fail-closed проверяет owner actor и triggering
+actor для main push/Deploy. Если техническая проверка недоступна, остановиться
+с NOT_VERIFIED/BLOCKED. После push подтвердить exact remote SHA и один
+автоматически запущенный Native Release; не дублировать dispatch.
 
 ### 5. Замерить время
 
@@ -217,8 +219,8 @@ edit/check/commit, существенного ожидания и каждого
 
 Цель для готового обычного кандидата без сетевых ошибок и специального
 risk scope — 30–90 секунд от PREPUSH_START до FIRST_PUSH (readback удалённой
-ветки). Это цель, а не измеренный результат. Отдельно фиксируй ожидание PR CI,
-merge/main push и production workflow. Не исключай из измерений реальные
+main). Это цель, а не измеренный результат. Отдельно фиксируй локальную
+подготовку, прямой main push и production workflow. Не исключай из измерений реальные
 повторные проверки или ошибки; не ослабляй обязательные gates ради цели.
 
 ### 6. Граница текущей задачи
@@ -233,18 +235,17 @@ merge/main push и production workflow. Не исключай из измере�
 
 `.github/workflows/gpoint-release.yml` is the single production controller.
 Its ordinary path is `Tests → Build/GHCR → protected Deploy → Runtime Verify`.
-A permitted push to `main` starts the path automatically. PRs
-run the same required tests and do not receive production secrets or Deploy
-access. Eligible same-repository PR Build jobs receive `packages: write` only to
-publish candidate images for immutable GHCR read-back. Fork PRs never enter
-that Build job.
+An authorized direct owner push to `main` starts the path automatically. PRs
+are optional review routes; their Tests never enter the production Build or Deploy
+job and do not receive production secrets. Only admitted owner main push or
+exact owner main deploy dispatch may enter Build.
 
 The required test matrix is exactly `workspace` and `python`. Workspace also
 contains actionlint, pinned Kamal configuration/proxy checks, and the conditional
 stock Eros SQLx/conversation test. Python owns the release-boundary tests and
 conditional isolated database suites. Every matrix run evaluates the same
 fail-closed release intent and push baseline so combined job outputs do not
-depend on matrix completion order. Every eligible PR and main candidate builds
+depend on matrix completion order. Every eligible main production candidate builds
 Core, MiniApp and Eros. Documentation-only candidates still pass the required
 tests and builds; live path classification selects no production Deploy.
 
@@ -264,7 +265,7 @@ read-back and uses those digests without rebuilding. A production dispatch canno
 an image from another run. The Eros image build fetches the pinned upstream
 commit from `etherfunlab/eros-engine`; BuildKit layer cache reduces repeat work,
 but GitHub/upstream availability remains a required CI dependency. Its failure
-fails the PR or production Build closed even for Core/MiniApp-only changes.
+fails the production Build closed even for Core/MiniApp-only changes.
 The minimum way to remove that third-party availability dependency while still
 building Eros every run is to use a controlled first-party mirror of the exact
 pinned source; until such a mirror exists, do not bypass or downgrade the Eros
@@ -298,8 +299,8 @@ workflow compares the candidate with the last successful Native source marker,
 so skipped/failed prior releases keep Eros checks pending; an unavailable or
 ambiguous marker requires the Eros suite. Live Kamal/Docker inventory still
 selects the actual Eros Deploy.
-Infrastructure changes require the protected manual route and its OWNER gate;
-an ordinary automatic Deploy is not admitted.
+Infrastructure changes require explicit scoped OWNER approval and applicable risk
+contract; an authorized main push uses the same protected Deploy gates.
 
 Deploy applies only selected targets through stock Kamal 2, verifies health,
 image digest, source SHA, topology and short HTTP smoke, and marks the native
@@ -453,8 +454,8 @@ component; a deleted release script has no image impact, while cumulative
 infrastructure changes still require the protected dispatch route. Unmapped
 deletions continue to fail closed. Exact retired Layer7 staging paths are
 ignored only when deleted from the cumulative candidate diff; new and
-reintroduced staging paths fail closed. Same-repository PR Build jobs request `packages: write` and can publish
-candidate images to GHCR; fork PRs do not run that job. This permission does
+reintroduced staging paths fail closed. In that historical ME-62 candidate, same-repository PR Build jobs requested `packages: write` and can publish
+candidate images to GHCR; fork PRs did not run that job. This historical permission did
 not grant production Deploy access. The deleted
 staging workflow/action and obsolete prepared-run adapters account for much of
 the extended-inventory reduction. LOC remains an informational measure, not an
@@ -470,7 +471,7 @@ The PR event correctly skipped production Deploy/Verify. Production Deploy,
 Runtime Verify and smoke remain pending separate OWNER authorization for the
 exact integrated SHA.
 
-### ME-62 acceptance scenario matrix
+### ME-62 historical acceptance scenario matrix (before 2026-11-24 direct-main transition)
 
 Scenario rows use the exact tests named in each row; current PR candidate is
 `0b721128f910748fe3643ffe1b83de7d9f27559b`, base
@@ -513,7 +514,7 @@ local/hosted test evidence passed; it does not imply production execution.
 | 28 | Compatible production rollback | Kamal rollback plus smoke → not executed | NOT VERIFIED — requires separate OWNER authorization for exact SHA |
 | 29 | Single Telegram Bot polling role | One active role → config/verification enforces one running Bot | PASS — `test_core_consumers_are_updated_one_role_at_a_time_and_partial_failure_fails_closed`; live process count NOT VERIFIED |
 | 30 | Production secrets on PR | No production secrets in PR job → Tests job has read-only token permissions; Build uses GHCR write only | PASS — workflow permission tests and run 44711957261; no production secret exposure |
-| 31 | Fork PR | No GHCR publish or production Deploy → Build condition excludes fork | PASS — `test_pr_candidate_runs_build_without_production_deploy`; no fork run was created |
+| 31 | Fork PR | No GHCR publish or production Deploy → Build condition excludes fork | PASS — `test_pr_candidate_runs_tests_without_production_build_or_deploy`; no fork run was created |
 | 32 | Same-repository PR | Test Build allowed; Deploy forbidden → Build/GHCR read-back passed, Deploy skipped | PASS — run 44711957261 |
 | 33 | Protected infrastructure dispatch | OWNER/ref/exact SHA and Environment protection required → classifier and workflow gates assert these conditions | PASS — Native intent and boundary tests; live GitHub protection settings NOT VERIFIED |
 | 34 | Current Layer7 | Production target only, never staging → workflow has only `production` Environment | PASS — `test_layer7_is_production_and_retired_staging_paths_cannot_deploy`; live VPS identity NOT re-read in this task |

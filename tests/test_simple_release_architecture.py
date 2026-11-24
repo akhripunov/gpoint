@@ -84,7 +84,7 @@ def test_retired_eros_pilot_compose_deployer_is_not_a_release_tool():
     assert "eros-pilot-deployment" not in package["scripts"]["test:release"]
 
 
-def test_pr_candidate_runs_build_without_production_deploy():
+def test_pr_candidate_runs_tests_without_production_build_or_deploy():
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     )
@@ -93,10 +93,12 @@ def test_pr_candidate_runs_build_without_production_deploy():
 
     assert workflow["name"] == "GPoint Release Pipeline"
 
-    assert "github.event_name == 'pull_request'" in build["if"]
-    assert "github.event.pull_request.head.repo.full_name == github.repository" in build["if"]
-    assert "github.event.pull_request.author_association" in build["if"]
-    assert 'fromJSON(\'["OWNER","MEMBER","COLLABORATOR"]\')' in build["if"]
+    assert "github.event_name == 'pull_request'" not in build["if"]
+    assert "github.event_name == 'push'" in build["if"]
+    assert "github.event_name == 'workflow_dispatch'" in build["if"]
+    assert "github.ref == 'refs/heads/main'" in build["if"]
+    assert "github.actor == github.repository_owner" in build["if"]
+    assert "github.triggering_actor == github.repository_owner" in build["if"]
     assert build["permissions"]["packages"] == "write"
     assert "build_components" not in build["outputs"]
     assert "deploy_scope" not in build["outputs"]
