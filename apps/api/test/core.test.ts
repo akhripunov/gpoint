@@ -2,7 +2,7 @@ import test from 'node:test'; import assert from 'node:assert/strict';
 import { decodeCursor, encodeCursor, popularScore, trendingScore, validateSlug } from '../../../packages/contracts/src/core.js';
 import { isAdmin, mediaKeyIsSafe, validateApprovedVipUrl } from '../src/security.js';
 import { browserDevAuthAllowed, devAuthAllowed } from '../src/auth.js';
-import { mediaStorageFromEnv } from '../src/media-storage.js';
+import { mediaStorageFromEnv, signedBunnyMediaUrl, mediaStorageForProvider } from '../src/media-storage.js';
 import { DISCOVERY_RANKING_CONFIG, boundedAffinity, coldStartScore, diversifyCandidates, personalizedScore, recencyDecay, smoothedRate } from '../src/discovery-ranking.js';
 import { imageUrl } from '../src/media-delivery.js';
 import { DeferredNotificationProvider } from '../src/notifications.js';
@@ -19,3 +19,18 @@ test('diversity reranking avoids adjacent creator and tag repetition when altern
 test('sensitive-detector provider consumes official response shape and maps explicit predictions',async()=>{const previous=globalThis.fetch;globalThis.fetch=async()=>new Response(JSON.stringify({success:true,result:{results:[{success:true,predictions:[{className:'Porn',probability:0.97},{className:'Neutral',probability:0.03}]}]}}),{status:200,headers:{'content-type':'application/json'}});try{const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64');const result=await new MisskeySensitiveDetectorProvider('http://detector','test-key').classify({text:'',mimeTypes:['image/png'],imageBytes:png});assert.equal(result.classification,'EXPLICIT');assert.equal(result.provider,'misskey-sensitive-detector');}finally{globalThis.fetch=previous;}});
 test('sensitive-detector calibration maps Neutral to SAFE and Sexy to SUGGESTIVE',async()=>{const previous=globalThis.fetch;const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64');try{for(const [label,expected] of [['Neutral','SAFE'],['Sexy','SUGGESTIVE']] as const){globalThis.fetch=async()=>new Response(JSON.stringify({success:true,result:{results:[{success:true,predictions:[{className:label,probability:0.95},{className:'Neutral',probability:label==='Neutral'?0.01:0.03}]}]}}),{status:200});const result=await new MisskeySensitiveDetectorProvider('http://detector','test-key').classify({text:'',mimeTypes:['image/png'],imageBytes:png});assert.equal(result.classification,expected);}}finally{globalThis.fetch=previous;}});
 test('sensitive-detector low confidence and provider errors remain UNCERTAIN',async()=>{const previous=globalThis.fetch;const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64');try{globalThis.fetch=async()=>new Response(JSON.stringify({success:true,result:{results:[{success:true,predictions:[{className:'Neutral',probability:0.7511}]}]}}),{status:200});const uncertain=await new MisskeySensitiveDetectorProvider('http://detector','test-key').classify({text:'',mimeTypes:['image/png'],imageBytes:png});assert.equal(uncertain.classification,'UNCERTAIN');globalThis.fetch=async()=>new Response('{}',{status:503});const failed=await new MisskeySensitiveDetectorProvider('http://detector','test-key').classify({text:'',mimeTypes:['image/png'],imageBytes:png});assert.equal(failed.classification,'UNCERTAIN');}finally{globalThis.fetch=previous;}});
+
+test('Bunny S3 CDN requires scoped signed URLs and keeps local media readable', async () => {
+  const env = {MEDIA_STORAGE_PROVIDER:'s3', S3_ENDPOINT:'https://de-s3.storage.bunnycdn.com', S3_REGION:'de', S3_BUCKET:'gpoint-media', S3_ACCESS_KEY_ID:'gpoint-media', S3_SECRET_ACCESS_KEY:'fixture', S3_PUBLIC_BASE_URL:'https://cdn.gpoint.one'};
+  assert.throws(() => mediaStorageFromEnv(env), /Bunny CDN token key/);
+  const store = mediaStorageFromEnv({...env, BUNNY_CDN_TOKEN_KEY:'fixture-cdn'});
+  const key = 'telegram/channel/1/image';
+  const url = new URL(await store.getReadUrl(key));
+  assert.equal(url.origin, 'https://cdn.gpoint.one');
+  assert.equal(url.pathname, '/' + key);
+  assert.match(url.searchParams.get('token')!, /^HS256-[A-Za-z0-9_-]{43}$/);
+  assert.ok(Number(url.searchParams.get('expires')) > Date.now()/1000);
+  assert.equal(url.href, signedBunnyMediaUrl(env.S3_PUBLIC_BASE_URL, key, 'fixture-cdn', Number(url.searchParams.get('expires'))));
+  assert.throws(() => signedBunnyMediaUrl(env.S3_PUBLIC_BASE_URL,'telegram/../secret','fixture-cdn'));
+  assert.equal(mediaStorageForProvider('local', env).constructor.name,'LocalMediaStorage');
+});

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { BadRequestException, Body, Controller, Headers, Post, UnauthorizedException } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import { ContentSanitizer, TelegramEntity } from './content-sanitizer.js';
-import { mediaStorageFromEnv } from './media-storage.js';
+import { mediaStorageFromEnv, mediaStorageForProvider } from './media-storage.js';
 import { safetyProviderFromEnv } from './safety-provider.js';
 import { HttpTranslationProvider } from './translation-provider.js';
 import { inspectImage } from './media-metadata.js';
@@ -50,7 +50,7 @@ export class TelegramIngestionService {
     const existing = await prisma.post.findFirst({ where: { id: postId, source: 'TELEGRAM_CHANNEL', status: { in: ['PENDING', 'PENDING_MODERATION'] } }, include: { telegramChannel: true, media: { include: { media: true } } } });
     if (!existing?.telegramChannel || existing.telegramChannel.status !== 'CONNECTED') throw new BadRequestException('pending connected Telegram post not found');
     const media = existing.media.find((item: any) => item.media.kind === 'IMAGE' || item.media.kind === 'VIDEO');
-    const bytes = media ? await this.storage.readBytes(media.media.storageKey) : undefined;
+    const bytes = media ? await (media.media.storageProvider === (process.env.MEDIA_STORAGE_PROVIDER ?? 'local') ? this.storage : mediaStorageForProvider(media.media.storageProvider)).readBytes(media.media.storageKey) : undefined;
     const safety = await this.safety.classify({ text: existing.sanitizedText ?? existing.caption ?? '', mimeTypes: media ? [media.media.mimeType] : [], imageBytes: bytes });
     const status = publicationStatus(safety.classification, existing.telegramChannel.importMode);
     const publishedAt = status === 'PUBLISHED' ? (existing.publishedAt ?? new Date()) : null;

@@ -2,12 +2,11 @@ import { Controller, Get, NotFoundException, Param, Req, Res, StreamableFile } f
 import { PrismaClient } from '@prisma/client';
 import { readFile } from 'node:fs/promises';
 import { join, normalize, relative } from 'node:path';
-import { mediaStorageFromEnv } from './media-storage.js';
+import { mediaStorageForProvider } from './media-storage.js';
 import { resolveSession } from './session.js';
 import { connectedChannelAvatarFilter } from './telegram-channel-avatars.js';
 
 const prisma = new PrismaClient();
-const storage = mediaStorageFromEnv();
 const mediaRoot = process.env.GPOINT_MEDIA_ROOT ?? '/tmp/gpoint-media';
 
 @Controller()
@@ -29,7 +28,8 @@ export class MediaReadController {
       if (relative(mediaRoot, path).startsWith('..') || !relative(mediaRoot, path)) throw new NotFoundException('media unavailable');
       try { return new StreamableFile(await readFile(path), { type: asset.mimeType }); } catch { throw new NotFoundException('media unavailable'); }
     }
-    res.redirect(await storage.getReadUrl(asset.storageKey), 302);
+    res.header('Cache-Control', 'private, no-store');
+    res.redirect(await mediaStorageForProvider(asset.storageProvider).getReadUrl(asset.storageKey), 302);
     return;
   }
 }
