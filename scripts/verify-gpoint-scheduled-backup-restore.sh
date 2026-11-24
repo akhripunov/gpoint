@@ -368,41 +368,45 @@ PY
   fi
   echo GPOINT_EXISTING_BACKUP=PASS
 else
-  # Reuse GPoint's established complete logical-backup and archive-integrity gate.
-  backup_output="$(python3 "$backup_helper" backup --sha "$candidate" --backup-directory "$plaintext_dir")"
-  backup_json="$(sed -n 's/^GPOINT_COMPLETE_BACKUP=//p' <<< "$backup_output")"
-  test -n "$backup_json"
-  readarray -t backup_facts < <(python3 - "$backup_json" "$candidate" <<'PY'
-import json, re, sys
-proof=json.loads(sys.argv[1])
-required=('path','sha256','database','schemas','status')
-if any(key not in proof for key in required):
-    raise SystemExit('backup proof is incomplete')
-if proof['database']!='gpoint' or proof['status']!='COMPLETE_PROTECTED':
-    raise SystemExit('backup proof does not identify a complete GPoint backup')
-if proof.get('candidate_sha') != sys.argv[2]:
-    raise SystemExit('backup proof candidate SHA mismatch')
-if not proof['path'].startswith('/run/gpoint-kamal/' + sys.argv[2] + '-') or not proof['path'].endswith('.dump'):
-    raise SystemExit('backup path is outside the protected temporary namespace')
-if not re.fullmatch(r'[0-9a-f]{64}',proof['sha256']):
-    raise SystemExit('backup checksum is invalid')
-if not {'public','agata'}.issubset(set(proof['schemas'])):
-    raise SystemExit('backup does not include required application schemas')
-print(proof['path'])
-print(proof['sha256'])
-PY
-  )
-  backup_file="${backup_facts[0]}"
-  plaintext_sha="${backup_facts[1]}"
-  [[ "$backup_file" == "$plaintext_dir/"* ]]
-  test -f "$backup_file" && test ! -L "$backup_file" && test -s "$backup_file"
-  chmod 600 "$backup_file"
-  test "$(sha256sum "$backup_file" | awk '{print $1}')" = "$plaintext_sha"
+  # Back up the exact production database already attested by this release's
+  # PostgreSQL inventory. The historical AGATA migration helper hardcodes
+  # /gpoint and requires AGATA tables not guaranteed in the current GPoint DB.
+  if [[ "$database_name" != gpoint_staging ]]; then
+    echo "GPOINT_RELEASE_BACKUP_FAILED=DATABASE_IDENTITY_MISMATCH" >&2
+    exit 1
+  fi
+  plaintext_backup_file="$plaintext_dir/gpoint-$candidate-$run_id-$attempt.dump"
+  if [[ -e "$plaintext_backup_file" || -L "$plaintext_backup_file" ]]; then
+    echo "GPOINT_RELEASE_BACKUP_FAILED=OUTPUT_PATH_EXISTS" >&2
+    exit 1
+  fi
+  umask 077
+  if ! docker exec "$postgres" sh -ec \
+    'exec pg_dump -U "$POSTGRES_USER" -d "$1" --format=custom --no-owner' \
+    gpoint-release-backup "$database_name" > "$plaintext_backup_file"; then
+    echo 'GPOINT_RELEASE_BACKUP_FAILED=PG_DUMP' >&2
+    exit 1
+  fi
+  if [[ ! -f "$plaintext_backup_file" || -L "$plaintext_backup_file" || ! -s "$plaintext_backup_file" ]]; then
+    echo "GPOINT_RELEASE_BACKUP_FAILED=EMPTY_OR_UNSAFE_DUMP" >&2
+    exit 1
+  fi
+  chmod 600 "$plaintext_backup_file"
+  if ! archive_listing="$(docker exec -i "$postgres" pg_restore --list < "$plaintext_backup_file")"; then
+    echo 'GPOINT_RELEASE_BACKUP_FAILED=PG_RESTORE_LIST' >&2
+    exit 1
+  fi
+  if ! grep -Eq ' TABLE DATA public _prisma_migrations ' <<< "$archive_listing"; then
+    echo 'GPOINT_RELEASE_BACKUP_FAILED=PRISMA_LEDGER_MISSING' >&2
+    exit 1
+  fi
+  plaintext_sha="$(sha256sum "$plaintext_backup_file" | awk '{print $1}')"
+  [[ "$plaintext_sha" =~ ^[0-9a-f]{64}$ ]]
   encrypted_name="gpoint-scheduled-${candidate}-${run_id}-${attempt}.dump.age"
   backup_file="$backup_root/$encrypted_name"
   backup_work="$(mktemp -d /opt/gpoint/backups/.gpoint-age-${run_id}-${attempt}.XXXXXX)"
   chmod 700 "$backup_work"
-  age --recipient "$age_recipient" -o "$backup_work/$encrypted_name" "$plaintext_dir/$(basename "${backup_facts[0]}")"
+  age --recipient "$age_recipient" -o "$backup_work/$encrypted_name" "$plaintext_backup_file"
   chmod 600 "$backup_work/$encrypted_name"
   ln "$backup_work/$encrypted_name" "$backup_file"
   rm -rf "$backup_work"
