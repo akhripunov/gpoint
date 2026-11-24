@@ -1,3 +1,4 @@
+# Eros-only release acceptance 2026-11-24: verify built-image E2E in Deploy preflight.
 service: gpoint-eros-pilot
 image: akhripunov/gpoint-eros
 primary_role: engine
