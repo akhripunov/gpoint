@@ -1,0 +1,88 @@
+{
+  "schema_version": 3,
+  "project": "gpoint",
+  "environment": "production",
+  "authorization_id": "gpoint-direct-main-20261124-001",
+  "authorization_mode": "TASK_SCOPED_AUTO",
+  "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+  "source_instruction_identifier": "OWNER_GPOINT_DIRECT_MAIN_20261124",
+  "owner_task_reference": "Current GPoint chat: OWNER explicitly replied “Да, делай так” to the exact proposal to remove mandatory PR and prior CI rules, disable PR production Build, authorize direct main push, update release rules/tests and verify the real release while retaining safety/migrations/rollback.",
+  "task": "Adopt MAXIBOT ordinary direct-main release routing in GPoint. Remove only pull_request and required_status_checks from ruleset 25557482; retain deletion/non_fast_forward protections. No product/runtime or database changes.",
+  "production_baseline_sha": "6ecab19b047cc25e74a126190c7d59b228db097c",
+  "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+  "allowed_paths": [
+    ".release-authorizations/gpoint-direct-main-20261124-001.json",
+    ".github/workflows/gpoint-release.yml",
+    "AGENTS.md",
+    "docs/RELEASE_AUTHORIZATION.md",
+    "docs/release/automation.md",
+    "scripts/native_release_intent.py",
+    "tests/test_kamal_native_automatic_release.py",
+    "tests/test_kamal_release_config.py",
+    "tests/test_native_build_boundary.py",
+    "tests/test_simple_release_architecture.py"
+  ],
+  "allowed_operations": [
+    "integrate",
+    "preflight",
+    "deploy",
+    "verify",
+    "publish_evidence",
+    "update_exact_main_ruleset"
+  ],
+  "acceptance_criteria": [
+    "Verified clean exact main and installed topology before write; no concurrent production release.",
+    "Ordinary release pushes directly to main; optional PR Tests remain; no PR production Build or Deploy.",
+    "Main push runs hosted Tests, immutable Build, protected Deploy and Runtime Verify once.",
+    "Retain existing deletion/non-fast-forward protections, exact SHA/digest, migration, backup, rollback, environment and health checks; require owner actor for production push and rerun.",
+    "Read back ruleset, remote SHA, Actions run and actual production outcome."
+  ],
+  "exclusions": [
+    "Product code, database or migration changes, credentials, production environment permissions, Eros model config, Bunny storage settings, MAXIBOT changes, force push, unrelated scope"
+  ],
+  "risk_contracts": {
+    "release_infrastructure": {
+      "allowed_paths": [
+        ".release-authorizations/gpoint-direct-main-20261124-001.json",
+        ".github/workflows/gpoint-release.yml",
+        "AGENTS.md",
+        "docs/RELEASE_AUTHORIZATION.md",
+        "docs/release/automation.md",
+        "scripts/native_release_intent.py",
+        "tests/test_kamal_native_automatic_release.py",
+        "tests/test_kamal_release_config.py",
+        "tests/test_native_build_boundary.py",
+        "tests/test_simple_release_architecture.py"
+      ],
+      "allowed_operations": [
+        "integrate",
+        "preflight",
+        "deploy",
+        "verify",
+        "publish_evidence",
+        "update_exact_main_ruleset"
+      ],
+      "baseline_sha": "6ecab19b047cc25e74a126190c7d59b228db097c",
+      "risk_description": "Owner explicitly authorized direct main push in place of required pre-merge CI. Only owner currently has repository collaborator access. Operator safeguards below preserve production gates and existing protections.",
+      "required_gates": [
+        "exact main and live role baseline",
+        "targeted regression tests",
+        "owner-only push/rerun gate",
+        "same-run CI and immutable Build",
+        "protected Deploy and Runtime Verify",
+        "ruleset readback"
+      ],
+      "backup_plan": "Save exact current ruleset JSON outside repository before change; retain git history and existing backups; do not modify production data.",
+      "rollback_plan": "If settings update succeeds but push does not, restore exact original ruleset after confirming main did not change; if published, reconcile first, use authorized forward revert and existing protected rollback only if runtime requires it. Never force push or downgrade schema.",
+      "stop_conditions": [
+        "Unexpected main or runtime change, unexpected collaborators or rulesets, failed checks, active release, ambiguous API response, scope drift, migration or runtime changes, failed deployment."
+      ]
+    }
+  },
+  "preauthorized_commits": [],
+  "preauthorized_paths": [],
+  "state": "ACTIVE",
+  "revoked": false,
+  "consumed": false,
+  "owner_task_commitment_sha256": "cff36deb7711ca50934fa0a0e4c783eb06ed1723dbef09c61fc3971cd21efc9f"
+}
