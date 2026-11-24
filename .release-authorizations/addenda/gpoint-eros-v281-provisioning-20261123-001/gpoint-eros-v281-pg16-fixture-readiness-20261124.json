@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "amendment_id": "gpoint-eros-v281-pg16-fixture-readiness-20261124",
+  "project": "gpoint",
+  "authorization_id": "gpoint-eros-v281-provisioning-20261123-001",
+  "source_instruction_identifier": "OWNER_GPOINT_EROS_BACKUP_CONTINUE_HOSTED_CI_FIX_20261124",
+  "owner_decision": "OWNER instructed continuation of the existing Eros v2.8.1 backup gate recovery. PR #219 passed required PR CI and was merged, but main push release #45303960875 failed before Build because the disposable PG16 test fixture accepted pg_isready from the temporary initdb server, followed by the official entrypoint shutdown. This amendment authorizes only fixing that exact test readiness gate in the existing required backup regression suite and continuing normal PR/CI/release approval, with no change to production backup, Prisma, Eros SQLx, Kamal, secrets, or any runtime.",
+  "original_authorization_record_blob_sha": "e5706e18cd488a53a3d640f6bdbd6c4fc3816c2e",
+  "scope_additions": [
+    {
+      "path": "tests/test_gpoint_scheduled_backup.py",
+      "source_commit_sha": "171c939a70f8e6682f29b990e59b6b686a7f1519",
+      "patch_sha256": "d1255994ad14376b326a319e5bc1dbcc8def1efd6e3b3718d0466a205a1074d5",
+      "result_file_sha256": "72a7222d79c8a1434fe62fb893c08452034cdadc51ddfec75df8f79518282804",
+      "result_blob_sha": "b8a61c94fdc493a40becac95eda1858947294ce9"
+    }
+  ],
+  "release_infrastructure_risk_contract": {
+    "allowed_paths": [
+      "tests/test_gpoint_scheduled_backup.py"
+    ],
+    "allowed_operations": [
+      "integrate",
+      "prepare",
+      "preflight",
+      "deploy",
+      "verify",
+      "rollback",
+      "recovery",
+      "publish_evidence"
+    ],
+    "baseline_sha": "82c3367f58f42a703e088d9850a3c109c4eb7859",
+    "risk_description": "Test-only correction to ensure PG16 Docker fixture waits for the stable postgres PID1, not transient initialization server readiness. Exact same gate is used by existing protected production restore runner; no production shell or migration changes.",
+    "required_gates": [
+      "exact current main and CI SHA",
+      "no Eros/Kamal/runtime code changes",
+      "full required Python/workspace tests",
+      "real disposable PostgreSQL 16 backup/restore fixture",
+      "five repeat local fixture executions",
+      "protected encrypted backup isolated restore",
+      "full migration approval and protected Environment before Apply",
+      "stock Kamal and Runtime Verify"
+    ],
+    "backup_plan": "No database is changed by this test fix. Existing protected age backup/restore gate from PR #219 is mandatory before any Prisma Apply. Use temporary only disposable PG16 containers in CI; never connect to production.",
+    "rollback_plan": "Test-only changes can be reverted by standard GitHub PR if they fail CI. Do not revert live data or issue manual SQL. If protected backup/restore fails again, stop without applying Prisma/Eros SQLx and diagnose exact gate before new candidate.",
+    "stop_conditions": [
+      "any source/CI mismatch",
+      "Docker fixture cannot become stable postgres PID1",
+      "required CI failure",
+      "unknown production state or failed backup/restore",
+      "unauthorized code changes",
+      "any partial or ambiguous Apply"
+    ]
+  },
+  "amendment_commitment_sha256": "552eed37b48c1539e6295fe5a9eaba4371e3e365536123c83e163e83a5c7f91b"
+}
