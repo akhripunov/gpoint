@@ -1,11 +1,28 @@
-# GPoint AGATA Codex connection
+# GPoint Eros Dialogue Lab for Codex
 
-This local MCP process is a client for GPoint's existing message API. It never calls an LLM. Once the server/API migration has been released and the OWNER allowlist configured, set `GPOINT_API_URL` in the environment inherited by Codex to the trusted GPoint API base URL (HTTPS). The value is an address, not a credential.
+This is the existing GPoint MCP package, configured under the existing `gpoint_agata` server entry. It uses GPoint's authenticated conversation API and the owner-approved `models-hub` creator only. It does not call an LLM directly, create another account or conversation, or store a second transcript. Telegram Mini App and Codex use the same GPoint/Eros relationship, session, history, and memory.
 
-Restart/open a new Codex session after MCP configuration changes. Run `connect_gpoint` with the existing GPoint creator slug. Open the returned one-time Telegram deep link in the existing GPoint bot chat and then run `finish_gpoint_connection`. The MCP stores the device code and resulting scoped tokens in the macOS login Keychain. `read_gpoint_history` and `send_gpoint_message` are bound to that one approved creator. `disconnect_gpoint` revokes the server connection and deletes local Keychain items. No Codex controls are present in the Mini App.
+## Connect
 
-The API must be deployed through the normal release process with `GPOINT_CODEX_OWNER_USER_IDS` set to the exact OWNER GPoint user ID. Missing configuration disables OWNER access. Never add Telegram initData, GPoint session cookies/tokens, bearer tokens, or API secrets to project config or chat.
+The project Codex configuration passes the existing `GPOINT_API_URL` setting through to the MCP process. It must be the trusted HTTPS GPoint API base URL. The current Codex user configuration has this variable set; its value is not copied into the repository. Restart or open a trusted Codex project session after changing the tool list.
 
-Before enabling device authorization in production, configure `GPOINT_INGEST_URL` to the HTTPS ingress URL ending in `/api/internal/telegram/update`; the bot fails closed at startup without it. Production Caddy routes `/api/*` to the API after stripping `/api`, so the derived callback is `/api/auth/codex/telegram/codex-approve`. This is required because the production Docker network bridge is not encrypted. DevOps must verify the effective TLS ingress reaches the API and exposes the required paths before release. Also set `TELEGRAM_BOT_USERNAME` to the existing bot username and `GPOINT_CODEX_OWNER_USER_IDS` to the exact OWNER GPoint user ID. Set `GPOINT_CODEX_DEVICE_START_TRUSTED_PROXY_IPS` to the exact socket-peer IPs of every trusted reverse-proxy hop; the API walks the forwarded chain outward and trusts only those hops. Every forwarding proxy must append its observed peer to `X-Forwarded-For`; missing or malformed chains fail closed. For direct exposure, configure `none`. Do not add wildcard entries or use client-provided forwarded IPs as trusted proxies. Fastify proxy trust remains disabled globally.
+1. Call `connect_gpoint` for the fixed `models-hub` creator. The MCP stores the temporary device code in macOS Keychain and returns a short-lived link to the existing Telegram bot.
+2. Open the link in Telegram and approve it in the existing bot chat with the owner account. GPoint independently verifies the owner allowlist, approved creator ownership, chat consent, and existing Eros history before issuing a scoped grant.
+3. Call `finish_gpoint_connection`. Access and refresh credentials are stored in macOS Keychain. `get_gpoint_connection_status` reports local Keychain state only; a successful authenticated history read is the server-side check.
+4. Use `read_gpoint_history` to read the existing Models Hub transcript. `disconnect_gpoint` revokes the server grant and removes local Keychain credentials.
 
-Messages sent with `send_gpoint_message` pass through `POST /messages/creator/:creatorId`, including GPoint's current consent/age gates, idempotency, Persona/profile construction, AGATA relationship/history/memory handling, Naturalness V1, configured provider and Mac Worker. Pending replies remain pending; the tool does not write synthetic messages or invent a reply.
+The production API already registers the device start/exchange/refresh/revoke and Telegram approval endpoints. Before a production Telegram challenge can succeed, DevOps must configure the exact owner user ID in `GPOINT_CODEX_OWNER_USER_IDS`, the existing bot name in `TELEGRAM_BOT_USERNAME`, and the socket-peer IPs of trusted proxies in `GPOINT_CODEX_DEVICE_START_TRUSTED_PROXY_IPS`. The existing bot must reach the API's HTTPS ingress ending in `/api/internal/telegram/update`; its webhook approval route is `/api/auth/codex/telegram/codex-approve`. Fail-closed proxy and TLS requirements remain unchanged. No values belong in Git or chat. The latest ME-27 production audit found the three API environment settings missing; production configuration is not changed by this package.
+
+## Manual conversation
+
+Call `send_gpoint_message` once with the owner's exact text. It posts through `POST /messages/creator/:creatorId`, preserving the existing GPoint consent/age gates and Eros session. The tool result contains the exact Models Hub reply as its first text block and message/client IDs in a separate correlation block. Codex should display the reply verbatim.
+
+## Automatic scenario
+
+1. Call `begin_models_hub_scenario` with the test scenario and a hard `maxTurns` from 1 to 20.
+2. Codex authors one next user turn and calls `send_models_hub_scenario_turn` once. It must show that exact Models Hub reply in the Codex chat before composing another turn.
+3. Continue sequentially until the scenario ends or the server reaches the cap, then call `stop_models_hub_scenario`.
+
+Only the cap and turn count are persisted in Keychain; the scenario text remains in the Codex conversation. If delivery times out or returns pending, do not create a new message. `resume_pending_gpoint_message` resubmits the exact payload with the same `clientMessageId`, relying on the existing GPoint/Eros idempotency contract. A pending send blocks later sends and disconnect until reconciled. Resume attempts do not consume another scenario turn. Never continue after an error, revoked grant, or unknown delivery result.
+
+The MCP is only an API client. It never synthesizes model text or bypasses Eros. No live inference should be sent until the owner has approved a bounded real test and confirmed the Telegram link.

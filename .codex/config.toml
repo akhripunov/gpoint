@@ -13,4 +13,4 @@ env_vars = ["GPOINT_API_URL"]
 startup_timeout_sec = 30
 tool_timeout_sec = 50
 default_tools_approval_mode = "prompt"
-enabled_tools = ["connect_gpoint", "finish_gpoint_connection", "read_gpoint_history", "send_gpoint_message", "disconnect_gpoint"]
+enabled_tools = ["connect_gpoint", "finish_gpoint_connection", "get_gpoint_connection_status", "read_gpoint_history", "send_gpoint_message", "resume_pending_gpoint_message", "begin_models_hub_scenario", "send_models_hub_scenario_turn", "stop_models_hub_scenario", "disconnect_gpoint"]
