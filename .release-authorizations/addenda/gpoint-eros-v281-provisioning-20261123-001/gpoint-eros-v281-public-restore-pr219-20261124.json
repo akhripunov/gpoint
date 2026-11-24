@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "amendment_id": "gpoint-eros-v281-public-restore-pr219-20261124",
+  "project": "gpoint",
+  "authorization_id": "gpoint-eros-v281-provisioning-20261123-001",
+  "source_instruction_identifier": "OWNER_GPOINT_PR218_BACKUP_FAILURE_CONTINUE_20261124",
+  "owner_decision": "After protected GPoint release #45300583186 failed closed at isolated PostgreSQL restore (archive missing CREATE SCHEMA public), OWNER instructed continuation of the narrowly scoped follow-up fix. Authorizes publication and normal PR/CI integration of exact tested local commit df2e937fb235af3c56919b1378d8945912325953 and, after passing all protected gates, continuation of the existing task-scoped Eros 2.8.1 production release. No bypass, blind rerun of the failed run or changes to Eros SQLx/Kamal/other components. The source authorization and prior PR #218 addendum remain immutable.",
+  "original_authorization_record_blob_sha": "e5706e18cd488a53a3d640f6bdbd6c4fc3816c2e",
+  "scope_additions": [
+    {
+      "path": "scripts/verify-gpoint-scheduled-backup-restore.sh",
+      "source_commit_sha": "df2e937fb235af3c56919b1378d8945912325953",
+      "patch_sha256": "43b660f904f9ec362fcd6bd92a8104dc04c4ca7730038c58f33b8b815fcfc7e1",
+      "result_file_sha256": "89b60e3de1f4dc58aff3e76ce2fc6ff05526c3c0c8be1d020b47ddebe0d2f343",
+      "result_blob_sha": "9607e14d4c5b7d24937ed18341f1c76b062a7045"
+    },
+    {
+      "path": "tests/test_gpoint_scheduled_backup.py",
+      "source_commit_sha": "df2e937fb235af3c56919b1378d8945912325953",
+      "patch_sha256": "74b562d84b840df5cdac0484f8382b3d298076c3a19a9f3ad7071585935e7bb6",
+      "result_file_sha256": "d385b08a255b071a571709b973f7bd850daa3645d462b9060605387146d1f37e",
+      "result_blob_sha": "c79ce6a3b3be12975ef5fd995ccc50e60ed08178"
+    }
+  ],
+  "release_infrastructure_risk_contract": {
+    "allowed_paths": [
+      "scripts/verify-gpoint-scheduled-backup-restore.sh",
+      "tests/test_gpoint_scheduled_backup.py"
+    ],
+    "allowed_operations": [
+      "integrate",
+      "prepare",
+      "preflight",
+      "deploy",
+      "verify",
+      "rollback",
+      "recovery",
+      "publish_evidence"
+    ],
+    "baseline_sha": "82c3367f58f42a703e088d9850a3c109c4eb7859",
+    "risk_description": "Preserve the verified native pg_dump backup and adjust only the protected disposable PostgreSQL restore to handle full PG16 archives lacking CREATE SCHEMA public while preserving support for archives with an explicit schema entry; always drain the decrypted archive stream when reading its TOC.",
+    "required_gates": [
+      "exact main and owner-authorized source",
+      "full required CI Python/workspace",
+      "PG16 custom archive and schema TOC tests for full and schema-selected backups",
+      "large archive pipefail/stream drain regression test",
+      "no writes to live PostgreSQL during restore proof",
+      "age-encrypted backup ciphertext integrity",
+      "fresh isolated restore with Prisma and AGATA ledger parity",
+      "approved exact Prisma pending path and Eros SQLx 0086/0087",
+      "exact GHCR image digest",
+      "protected production environment",
+      "stock Kamal runtime verification and public smoke"
+    ],
+    "backup_plan": "Use current existing encrypted native backup gate on exact attested gpoint_staging production database and preserve already-verified bytes. Restore only into a disposable PostgreSQL 16 database; inspect an independently decrypted archive TOC, retain pristine public if no schema creation entry, otherwise drop only pristine public with RESTRICT. Verify restore tables and Prisma/AGATA heads before any migration apply. Preserve the independent Eros SQLx isolated backup and rehearsal unchanged.",
+    "rollback_plan": "If any encrypted backup, archive-list, public schema, restore, ledger or migration gate fails, halt before Apply and do not retry old failed deployment. Never remove live public schema, downgrade live databases or roll back applied migration SQL. Reconcile any ambiguous partial state read-only; only protected compatible image rollback after confirmed preflight.",
+    "stop_conditions": [
+      "unverified source DB or archive identity",
+      "unclear public schema state or archive TOC ambiguity",
+      "decrypt/list SIGPIPE or failed pipe",
+      "missing or damaged Prisma ledger",
+      "failed/absent private restore and required checksums",
+      "migration approval/partial-state mismatch",
+      "unknown changed scope or unauthorized services",
+      "required CI, protected Environment, or runtime verification failure"
+    ]
+  },
+  "amendment_commitment_sha256": "a1353cd80f290a2cb75bd0a10dec4f1d9d5a943c16c40725b458e6f635375942"
+}
