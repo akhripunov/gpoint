@@ -259,28 +259,33 @@ const consentBody = {
 };
 const consent = await request(`${api}/messages/consent`, { method: 'POST', token, body: consentBody });
 assert.equal(consent.status, 201, JSON.stringify(consent.data));
+assert.equal(consent.data?.longTermMemory, true);
 
 const revoked = await request(`${api}/messages/consent/revoke`, {
   method: 'POST', token, body: { purpose: 'long_term_memory' },
 });
 assert.equal(revoked.status, 201, JSON.stringify(revoked.data));
+assert.equal(revoked.data?.longTermMemory, false);
+const revokedState = await request(`${api}/messages/state`, { token });
+assert.equal(revokedState.status, 200);
+assert.equal(revokedState.data?.longTermMemory, false);
+assert.equal(revokedState.data?.ageAssuranceRequired, false);
+
+// Current Messages contract: age assurance gates access; consent state is
+// recorded independently. Keep this single successful setup turn so the
+// continuity/recall history counts and gap assertions remain unchanged.
 const noConsent = await request(`${api}/messages/creator/${creator}`, {
   method: 'POST',
   token,
-  body: { clientMessageId: randomUUID(), text: 'synthetic no-memory-consent check' },
+  body: { clientMessageId: randomUUID(), text: 'Synthetic chat access after memory consent revocation.' },
 });
-assert.equal(noConsent.status, 403, JSON.stringify(noConsent.data));
-assert.equal(noConsent.data?.code, 'CHAT_CONSENT_REQUIRED');
+assert.equal(noConsent.status, 201, JSON.stringify(noConsent.data));
+assert.equal(noConsent.data?.status, 'completed');
+assert.equal(noConsent.data?.response?.text, 'DETERMINISTIC_LOCAL_E2E_REPLY');
 
 const restoredConsent = await request(`${api}/messages/consent`, { method: 'POST', token, body: consentBody });
 assert.equal(restoredConsent.status, 201, JSON.stringify(restoredConsent.data));
-const consentRestoredMessage = await request(`${api}/messages/creator/${creator}`, {
-  method: 'POST', token,
-  body: { clientMessageId: randomUUID(), text: 'Synthetic consent restored check before our continuity exercise.' },
-});
-assert.equal(consentRestoredMessage.status, 201, JSON.stringify(consentRestoredMessage.data));
-assert.equal(consentRestoredMessage.data?.status, 'completed');
-assert.equal(consentRestoredMessage.data?.response?.text, 'DETERMINISTIC_LOCAL_E2E_REPLY');
+assert.equal(restoredConsent.data?.longTermMemory, true);
 await assertStockApiUserIsolation();
 
 const dialogue = [
