@@ -65,6 +65,20 @@ def test_runtime_change_is_full_mode(repo):
     assert report["mode"] == "FULL"
 
 
+def test_supplied_main_sha_must_match_origin_main(repo):
+    work, production = repo
+    (work / "README.md").write_text("docs only\n", encoding="utf-8")
+    git(work, "commit", "-qam", "docs")
+    candidate = git(work, "rev-parse", "HEAD")
+    code, report = run(work, production, "--main-sha", candidate)
+    assert code == 2
+    assert report["status"] == "BLOCK"
+    assert "origin/main" in report["reason"]
+    code, report = run(work, production, "--main-sha", production)
+    assert code == 0
+    assert report["status"] == "READY"
+
+
 def test_broken_python_syntax_blocks_before_push(repo):
     work, production = repo
     (work / "broken.py").write_text("def oops(:\n", encoding="utf-8")

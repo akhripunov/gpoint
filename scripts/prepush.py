@@ -107,7 +107,9 @@ def main() -> int:
     try:
         synced = sync(repo, fetch=not args.no_fetch)
         candidate = _git(repo, "rev-parse", "--verify", f"{args.candidate}^{{commit}}")
-        main_sha = args.main_sha or synced["main_sha"]
+        if args.main_sha and args.main_sha != synced["main_sha"]:
+            raise CandidateBlocked("supplied main SHA does not match origin/main")
+        main_sha = synced["main_sha"]
 
         started = time.monotonic()
         result = classify(repo, args.production_sha, main_sha, candidate)
