@@ -57,6 +57,7 @@ Specific removed paths include:
 | Whitespace | `git diff --check` passed. |
 | Package-manager lock validation | pnpm 9.15.0 is available in the local Corepack cache. No dependency update was attempted: the remaining findings are transitive dependencies of the current Prisma/PostCSS toolchain and a deepmerge major-version change needs compatibility validation. |
 | Full Docker/Eros build | Not run locally by design; use the existing GPoint Release Pipeline. Docker Desktop was not used. |
+| Canonical pre-push | `python3 scripts/prepush.py --production-sha 075efe20980bd808a2d3d2aa21280e8de371e28c --no-fetch --main-sha 075efe20980bd808a2d3d2aa21280e8de371e28c` — FULL mode, `PREPUSH_STATUS=READY`. This validates local candidate admission only; it does not authorize publication or release. |
 
 The current Linear ME-64 record gives a baseline of 57 AGATA-related and 3 core GPoint Dependabot alerts (60 total). The live Dependabot alert endpoint could not be read: the configured `gh` authentication is invalid, and the GitHub connector does not expose that endpoint. This means the current alert count is unverified; it does not establish a GitHub service outage.
 
@@ -79,4 +80,4 @@ These are scoped follow-up gates, not blockers to removing the API fallback, pac
 
 Base: `075efe20980bd808a2d3d2aa21280e8de371e28c`.
 
-Status: `LOCAL_PENDING_RELEASE`. Read-only runtime and successful Deployment evidence now confirm the production baseline SHA `075efe20980bd808a2d3d2aa21280e8de371e28c`. The remote `main` exact ref is the same SHA. The local `origin` remote points to a worktree and is not used as evidence. This is not publication authorization, and no claim of `READY_FOR_RELEASE` is made until the canonical pre-push gate passes on the final candidate SHA.
+Status: `LOCAL_PENDING_RELEASE`. Read-only runtime and successful Deployment evidence confirm the production baseline SHA `075efe20980bd808a2d3d2aa21280e8de371e28c`; the remote `main` exact ref is the same SHA. The canonical pre-push gate passed on the final candidate in FULL mode. This is not publication authorization; no push, PR, Actions run, merge, or production change was performed.
