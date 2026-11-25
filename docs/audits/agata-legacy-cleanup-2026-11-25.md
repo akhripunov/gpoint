@@ -8,9 +8,11 @@ This is a local candidate only. No push, PR, Actions run, merge, or production c
 
 ## Runtime use and repository findings
 
+Fresh read-only production evidence was captured from the authorized Mac on 2026-11-25. GitHub run [45542660307](https://github.com/akhripunov/gpoint/actions/runs/45542660307) completed `Build and publish immutable images` and `Kamal production Deploy and Verify` successfully for Core SHA `075efe20980bd808a2d3d2aa21280e8de371e28c`. Runtime container inspection confirmed that Core API, Bot, Worker and the Worker proxy use the image for this SHA. Production is component-mixed: Mini App is still on `4e5222ae9fb8417e216ad674382b425ceaf38978` (run `45327598308`), and Eros uses the official upstream revision `c7d63d77e9b52d7ae4952b8374512f571da065d5`. Kamal Proxy is running; PostgreSQL and Redis containers reported healthy. No production mutation was made.
+
 | Area | Finding | Action |
 | --- | --- | --- |
-| Production AGATA Engine | The accepted read-only inventory reported no AGATA-named container and no AGATA schema/version table in the audited shared databases. Current production chat path is GPoint → Eros. | Removed stale API fallback and old gateway. |
+| Production AGATA Engine | The accepted read-only inventory reported no AGATA-named container and no AGATA schema/version table in the audited shared databases. Current production chat path is GPoint → Eros. The fresh container inventory is consistent with that topology. | Removed stale API fallback and old gateway. |
 | GPoint Messages API | `messages.ts` contained the retired AGATA client/integration path and merged AGATA/Eros state. Current Messages routes can use GPoint-owned state and Eros. | Removed the AGATA branches while preserving API response shapes, age checks, authenticated user scoping, and legacy-history fencing. |
 | Old AGATA Worker Gateway | It was registered in the API and exposed the dual legacy route. Current Worker integration uses `GpointWorkerGatewayController` and `/gpoint-worker`. | Removed the old controller and migrated cancellation integration coverage to the current gateway/token boundary. |
 | GPoint Mac Worker | `services/agata/worker/gpoint_mac_worker.py` is the current Eros-facing worker and uses `/api/gpoint-worker`. Its historical directory and environment names remain. | Retained; this is an active GPoint/Eros path, not the retired AGATA Engine. |
@@ -77,4 +79,4 @@ These are scoped follow-up gates, not blockers to removing the API fallback, pac
 
 Base: `075efe20980bd808a2d3d2aa21280e8de371e28c`.
 
-Status: `LOCAL_PENDING_RELEASE`. The canonical pre-push gate cannot be completed because its required successful production Deployment SHA is not verified: the release journal is historical, the GitHub connector's deployments endpoint is unsupported, and the available `gh` login is invalid. The remote `main` exact ref was verified through the GitHub connector at `075efe20980bd808a2d3d2aa21280e8de371e28c`; the stale local `origin` points to a worktree and is not used as evidence. No claim of `READY_FOR_RELEASE` is made.
+Status: `LOCAL_PENDING_RELEASE`. Read-only runtime and successful Deployment evidence now confirm the production baseline SHA `075efe20980bd808a2d3d2aa21280e8de371e28c`. The remote `main` exact ref is the same SHA. The local `origin` remote points to a worktree and is not used as evidence. This is not publication authorization, and no claim of `READY_FOR_RELEASE` is made until the canonical pre-push gate passes on the final candidate SHA.
