@@ -240,10 +240,13 @@ def test_kamal_roles_share_the_private_eros_network_with_stable_service_aliases(
     model = (ROOT / "services/eros-engine/eros-production-model-config.toml").read_text()
     assert "- shared_internal" in api and "- gpoint_eros_data" in api
     assert "network-alias: gpoint-core-api" in api
-    assert "network: gpoint_eros_data" in engine and "network-alias: gpoint-eros" in engine
+    assert "- gpoint_eros_data" in engine and "- kamal" in engine and "network-alias: gpoint-eros" in engine
     assert "network-alias: gpoint-eros" in engine
     assert "'EROS_SERVICE_URL': 'http://gpoint-eros:8080'" in (ROOT / "scripts/eros-production-secrets.py").read_text()
-    assert model.count("http://gpoint-core-api:3000/eros-worker/v1/") == 2
+    assert model.count("http://gpoint-core-api:3000/eros-worker/v1/") == 1
+    assert "https://api.deepseek.com/chat/completions" in model
+    assert "gpoint-codex@gpoint" not in model
+    assert model.count("deepseek-flash@deepseek") == 4
 
 
 def test_hosted_stock_eros_e2e_uses_exact_build_digest_and_approved_local_alias():
@@ -302,3 +305,14 @@ def test_release_forwards_ollama_helper_over_ssh_without_go_templates(tmp_path):
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout == "OLLAMA_PREPARE=PASS state=absent\n"
+
+def test_deepseek_runtime_verification_and_rollback_provider_guard():
+    deploy = steps_for("deploy")
+    verify = next(step for step in deploy if step.get("id") == "verify")["run"]
+    assert 'EROS_PROVIDER_CONFIG=PASS provider=deepseek model=deepseek-flash' in verify
+    assert 'test -n "$DEEPSEEK_API_KEY"' in verify
+    assert 'sha256sum /opt/gpoint/env/eros-production-model-config.toml' in verify
+    retained = next(step for step in deploy if step.get("name") == "Verify retained Eros rollback containers")["run"]
+    assert 'EROS_ROLLBACK_PROVIDER_COMPATIBLE=PASS' in retained
+    assert 'Eros rollback target lacks DeepSeek credential' in retained
+    assert 'Eros rollback target lacks compatible provider networking' in retained

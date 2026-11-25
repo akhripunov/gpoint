@@ -1664,6 +1664,12 @@ jobs:
             eros_version="$(sed -n 's/^gpoint-eros-pilot-engine|\([^|]*\).*/\1/p' <<< "$runtime_rows")"
             docker exec "gpoint-eros-pilot-engine-$eros_version" curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null
             docker exec "gpoint-eros-pilot-engine-$eros_version" grep -F 'embeddings = "http://gpoint-core-api:3000/eros-worker/v1/embeddings"' /etc/eros-engine/model_config.toml >/dev/null
+            docker exec "gpoint-eros-pilot-engine-$eros_version" grep -Fx 'model = "deepseek-flash@deepseek"' /etc/eros-engine/model_config.toml >/dev/null
+            docker exec "gpoint-eros-pilot-engine-$eros_version" grep -Fx 'chat = "https://api.deepseek.com/chat/completions"' /etc/eros-engine/model_config.toml >/dev/null
+            docker exec "gpoint-eros-pilot-engine-$eros_version" sh -c 'test -n "$DEEPSEEK_API_KEY" && ! grep -Fq "gpoint-codex@gpoint" /etc/eros-engine/model_config.toml'
+            test "$(docker exec "gpoint-eros-pilot-engine-$eros_version" sha256sum /etc/eros-engine/model_config.toml | awk '{print $1}')" = "$(sha256sum /opt/gpoint/env/eros-production-model-config.toml | awk '{print $1}')"
+            docker inspect --format '{{json .NetworkSettings.Networks}}' "gpoint-eros-pilot-engine-$eros_version" | python3 -c 'import json,sys; assert set(json.load(sys.stdin)) == {"gpoint_eros_data","kamal"}'
+            echo EROS_PROVIDER_CONFIG=PASS provider=deepseek model=deepseek-flash
             python3 "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py" "gpoint-eros-pilot-engine-$eros_version" "$expected_eros_upstream" none
             rm -f -- "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py"
             echo "GPOINT_EROS_HEALTH=PASS UPSTREAM_SHA=$expected_eros_upstream DIGEST=$eros_digest"
@@ -2103,6 +2109,13 @@ jobs:
             test "$(docker inspect --format "{{index .Config.Labels \"$label\"}}" "$ids")" = "$source"
             docker image inspect "$(docker inspect --format '{{.Image}}' "$ids")" --format '{{json .RepoDigests}}' | grep -F "$image" >/dev/null
           done
+          grep -Fx 'model = "deepseek-flash@deepseek"' /opt/gpoint/env/eros-production-model-config.toml >/dev/null
+          if grep -Fq 'gpoint-codex@gpoint' /opt/gpoint/env/eros-production-model-config.toml; then
+            echo 'Eros rollback would use retired generation route' >&2; exit 1
+          fi
+          docker inspect --format '{{json .Config.Env}}' "$ids" | python3 -c 'import json,sys; rows=json.load(sys.stdin); assert len([e for e in rows if e.startswith("DEEPSEEK_API_KEY=") and len(e.split("=",1)[1]) >= 16]) == 1, "Eros rollback target lacks DeepSeek credential"'
+          docker inspect --format '{{json .NetworkSettings.Networks}}' "$ids" | python3 -c 'import json,sys; assert set(json.load(sys.stdin)) == {"gpoint_eros_data","kamal"}, "Eros rollback target lacks compatible provider networking"'
+          echo EROS_ROLLBACK_PROVIDER_COMPATIBLE=PASS
           echo EROS_ROLLBACK_TARGET_RETAINED=PASS
           REMOTE
       - name: Verify Eros rollback image against an isolated current database restore

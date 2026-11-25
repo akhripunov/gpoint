@@ -21,6 +21,7 @@ ENV_PATH = Path('/opt/gpoint/env/eros.env')
 NATIVE_ENV_PATH = Path('/opt/gpoint/env/eros-engine.env')
 NATIVE_API_ENV_PATH = Path('/opt/gpoint/env/eros-api.env')
 SOURCE_ENV_PATH = Path('/opt/gpoint/env/production.env')
+DEEPSEEK_ENV_PATH = Path('/opt/gpoint/env/deepseek.env')
 SECRET_KEYS = (
     'EROS_JWT_SECRET',
     'EROS_EMBEDDING_API_KEY',
@@ -353,8 +354,33 @@ GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA engine TO eros_runtime;
     return 'EROS_DATABASE_ROLES=READY'
 
 
-def write_native_engine_env(path=ENV_PATH, output=NATIVE_ENV_PATH):
+def read_deepseek_key(path=DEEPSEEK_ENV_PATH):
+    """Read the separately provisioned, non-generated provider credential."""
+    path = Path(path)
+    try:
+        if path.parent.is_symlink() or path.is_symlink():
+            raise RuntimeError('DeepSeek credential path is unsafe')
+        parent = path.parent.stat()
+        info = path.stat()
+        if (parent.st_mode & 0o077 or not stat.S_ISREG(info.st_mode)
+                or info.st_mode & 0o077 or info.st_nlink != 1
+                or (path == DEEPSEEK_ENV_PATH and (info.st_uid != 0 or parent.st_uid != 0))):
+            raise RuntimeError('DeepSeek credential permissions are unsafe')
+        lines = path.read_text().splitlines()
+    except (OSError, UnicodeError):
+        raise RuntimeError('DeepSeek credential is unavailable') from None
+    entries = [line for line in lines if line and not line.startswith('#')]
+    if len(entries) != 1 or not entries[0].startswith('DEEPSEEK_API_KEY='):
+        raise RuntimeError('DeepSeek credential file is malformed')
+    value = entries[0].split('=', 1)[1]
+    if not re.fullmatch(r'[A-Za-z0-9_-]{16,256}', value):
+        raise RuntimeError('DeepSeek credential is missing or malformed')
+    return value
+
+
+def write_native_engine_env(path=ENV_PATH, output=NATIVE_ENV_PATH, *, deepseek_env=DEEPSEEK_ENV_PATH):
     """Materialize the minimal stock-image environment used by Kamal and SQLx."""
+    provider_key = read_deepseek_key(deepseek_env)
     values = read_env(Path(path))
     required = set(SECRET_KEYS) | {'EROS_RUNTIME_DATABASE_URL', 'EROS_MIGRATOR_DATABASE_URL'}
     if not required.issubset(values):
@@ -374,6 +400,7 @@ def write_native_engine_env(path=ENV_PATH, output=NATIVE_ENV_PATH):
         'EROS_BRIDGE_API_KEY': values['EROS_BRIDGE_API_KEY'],
         'GENOME_WRITE_SECRET': values['GENOME_WRITE_SECRET'],
         'OPENROUTER_API_KEY': '',
+        'DEEPSEEK_API_KEY': provider_key,
         'SUPABASE_JWT_SECRET': values['EROS_JWT_SECRET'],
         'MODEL_CONFIG_PATH': '/etc/eros-engine/model_config.toml',
         'RUST_LOG': 'info',
@@ -515,6 +542,7 @@ def main():
     parser.add_argument('--image', required=True)
     parser.add_argument('--tenant-id')
     parser.add_argument('--source-env', default=str(SOURCE_ENV_PATH))
+    parser.add_argument('--deepseek-env', default=str(DEEPSEEK_ENV_PATH))
     parser.add_argument('--ensure-postgres-network', action='store_true')
     parser.add_argument('--check-only', action='store_true')
     parser.add_argument('--provision-database', action='store_true')
@@ -526,11 +554,14 @@ def main():
             if (args.provision_database or args.ensure_postgres_network
                     or args.write_native_engine_env or args.write_native_api_env):
                 raise ValueError('check-only cannot be combined with a provisioning flag')
+            read_deepseek_key(args.deepseek_env)
             state = check_prerequisites(
                 args.path, source_sha=args.source_sha, image=args.image,
                 tenant_id=args.tenant_id, source_env=args.source_env)
             print(f'EROS_PREREQUISITES=READY state={state}')
             return
+        if args.write_native_engine_env:
+            read_deepseek_key(args.deepseek_env)
         if args.provision_database:
             assert_shared_database_acl_isolatable()
         print(provision(args.path, source_sha=args.source_sha, image=args.image,
@@ -540,7 +571,7 @@ def main():
         if args.provision_database:
             print(provision_database(args.path))
         if args.write_native_engine_env:
-            print(write_native_engine_env(args.path))
+            print(write_native_engine_env(args.path, deepseek_env=args.deepseek_env))
         if args.write_native_api_env:
             print(write_native_api_env(args.path, args.source_env))
     except Exception as error:

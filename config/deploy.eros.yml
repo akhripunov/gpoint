@@ -9,7 +9,9 @@ servers:
       - <%= ENV.fetch("GPOINT_PRODUCTION_HOST") %>
     proxy: false
     options:
-      network: gpoint_eros_data
+      network:
+        - gpoint_eros_data
+        - kamal
       network-alias: gpoint-eros
       env-file:
         - /opt/gpoint/env/eros-engine.env

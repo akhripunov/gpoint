@@ -1,15 +1,15 @@
-# Stock Eros uses the existing GPoint API and Worker. The Core API preserves
+# Stock Eros uses DeepSeek directly for generation. The Core API preserves
 # the embedding contract and calls Ollama over its private Docker network.
 [defaults]
-fallback_model = "gpoint-codex@gpoint"
+fallback_model = "deepseek-flash@deepseek"
 fallback_temperature = 1.0
 
 [tasks.chat_companion]
-model = "gpoint-codex@gpoint"
+model = "deepseek-flash@deepseek"
 retry_depth = 0
 
-[providers.gpoint]
-chat = "http://gpoint-core-api:3000/eros-worker/v1/chat/completions"
+[providers.deepseek]
+chat = "https://api.deepseek.com/chat/completions"
 
 [providers.gpoint_embeddings]
 embeddings = "http://gpoint-core-api:3000/eros-worker/v1/embeddings"
@@ -18,7 +18,7 @@ embeddings = "http://gpoint-core-api:3000/eros-worker/v1/embeddings"
 model = "qwen3-embedding:0.6b@gpoint_embeddings"
 
 [tasks.dreaming_scan]
-model = "gpoint-codex@gpoint"
+model = "deepseek-flash@deepseek"
 temperature = 1.0
 max_tokens = 1024
 filter_prompt = """
@@ -26,6 +26,6 @@ Read the transcript in the user message and return one valid JSON object with ex
 """
 
 [tasks.arc_rewrite]
-model = "gpoint-codex@gpoint"
+model = "deepseek-flash@deepseek"
 temperature = 1.0
 max_tokens = 1500

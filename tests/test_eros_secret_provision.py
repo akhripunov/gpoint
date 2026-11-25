@@ -12,6 +12,37 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ErosProductionSecretTests(unittest.TestCase):
+    def _deepseek_fixture(self, root):
+        path = root / 'deepseek.env'
+        path.write_text('DEEPSEEK_API_KEY=synthetic-provider-key-123456789\n')
+        path.chmod(0o600)
+        return path
+
+    def test_deepseek_credential_required_and_preserved_on_regeneration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'eros.env'
+            output = root / 'eros-engine.env'
+            key_path = root / 'deepseek.env'
+            MODULE.provision(source, source_sha='a' * 40,
+                             image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
+                             tenant_id='12345678-1234-4234-8234-123456789abc')
+            with self.assertRaisesRegex(RuntimeError, 'credential is unavailable'):
+                MODULE.write_native_engine_env(source, output, deepseek_env=key_path)
+            self.assertFalse(output.exists())
+            key_path = self._deepseek_fixture(root)
+            first = MODULE.write_native_engine_env(source, output, deepseek_env=key_path)
+            original = output.read_bytes()
+            second = MODULE.write_native_engine_env(source, output, deepseek_env=key_path)
+            self.assertEqual(original, output.read_bytes())
+            self.assertEqual(first, second)
+            self.assertIn(b'DEEPSEEK_API_KEY=synthetic-provider-key-123456789', original)
+            self.assertNotIn('synthetic-provider-key', first)
+            key_path.chmod(0o644)
+            with self.assertRaisesRegex(RuntimeError, 'permissions are unsafe'):
+                MODULE.write_native_engine_env(source, output, deepseek_env=key_path)
+            self.assertEqual(original, output.read_bytes())
+
     def test_generates_persistent_credentials_without_emitting_values(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'eros.env'
@@ -49,7 +80,7 @@ class ErosProductionSecretTests(unittest.TestCase):
             MODULE.provision(source, source_sha='a' * 40,
                              image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
                              tenant_id='12345678-1234-4234-8234-123456789abc')
-            self.assertEqual(MODULE.write_native_engine_env(source, output), 'EROS_NATIVE_ENV=READY')
+            self.assertEqual(MODULE.write_native_engine_env(source, output, deepseek_env=self._deepseek_fixture(root)), 'EROS_NATIVE_ENV=READY')
             values = dict(line.split('=', 1) for line in output.read_text().splitlines())
             secrets = MODULE.read_env(source)
             self.assertEqual(output.stat().st_mode & 0o777, 0o600)
@@ -141,7 +172,7 @@ class ErosProductionSecretTests(unittest.TestCase):
                 if key in {'EROS_SOURCE_SHA', 'EROS_IMAGE', 'EROS_TEST_USER_IDS', 'EROS_TEST_CREATOR_IDS'}:
                     continue
                 self.assertEqual(upgraded[key], value, key)
-            MODULE.write_native_engine_env(source, engine_output)
+            MODULE.write_native_engine_env(source, engine_output, deepseek_env=self._deepseek_fixture(root))
             MODULE.write_native_api_env(source, production, api_output)
             engine = dict(line.split('=', 1) for line in engine_output.read_text().splitlines())
             api = dict(line.split('=', 1) for line in api_output.read_text().splitlines())
