@@ -31,12 +31,12 @@ test('MCP exchange keeps both credentials in Keychain and history uses the one b
   assert.match(await tools.finish(), /Connected/);
   assert.equal(values.get('access-token'), 'a'.repeat(43));
   assert.equal(values.get('refresh-token'), 'r'.repeat(43));
-  assert.equal(await tools.history(), 'Eros [2026-01-01T00:00:00Z]: Exact history.');
+  assert.equal(await tools.history(), 'AGATA [2026-01-01T00:00:00Z]: Exact history.');
   assert.equal(calls[1].path, '/messages/creator/creator%2Fone?limit=50');
   assert.equal(new Headers(calls[1].init?.headers).get('authorization'), `Bearer ${'a'.repeat(43)}`);
 });
 
-test('send returns Eros text verbatim and disconnect revokes before removing credentials', async () => {
+test('send returns AGATA text verbatim and disconnect revokes before removing credentials', async () => {
   const exact = '  The response, with punctuation!  ';
   const { tools, values, calls } = fixture([{ status: 'completed', response: { text: exact } }, { revoked: true }]);
   values.set('access-token', 'a'.repeat(43));

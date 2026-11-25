@@ -148,3 +148,12 @@ def test_missing_live_component_is_forced_into_deploy_scope(tmp_path):
 
     assert scope["scope"] == "EROS"
     assert scope["reason"] == "missing_runtime_roles"
+
+
+@pytest.mark.parametrize(("path", "expected_scope"), [
+    ("infra/production/Gpoint.Miniapp.Dockerfile", "MINIAPP"),
+    ("scripts/docker_dependency_manifests.py", "CORE+MINIAPP"),
+])
+def test_build_input_changes_select_owning_components(tmp_path, path, expected_scope):
+    repo, _baseline, candidate, inventory = _scope_repo(tmp_path, changed_paths=(path,))
+    assert intent.classify_component_scope(repo, candidate, inventory)["scope"] == expected_scope
