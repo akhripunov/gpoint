@@ -240,7 +240,9 @@ def test_kamal_roles_share_the_private_eros_network_with_stable_service_aliases(
     model = (ROOT / "services/eros-engine/eros-production-model-config.toml").read_text()
     assert "- shared_internal" in api and "- gpoint_eros_data" in api
     assert "network-alias: gpoint-core-api" in api
-    assert "- gpoint_eros_data" in engine and "- kamal" in engine and "network-alias: gpoint-eros" in engine
+    assert "network: gpoint_eros_data" in engine and "network-alias: gpoint-eros" in engine
+    # Kamal adds --network kamal itself; an explicit duplicate fails docker run.
+    assert yaml.safe_load(engine)["servers"]["engine"]["options"]["network"] == "gpoint_eros_data"
     assert "network-alias: gpoint-eros" in engine
     assert "'EROS_SERVICE_URL': 'http://gpoint-eros:8080'" in (ROOT / "scripts/eros-production-secrets.py").read_text()
     assert model.count("http://gpoint-core-api:3000/eros-worker/v1/") == 1
