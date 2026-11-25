@@ -34,7 +34,6 @@ genome_write=$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')
 telegram_bot_token=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
 telegram_webhook_secret=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
 worker_token=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
-agata=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
 umask 077; envfile="$tmp/compose.env"
 cat > "$envfile" <<EOF
 EROS_IMAGE=$image_id
@@ -48,10 +47,9 @@ EROS_TEST_GENOME_WRITE_SECRET=$genome_write
 EROS_TEST_TELEGRAM_BOT_TOKEN=$telegram_bot_token
 EROS_TEST_TELEGRAM_WEBHOOK_SECRET=$telegram_webhook_secret
 EROS_TEST_WORKER_TOKEN=$worker_token
-EROS_TEST_AGATA_TOKEN=$agata
 EROS_TEST_OPENROUTER_API_KEY=
 EOF
-unset admin provider signing jwt genome_write telegram_bot_token telegram_webhook_secret agata
+unset admin provider signing jwt genome_write telegram_bot_token telegram_webhook_secret
 if [ -n "$release_core" ]; then
   printf 'GPOINT_E2E_CORE_IMAGE=%s\nGPOINT_E2E_WORKER_DEPS=%s\n' "$release_core" "$tmp/worker-deps" >> "$envfile"
 fi

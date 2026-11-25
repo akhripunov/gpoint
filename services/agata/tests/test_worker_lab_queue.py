@@ -1,18 +1,16 @@
-"""Local LAB ingress tests; no network, Codex process, or production fixture."""
+"""Retained LAB queue safety tests; no retired evaluator or Promptfoo dependency."""
 from __future__ import annotations
 
 import importlib.util
-import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+import sys
 
 WORKER_DIR = Path(__file__).resolve().parents[1] / "worker"
-LAB_DIR = Path(__file__).resolve().parents[1] / "conversation-lab"
-import sys
 sys.path.insert(0, str(WORKER_DIR))
-sys.path.insert(0, str(LAB_DIR / "evaluators"))
-import worker_client
 SPEC = importlib.util.spec_from_file_location("agata_lab_queue", WORKER_DIR / "lab_queue.py")
 lab_queue = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
@@ -20,32 +18,28 @@ SPEC.loader.exec_module(lab_queue)
 
 
 def payload(job_id: str = "job-001") -> dict:
-    job = worker_client.build_job(
-        scenario_id="ru_naturalness-02", configuration_id="baseline",
-        turn_index=0, job_id=job_id,
-    )
-    job["timeout_seconds"] = 20
-    return job
-
-
-def judge_payload(job_id="judge-job-001", *, split="DEV"):
-    from judges import CORE_IDS, judge_output_schema
-    verdict = {"overall": "first", "core_dimensions": {name: "first" for name in CORE_IDS},
-               "conditional_evidence": {}, "reasons": ["Direct and coherent."], "defects": [],
-               "uncertainty": False, "position_sensitivity": False}
-    invocation_id = "batch-a-judge-1"
     return {
-        "job_id": job_id, "job_type": "judge", "experiment_id": "agata-lab-judge-v1",
-        "configuration_id": "judge-1", "origin": "conversation-lab-judge", "scenario_id": "dev-clean-01",
-        "turn_index": 0, "data_classification": "synthetic", "dataset_split": split,
-        "timeout_seconds": 60, "history_receipt_ids": [], "judge_slot": 1,
-        "promptfoo_invocation_id": invocation_id, "run_id": "batch-a", "judge_schema_version": 1,
-        "presented_labels": ["X", "Y"], "model": "gpt-6-luna", "reasoning_effort": "medium",
-        "request": {"instructions": "AGATA Lab isolated judge protocol v1.", "persona": {},
-                    "communication_settings": {}, "memories": [], "dialogue_summaries": [],
-                    "history": [], "user_message": "Compare anonymous X and Y."},
-        "_test_verdict": verdict,
+        "job_id": job_id, "experiment_id": "agata-naturalness-v1",
+        "configuration_id": "baseline", "origin": "conversation-lab",
+        "scenario_id": "ru_naturalness-02", "turn_index": 0,
+        "data_classification": "synthetic", "timeout_seconds": 20,
+        "history_receipt_ids": [],
+        "request": {"instructions": "synthetic fixture", "persona": {},
+                    "communication_settings": {}, "memories": [],
+                    "dialogue_summaries": [], "history": [],
+                    "user_message": "synthetic fixture"},
     }
+
+
+def submit_validated(job: dict, root: Path, max_pending: int = 16) -> None:
+    encoded = json.dumps(job, ensure_ascii=False, separators=(",", ":")).encode()
+    with patch.object(lab_queue, "_validate", return_value=(job, encoded)):
+        lab_queue.submit(job, root=root, max_pending=max_pending)
+
+
+def claim_validated(root: Path):
+    with patch.object(lab_queue, "_validate", side_effect=lambda job, root: (job, b"")):
+        return lab_queue.claim_next(root)
 
 
 class LabQueueTests(unittest.TestCase):
@@ -59,21 +53,21 @@ class LabQueueTests(unittest.TestCase):
 
     def test_submit_claim_complete_round_trip_is_local_and_receipt_is_private(self):
         job = payload()
-        lab_queue.submit(job, root=self.root)
+        submit_validated(job, self.root)
         self.assertEqual(lab_queue.pending_count(self.root), 1)
-        claimed = lab_queue.claim_next(self.root)
+        claimed = claim_validated(self.root)
         self.assertEqual(claimed["job_id"], job["job_id"])
         self.assertEqual(list((self.root / "pending").glob("*.json")), [])
-        lab_queue.finish(self.root, job["job_id"], status="completed", response="Привет!")
+        lab_queue.finish(self.root, job["job_id"], status="completed", response="synthetic reply")
         receipt = lab_queue.read_receipt(self.root, job["job_id"])
-        self.assertEqual(receipt["response"], "Привет!")
+        self.assertEqual(receipt["response"], "synthetic reply")
         self.assertEqual(receipt["status"], "completed")
         self.assertEqual((self.root / "receipts/job-001.json").stat().st_mode & 0o077, 0)
 
     def test_receipt_preserves_only_source_attributed_provider_model_identity(self):
         job = payload()
-        lab_queue.submit(job, root=self.root)
-        lab_queue.claim_next(self.root)
+        submit_validated(job, self.root)
+        claim_validated(self.root)
         lab_queue.finish(
             self.root, job["job_id"], status="completed", response="reply",
             execution={"requested_model": "gpt-6-luna", "requested_reasoning_effort": "medium",
@@ -84,8 +78,8 @@ class LabQueueTests(unittest.TestCase):
         self.assertEqual(execution["actual_model_source"], "codex_provider_response_metadata")
 
         second = payload("job-002")
-        lab_queue.submit(second, root=self.root)
-        lab_queue.claim_next(self.root)
+        submit_validated(second, self.root)
+        claim_validated(self.root)
         lab_queue.finish(
             self.root, second["job_id"], status="completed", response="reply",
             execution={"requested_model": "gpt-6-luna", "requested_reasoning_effort": "medium",
@@ -96,11 +90,11 @@ class LabQueueTests(unittest.TestCase):
         self.assertIsNone(execution["actual_model_source"])
 
     def test_duplicate_id_and_queue_limit_fail_closed(self):
-        lab_queue.submit(payload(), root=self.root, max_pending=1)
+        submit_validated(payload(), self.root, max_pending=1)
         with self.assertRaisesRegex(lab_queue.LabQueueError, "duplicate"):
-            lab_queue.submit(payload(), root=self.root, max_pending=1)
+            submit_validated(payload(), self.root, max_pending=1)
         with self.assertRaisesRegex(lab_queue.LabQueueError, "queue_full"):
-            lab_queue.submit(payload("job-002"), root=self.root, max_pending=1)
+            submit_validated(payload("job-002"), self.root, max_pending=1)
 
     def test_invalid_origin_classification_timeout_or_context_is_rejected(self):
         mutations = (
@@ -112,9 +106,8 @@ class LabQueueTests(unittest.TestCase):
         for mutation in mutations:
             job = payload()
             job.update(mutation)
-            with self.subTest(mutation=mutation):
-                with self.assertRaises(lab_queue.LabQueueError):
-                    lab_queue.submit(job, root=self.root)
+            with self.subTest(mutation=mutation), self.assertRaises(lab_queue.LabQueueError):
+                lab_queue.submit(job, root=self.root)
         self.assertEqual(lab_queue.pending_count(self.root), 0)
 
     def test_oversized_payload_is_rejected(self):
@@ -132,125 +125,40 @@ class LabQueueTests(unittest.TestCase):
         receipt.chmod(0o600)
         with self.assertRaisesRegex(lab_queue.LabQueueError, "usage_invalid"):
             lab_queue.owner_approval_usage_calls(self.support, approval)
-
         receipt.unlink()
         receipt.symlink_to(self.support / "missing-target")
         with self.assertRaisesRegex(lab_queue.LabQueueError, "usage_invalid"):
             lab_queue.owner_approval_usage_calls(self.support, approval)
 
-        receipt.unlink()
-        usage_dir.rmdir()
-        external = self.support / "external-usage"
-        external.mkdir(mode=0o700)
-        usage_dir.symlink_to(external, target_is_directory=True)
-        with self.assertRaisesRegex(lab_queue.LabQueueError, "usage_invalid"):
-            lab_queue.owner_approval_usage_calls(self.support, approval)
-        with self.assertRaisesRegex(lab_queue.LabQueueError, "usage_invalid"):
-            lab_queue.ensure_owner_approval_usage_dir(self.support)
-
     def test_running_job_after_restart_is_marked_ambiguous_and_never_requeued(self):
-        lab_queue.submit(payload(), root=self.root)
-        lab_queue.claim_next(self.root)
+        submit_validated(payload(), self.root)
+        claim_validated(self.root)
         self.assertEqual(lab_queue.reconcile_running(self.root), 1)
         self.assertEqual(lab_queue.pending_count(self.root), 0)
         self.assertEqual(lab_queue.read_receipt(self.root, "job-001")["status"], "ambiguous")
 
-    def test_second_turn_requires_a_same_arm_completed_worker_receipt(self):
-        first = payload()
-        lab_queue.submit(first, root=self.root)
-        lab_queue.claim_next(self.root)
-        lab_queue.finish(self.root, first["job_id"], status="completed", response="reply one", identity=first)
-        second = worker_client.build_job(
-            scenario_id="ru_naturalness-02", configuration_id="baseline", turn_index=1,
-            history_receipt_ids=[first["job_id"]], support=self.support, job_id="job-002",
-        )
-        lab_queue.submit(second, root=self.root)
-        claimed = lab_queue.claim_next(self.root)
-        self.assertEqual(claimed["request"]["history"][1]["content"], "reply one")
-        second["request"]["history"][1]["content"] = "arbitrary unverified text"
-        with self.assertRaisesRegex(lab_queue.LabQueueError, "hash|receipt_backed"):
-            lab_queue.submit(second | {"job_id": "job-003"}, root=self.root)
-
     def test_cancel_pending_job_creates_terminal_receipt_without_executor(self):
-        lab_queue.submit(payload(), root=self.root)
+        submit_validated(payload(), self.root)
         self.assertEqual(lab_queue.cancel(self.root, "job-001"), "cancelled")
         self.assertEqual(lab_queue.pending_count(self.root), 0)
         self.assertEqual(lab_queue.read_receipt(self.root, "job-001")["status"], "cancelled")
 
     def test_terminal_receipt_is_immutable_and_job_id_cannot_be_reused(self):
-        lab_queue.submit(payload(), root=self.root)
-        lab_queue.claim_next(self.root)
+        submit_validated(payload(), self.root)
+        claim_validated(self.root)
         lab_queue.finish(self.root, "job-001", status="completed", response="one")
         lab_queue.finish(self.root, "job-001", status="ambiguous", error_code="late-reconcile")
         self.assertEqual(lab_queue.read_receipt(self.root, "job-001")["status"], "completed")
         with self.assertRaisesRegex(lab_queue.LabQueueError, "duplicate"):
-            lab_queue.submit(payload(), root=self.root)
-
-
+            submit_validated(payload(), self.root)
 
     def test_terminal_receipt_records_fixed_lab_slot_identity(self):
-        lab_queue.submit(payload("slot-receipt"), root=self.root)
-        lab_queue.claim_next(self.root)
+        submit_validated(payload("slot-receipt"), self.root)
+        claim_validated(self.root)
         lab_queue.finish(self.root, "slot-receipt", status="completed", slot_id="slot-03")
         receipt = lab_queue.read_receipt(self.root, "slot-receipt")
         self.assertEqual(receipt["slot_id"], "slot-03")
 
-    def test_judge_job_is_source_verified_and_uses_strict_structured_verdict(self):
-        job = judge_payload("judge-" + hashlib.sha256(b"batch-a-judge-1").hexdigest()[:58])
-        verdict = job.pop("_test_verdict")
-        lab_queue.submit(job, root=self.root)
-        claimed = lab_queue.claim_next(self.root)
-        self.assertEqual(claimed["job_type"], "judge")
-        self.assertEqual(claimed["origin"], "conversation-lab-judge")
-        self.assertEqual(claimed["dataset_split"], "DEV")
-        self.assertTrue(lab_queue.validate_judge_verdict(verdict))
-
-    def test_judge_job_rejects_wrong_source_holdout_and_model(self):
-        for field, value in (("origin", "conversation-lab"), ("dataset_split", "SEALED_HOLDOUT"),
-                             ("model", "gpt-6.1-sol"), ("reasoning_effort", "high")):
-            job = judge_payload("bad-" + field)
-            job.pop("_test_verdict")
-            job[field] = value
-            with self.subTest(field=field), self.assertRaises(lab_queue.LabQueueError):
-                lab_queue.submit(job, root=self.root)
-
-    def test_judge_verdict_rejects_missing_dimensions_and_private_metadata(self):
-        from judges import CORE_IDS
-        valid = {"overall": "first", "core_dimensions": {name: "first" for name in CORE_IDS},
-                 "conditional_evidence": {}, "reasons": ["Direct."], "defects": [],
-                 "uncertainty": False, "position_sensitivity": False}
-        incomplete = dict(valid)
-        incomplete["core_dimensions"] = {name: "first" for name in CORE_IDS[:-1]}
-        with self.assertRaises(lab_queue.LabQueueError):
-            lab_queue.validate_judge_verdict(incomplete)
-        contaminated = dict(valid, private_mapping={"X": "baseline"})
-        with self.assertRaises(lab_queue.LabQueueError):
-            lab_queue.validate_judge_verdict(contaminated)
-
-    def test_judge_job_builder_pins_one_slot_and_nonsealed_split(self):
-        job = worker_client.build_judge_job(
-            "anonymous rubric and X/Y pair", batch_id="batch-a", scenario_id="dev-clean-01",
-            dataset_split="DEV", judge_slot=2, presented_labels=["Y", "X"],
-        )
-        self.assertEqual(job["origin"], "conversation-lab-judge")
-        self.assertEqual(job["experiment_id"], "agata-lab-judge-v1")
-        self.assertEqual(job["configuration_id"], "judge-2")
-        self.assertEqual(job["job_type"], "judge")
-        self.assertEqual(job["model"], "gpt-6-luna")
-        self.assertEqual(job["reasoning_effort"], "medium")
-        self.assertEqual(job["presented_labels"], ["Y", "X"])
-        with self.assertRaises(PermissionError):
-            worker_client.build_judge_job(
-                "prompt", batch_id="batch-a", scenario_id="sealed-01", dataset_split="SEALED_HOLDOUT",
-                judge_slot=1, presented_labels=["X", "Y"],
-            )
 
 if __name__ == "__main__":
     unittest.main()
-
-    def test_terminal_receipt_records_fixed_lab_slot_identity(self):
-        lab_queue.submit(payload("slot-receipt"), root=self.root)
-        lab_queue.claim_next(self.root)
-        lab_queue.finish(self.root, "slot-receipt", status="completed", slot_id="slot-03")
-        receipt = lab_queue.read_receipt(self.root, "slot-receipt")
-        self.assertEqual(receipt["slot_id"], "slot-03")

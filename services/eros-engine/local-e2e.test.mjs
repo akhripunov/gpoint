@@ -10,26 +10,15 @@ import {
   validateErosImageInspection,
 } from './local-test-policy.mjs';
 import { readProviderContextEvidence } from './provider-context-check.mjs';
-import { isAgataMessageHistoryPath } from './local-test-api-routes.mjs';
 
 const directory = new URL('.', import.meta.url);
 
 
-test('local API test image copies the AGATA route helper used by its entrypoint', () => {
-  const dockerfile = readFileSync(new URL('Dockerfile.api-local-test', directory), 'utf8');
-  assert.match(dockerfile, /COPY services\/eros-engine\/local-test-api-routes\.mjs services\/eros-engine\/local-test-api-routes\.mjs/);
-});
-
-test('local AGATA fixture recognizes history requests with query parameters', () => {
-  assert.equal(isAgataMessageHistoryPath('/internal/v1/users/synthetic-user/characters/synthetic-creator/messages'), true);
-  assert.equal(isAgataMessageHistoryPath('/internal/v1/users/synthetic-user/characters/synthetic-creator/messages?limit=1'), true);
-  assert.equal(isAgataMessageHistoryPath('/internal/v1/users/synthetic-user/characters/synthetic-creator/other?limit=1'), false);
-});
-
-test('local AGATA fixture provides an empty unread page so Eros unread counters are exercised', () => {
+test('local E2E fixture contains no AGATA API shim or legacy credentials', () => {
   const entrypoint = readFileSync(new URL('local-test-api-entrypoint.mjs', directory), 'utf8');
-  assert.match(entrypoint, /\/internal\\\/v1\\\/users\\\/\[\^\/\]\+\\\/unread/);
-  assert.match(entrypoint, /return send\(response, 200, \{ items: \[\] \}\)/);
+  const compose = readFileSync(new URL('compose.local-test.yml', directory), 'utf8');
+  assert.doesNotMatch(entrypoint, /agata|AGATA|18080/);
+  assert.doesNotMatch(compose, /AGATA_(?:TENANT_ID|ENABLED|SERVICE_URL|INTERNAL_API_TOKEN)|EROS_TEST_AGATA_TOKEN/);
 });
 
 test('local E2E topology has API, Eros, Worker and isolated PostgreSQL', () => {
@@ -334,7 +323,6 @@ test('Compose exposes no test service outside the internal Docker network', (con
     EROS_TEST_TELEGRAM_BOT_TOKEN: 'synthetic-only-telegram-token',
     EROS_TEST_TELEGRAM_WEBHOOK_SECRET: 'synthetic-only-webhook-secret',
     EROS_TEST_WORKER_TOKEN: 'synthetic-only-worker',
-    EROS_TEST_AGATA_TOKEN: 'synthetic-only-agata',
     EROS_TEST_OPENROUTER_API_KEY: '',
   };
   const result = spawnSync(

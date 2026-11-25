@@ -13,7 +13,6 @@ MANIFEST_PATHS = (
     "apps/bot/package.json",
     "apps/miniapp/package.json",
     "apps/worker/package.json",
-    "packages/agata-client/package.json",
     "packages/contracts/package.json",
     "packages/db/package.json",
 )

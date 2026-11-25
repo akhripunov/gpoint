@@ -124,7 +124,7 @@ export function createCodexTools(api: Api, keychain: Keychain) {
     async history(limit = 50) {
       const { access, creatorId } = await getAccess();
       const result = await api.request<{ items: Array<{ role: string; text: string; occurredAt: string }>; nextCursor: string | null }>(`/messages/creator/${encodeURIComponent(creatorId)}?limit=${limit}`, { headers: authorization(access) });
-      return result.items.map(message => `${message.role === 'assistant' ? 'AGATA' : 'OWNER'} [${message.occurredAt}]: ${message.text}`).join('\n');
+      return result.items.map(message => `${message.role === 'assistant' ? 'Eros' : 'OWNER'} [${message.occurredAt}]: ${message.text}`).join('\n');
     },
     send(text: string) {
       return enqueueSend(async () => {
@@ -133,7 +133,7 @@ export function createCodexTools(api: Api, keychain: Keychain) {
       const id = randomUUID();
       const result = await api.request<{ status: string; response?: { text: string } }>(`/messages/creator/${encodeURIComponent(creatorId)}`, { method: 'POST', headers: authorization(access), body: JSON.stringify({ clientMessageId: id, text }) });
       if (result.status === 'completed' && result.response) return result.response.text;
-      return `AGATA accepted message ${id}; its reply is still pending and was not correlated to this request. Run read_gpoint_history to see new messages.`;
+      return `Eros accepted message ${id}; its reply is still pending and was not correlated to this request. Run read_gpoint_history to see new messages.`;
       });
     },
     async disconnect() {
@@ -152,7 +152,7 @@ export function buildServer() {
   server.registerTool('connect_gpoint', { description: 'Begin owner-authorized connection to one existing GPoint conversation using its GPoint creator slug and a one-time link to the existing Telegram bot.', inputSchema: z.object({ creatorSlug: z.string().min(1).max(64) }) }, async ({ creatorSlug }) => ({ content: [{ type: 'text', text: await tools.connect(creatorSlug) }] }));
   server.registerTool('finish_gpoint_connection', { description: 'Complete the approved one-time GPoint connection and store capability tokens in macOS Keychain.', inputSchema: z.object({}) }, async () => ({ content: [{ type: 'text', text: await tools.finish() }] }));
   server.registerTool('read_gpoint_history', { description: 'Read the latest messages from the one owner-approved GPoint conversation.', inputSchema: z.object({ limit: z.number().int().min(1).max(100).default(50) }) }, async ({ limit }) => ({ content: [{ type: 'text', text: await tools.history(limit) }] }));
-  server.registerTool('send_gpoint_message', { description: 'Send the owner’s exact text to AGATA through the existing GPoint message pipeline and return the exact AGATA response.', inputSchema: z.object({ text: z.string().min(1).max(4000) }) }, async ({ text }) => ({ content: [{ type: 'text', text: await tools.send(text) }] }));
+  server.registerTool('send_gpoint_message', { description: 'Send the owner’s exact text through the existing GPoint message pipeline and return the exact Eros response.', inputSchema: z.object({ text: z.string().min(1).max(4000) }) }, async ({ text }) => ({ content: [{ type: 'text', text: await tools.send(text) }] }));
   server.registerTool('disconnect_gpoint', { description: 'Revoke this Codex connection and remove local Keychain credentials.', inputSchema: z.object({}) }, async () => ({ content: [{ type: 'text', text: await tools.disconnect() }] }));
   return server;
 }

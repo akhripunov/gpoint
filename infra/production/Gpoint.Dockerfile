@@ -13,7 +13,6 @@ COPY --from=dependency-manifests /apps/api/package.json apps/api/package.json
 COPY --from=dependency-manifests /apps/bot/package.json apps/bot/package.json
 COPY --from=dependency-manifests /apps/miniapp/package.json apps/miniapp/package.json
 COPY --from=dependency-manifests /apps/worker/package.json apps/worker/package.json
-COPY --from=dependency-manifests /packages/agata-client/package.json packages/agata-client/package.json
 COPY --from=dependency-manifests /packages/contracts/package.json packages/contracts/package.json
 COPY --from=dependency-manifests /packages/db/package.json packages/db/package.json
 RUN --mount=type=cache,id=gpoint-pnpm-store,target=/pnpm/store pnpm install --frozen-lockfile
@@ -22,7 +21,6 @@ RUN --mount=type=cache,id=gpoint-pnpm-store,target=/pnpm/store pnpm install --fr
 COPY tsconfig.base.json ./tsconfig.base.json
 COPY packages ./packages
 RUN pnpm --filter @gpoint/db exec prisma generate
-RUN pnpm --filter @gpoint/agata-client build
 RUN pnpm --filter @gpoint/db build
 COPY apps/api ./apps/api
 RUN pnpm --filter @gpoint/api build
@@ -40,7 +38,6 @@ COPY --from=dependency-manifests /apps/api/package.json apps/api/package.json
 COPY --from=dependency-manifests /apps/bot/package.json apps/bot/package.json
 COPY --from=dependency-manifests /apps/miniapp/package.json apps/miniapp/package.json
 COPY --from=dependency-manifests /apps/worker/package.json apps/worker/package.json
-COPY --from=dependency-manifests /packages/agata-client/package.json packages/agata-client/package.json
 COPY --from=dependency-manifests /packages/contracts/package.json packages/contracts/package.json
 COPY --from=dependency-manifests /packages/db/package.json packages/db/package.json
 RUN --mount=type=cache,id=gpoint-pnpm-store,target=/pnpm/store pnpm install --filter @gpoint/miniapp --frozen-lockfile

@@ -16,7 +16,7 @@ const IDS = {
 function withOwnedErosEnvironment<T>(run: () => Promise<T>) {
   const keys = [
     'NODE_ENV', 'EROS_ENABLED', 'EROS_DATA_MODE', 'GPOINT_CHAT_POLICY_TENANT_ID',
-    'EROS_SERVICE_URL', 'EROS_JWT_SECRET', 'AGATA_ENABLED', 'AGATA_SERVICE_URL',
+    'EROS_SERVICE_URL', 'EROS_JWT_SECRET',
     'AGATA_INTERNAL_API_TOKEN', 'GPOINT_CODEX_OWNER_USER_IDS', 'TELEGRAM_WEBHOOK_SECRET',
   ];
   const previous = new Map(keys.map((key) => [key, process.env[key]]));
@@ -27,9 +27,6 @@ function withOwnedErosEnvironment<T>(run: () => Promise<T>) {
   process.env.EROS_JWT_SECRET = 'disposable-test-eros-jwt-secret-32-bytes';
   process.env.GPOINT_CODEX_OWNER_USER_IDS = IDS.owner;
   process.env.TELEGRAM_WEBHOOK_SECRET = 'disposable-test-webhook-secret';
-  delete process.env.AGATA_ENABLED;
-  delete process.env.AGATA_SERVICE_URL;
-  delete process.env.AGATA_INTERNAL_API_TOKEN;
 
   return run().finally(() => {
     for (const [key, value] of previous) {

@@ -58,7 +58,7 @@ def test_generated_projection_matches_exact_candidate_source_manifests(tmp_path)
         source = json.loads((repo / relative).read_text())
         projected = json.loads((output / relative).read_text())
         assert projected == manifests.dependency_projection(source)
-    assert 'packages/agata-client/package.json' in manifests.MANIFEST_PATHS
+    assert 'packages/agata-client/package.json' not in manifests.MANIFEST_PATHS
 
 
 def test_dockerfile_named_context_inventory_matches_projection_inventory():

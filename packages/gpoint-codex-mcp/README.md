@@ -1,4 +1,4 @@
-# GPoint AGATA Codex connection
+# GPoint Eros Codex connection
 
 This local MCP process is a client for GPoint's existing message API. It never calls an LLM. Once the server/API migration has been released and the OWNER allowlist configured, set `GPOINT_API_URL` in the environment inherited by Codex to the trusted GPoint API base URL (HTTPS). The value is an address, not a credential.
 
@@ -8,4 +8,4 @@ The API must be deployed through the normal release process with `GPOINT_CODEX_O
 
 Before enabling device authorization in production, configure `GPOINT_INGEST_URL` to the HTTPS ingress URL ending in `/api/internal/telegram/update`; the bot fails closed at startup without it. Production Caddy routes `/api/*` to the API after stripping `/api`, so the derived callback is `/api/auth/codex/telegram/codex-approve`. This is required because the production Docker network bridge is not encrypted. DevOps must verify the effective TLS ingress reaches the API and exposes the required paths before release. Also set `TELEGRAM_BOT_USERNAME` to the existing bot username and `GPOINT_CODEX_OWNER_USER_IDS` to the exact OWNER GPoint user ID. Set `GPOINT_CODEX_DEVICE_START_TRUSTED_PROXY_IPS` to the exact socket-peer IPs of every trusted reverse-proxy hop; the API walks the forwarded chain outward and trusts only those hops. Every forwarding proxy must append its observed peer to `X-Forwarded-For`; missing or malformed chains fail closed. For direct exposure, configure `none`. Do not add wildcard entries or use client-provided forwarded IPs as trusted proxies. Fastify proxy trust remains disabled globally.
 
-Messages sent with `send_gpoint_message` pass through `POST /messages/creator/:creatorId`, including GPoint's current consent/age gates, idempotency, Persona/profile construction, AGATA relationship/history/memory handling, Naturalness V1, configured provider and Mac Worker. Pending replies remain pending; the tool does not write synthetic messages or invent a reply.
+Messages sent with `send_gpoint_message` pass through `POST /messages/creator/:creatorId`, including GPoint's current consent/age gates, idempotency, Persona/profile construction, Eros relationship/history/memory handling, Naturalness V1, configured provider and Mac Worker. Pending replies remain pending; the tool does not write synthetic messages or invent a reply.

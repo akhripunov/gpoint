@@ -20,7 +20,7 @@ def _repo(tmp_path, code_line):
     _git(repo, "init", "-q")
     _git(repo, "config", "user.email", "t@example.com")
     _git(repo, "config", "user.name", "t")
-    (repo / "apps/api/src/agata-worker-gateway.ts").write_text("// placeholder\n")
+    (repo / "apps/api/src/gpoint-worker-gateway.ts").write_text("// placeholder\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "baseline")
     baseline = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
@@ -30,7 +30,7 @@ def _repo(tmp_path, code_line):
     migration_dir.mkdir(parents=True)
     (migration_dir / "migration.sql").write_text(
         'ALTER TABLE "chat_policy" ADD COLUMN "history_fences" TEXT;\n')
-    (repo / "apps/api/src/agata-worker-gateway.ts").write_text(code_line + "\n")
+    (repo / "apps/api/src/gpoint-worker-gateway.ts").write_text(code_line + "\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "candidate")
     candidate = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
@@ -72,7 +72,7 @@ def _repo_accumulated(tmp_path):
     _git(repo, "init", "-q")
     _git(repo, "config", "user.email", "t@example.com")
     _git(repo, "config", "user.name", "t")
-    (repo / "apps/api/src/agata-worker-gateway.ts").write_text("// placeholder\n")
+    (repo / "apps/api/src/gpoint-worker-gateway.ts").write_text("// placeholder\n")
     _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "base")
     base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
                           capture_output=True, text=True).stdout.strip()
@@ -81,7 +81,7 @@ def _repo_accumulated(tmp_path):
     (migration_dir / "migration.sql").write_text(
         'ALTER TABLE "chat_policy" ADD COLUMN "history_fences" TEXT;\n')
     # The dependent application line landed in the same earlier commit.
-    (repo / "apps/api/src/agata-worker-gateway.ts").write_text(
+    (repo / "apps/api/src/gpoint-worker-gateway.ts").write_text(
         "const fences = row.history_fences;\n")
     _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "migration earlier")
     # Later commit touches only a config file, exactly like the failing push.

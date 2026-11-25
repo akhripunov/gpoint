@@ -16,7 +16,6 @@ COPY --from=dependency-manifests /apps/api/package.json ./apps/api/package.json
 COPY --from=dependency-manifests /apps/bot/package.json ./apps/bot/package.json
 COPY --from=dependency-manifests /apps/miniapp/package.json ./apps/miniapp/package.json
 COPY --from=dependency-manifests /apps/worker/package.json ./apps/worker/package.json
-COPY --from=dependency-manifests /packages/agata-client/package.json ./packages/agata-client/package.json
 COPY --from=dependency-manifests /packages/contracts/package.json ./packages/contracts/package.json
 COPY --from=dependency-manifests /packages/db/package.json ./packages/db/package.json
 RUN corepack enable && corepack prepare pnpm@9.15.0 --activate \

@@ -1,34 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AgataServiceError } from '@gpoint/agata-client';
 import { HttpException } from '@nestjs/common';
-import { assertMessageAgeAssurance, buildAgataCharacterProfile, mapAgataError } from '../src/messages.js';
+import { ErosAdapterError } from '../src/eros-adapter.js';
+import { assertMessageAgeAssurance, mapErosError, MessagesController } from '../src/messages.js';
+import { createSession } from '../src/session.js';
 
-test('starter profile is deterministic and contains only approved public creator facts', () => {
-  const profile = buildAgataCharacterProfile({ displayName: 'Anna', profile: { bio: 'Public bio' } });
-  assert.deepEqual(profile, {
-    name: 'Anna',
-    personality: { identity_core: { source: 'gpoint_creator' } },
-    speech_style: {},
-    backstory: { public_bio: 'Public bio' },
-    boundaries: {},
-  });
-  assert.equal(JSON.stringify(profile).includes('creator-id'), false);
-  assert.deepEqual(buildAgataCharacterProfile({ displayName: 'Anna' }).backstory, { public_bio: '' });
-});
-
-test('AGATA errors map to stable public codes without exposing internal messages', () => {
-  const unavailable = mapAgataError(new AgataServiceError('secret internal detail', 0, 'transport_error'));
+test('Eros failures map to stable public codes without exposing internal messages', () => {
+  const unavailable = mapErosError(new Error('secret internal detail'));
   assert.equal(unavailable.getStatus(), 503);
-  assert.deepEqual(unavailable.getResponse(), { code: 'MESSAGES_TEMPORARILY_UNAVAILABLE' });
-  const conflict = mapAgataError(new AgataServiceError('raw detail', 409, 'idempotency_conflict'));
+  assert.deepEqual(unavailable.getResponse(), { code: 'EROS_UNAVAILABLE' });
+  const conflict = mapErosError(new ErosAdapterError('eros_relationship_mismatch', 409));
   assert.equal(conflict.getStatus(), 409);
-  assert.deepEqual(conflict.getResponse(), { code: 'CHAT_IDEMPOTENCY_CONFLICT' });
-  for (const code of ['provider_unavailable', 'inference_retry_exhausted']) {
-    const workerUnavailable = mapAgataError(new AgataServiceError('internal worker detail', 503, code));
-    assert.equal(workerUnavailable.getStatus(), 503);
-    assert.deepEqual(workerUnavailable.getResponse(), { code: 'AI_UNAVAILABLE' });
-  }
+  assert.deepEqual(conflict.getResponse(), { code: 'EROS_UNAVAILABLE', reason: 'eros_relationship_mismatch' });
 });
 
 test('message send is blocked with a stable age-assurance error when authoritative state requires it', () => {
@@ -58,7 +41,7 @@ test('read batch validation rejects malformed, empty, oversized and client-selec
   for(const body of [null,{}, {messageIds:[]},{messageIds:['invalid']},{messageIds:Array(101).fill(id)},{messageIds:[id],userId:'foreign'}]) assert.throws(()=>validateReadBatch(body),HttpException);
 });
 
-test('Eros read batch accepts bounded stock message IDs while AGATA remains UUID-only', async () => {
+test('Eros read batch accepts bounded stock message IDs', async () => {
   const { validateReadBatch }=await import('../src/messages.js');
   const stockErosId='01a1630d-4127-0726-2b87-9b2624548592';
   assert.throws(()=>validateReadBatch({messageIds:[stockErosId]}),HttpException);
@@ -67,8 +50,45 @@ test('Eros read batch accepts bounded stock message IDs while AGATA remains UUID
 });
 
 test('unread and acknowledgement require a GPoint session before touching upstream state', async () => {
-  const { MessagesController }=await import('../src/messages.js');
   const controller=new MessagesController();
   await assert.rejects(controller.unread({}), (e:any)=>e.getStatus()===401);
   await assert.rejects(controller.read('creator',{}, {messageIds:[]}), (e:any)=>e.getStatus()===401);
+});
+
+test('Messages state uses GPoint state and never calls a configured legacy AGATA service', async () => {
+  const previousFetch = globalThis.fetch;
+  const env = {
+    erosEnabled: process.env.EROS_ENABLED,
+    agataEnabled: process.env.AGATA_ENABLED,
+    agataUrl: process.env.AGATA_SERVICE_URL,
+    agataToken: process.env.AGATA_INTERNAL_API_TOKEN,
+  };
+  process.env.EROS_ENABLED = 'false';
+  process.env.AGATA_ENABLED = 'true';
+  process.env.AGATA_SERVICE_URL = 'https://agata.invalid';
+  process.env.AGATA_INTERNAL_API_TOKEN = 'disposable-test-token';
+  let legacyRequests = 0;
+  globalThis.fetch = async () => {
+    legacyRequests += 1;
+    throw new Error('legacy AGATA service must not be called');
+  };
+
+  try {
+    const userId = 'authenticated-gpoint-user';
+    const state = await new MessagesController().state({ authorization: `Bearer ${createSession(userId)}` });
+    assert.equal(state.enabled, false);
+    assert.equal(state.aiAvailable, false);
+    assert.equal(state.ageAssuranceRequired, true);
+    assert.equal(legacyRequests, 0);
+  } finally {
+    globalThis.fetch = previousFetch;
+    for (const [key, value] of Object.entries({
+      EROS_ENABLED: env.erosEnabled,
+      AGATA_ENABLED: env.agataEnabled,
+      AGATA_SERVICE_URL: env.agataUrl,
+      AGATA_INTERNAL_API_TOKEN: env.agataToken,
+    })) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
 });

@@ -11,7 +11,6 @@ services:
     entrypoint: ["node", "/app/services/eros-engine/local-test-api-entrypoint.mjs"]
     volumes:
       - ./local-test-api-entrypoint.mjs:/app/services/eros-engine/local-test-api-entrypoint.mjs:ro
-      - ./local-test-api-routes.mjs:/app/services/eros-engine/local-test-api-routes.mjs:ro
       - ./local-test-e2e.mjs:/app/services/eros-engine/local-test-e2e.mjs:ro
   gpoint-worker:
     build: !reset null

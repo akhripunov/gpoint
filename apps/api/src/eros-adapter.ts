@@ -348,12 +348,6 @@ export async function erosAssistantReadAtById(
   return new Map(rows.map((row) => [row.messageId, row.readAt instanceof Date ? row.readAt.toISOString() : null]));
 }
 
-export function mergeErosInboxItems<T extends { creator: { id: string } }>(agataItems: T[], erosItems: T[], isFirstPage: boolean): T[] {
-  const erosCreatorIds = new Set(erosItems.map((item) => item.creator.id));
-  const filteredAgata = agataItems.filter((item) => !erosCreatorIds.has(item.creator.id));
-  return isFirstPage ? [...erosItems, ...filteredAgata] : filteredAgata;
-}
-
 export function erosInboxLastMessageSummary(message: { role: string; content: string }): {
   lastMessagePreview: string;
   lastMessageRole: 'user' | 'assistant' | 'system';
