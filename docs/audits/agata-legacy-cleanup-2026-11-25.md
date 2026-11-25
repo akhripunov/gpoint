@@ -45,22 +45,31 @@ Specific removed paths include:
 
 | Check | Result |
 | --- | --- |
-| API tests | 129 tests previously passed in the local API suite with loopback permission; two DB-dependent cases were skipped. A later retry encountered a fixed-port `3012` `EADDRINUSE` conflict in the integration test bootstrap, so that retry is not counted as a pass. |
+| API tests | The package's canonical API script (`NODE_ENV=test pnpm --filter @gpoint/api test`) was rerun with loopback permission: 129 TypeScript tests and 18 companion `.mjs` tests passed. The earlier port conflict came from invoking a wildcard that included the separate DB-backed `integration.test.ts`; that file imports the auto-starting API bootstrap and calls `bootstrap()` again on fixed port 3012. It is not part of the canonical suite. No other process was stopped, and the DB-backed integration test was not run because no disposable DB was verified. |
 | API TypeScript | `tsc -p apps/api/tsconfig.json --noEmit` passed before the final test-only cleanup. |
+| Codex MCP | `pnpm --filter @gpoint/codex-mcp test` — 7 passed after aligning the history expectation and test title with the current Eros-backed product behavior. The stable MCP server identity `gpoint-agata` remains unchanged for client compatibility. |
+| GSales Python | Runtime tests are blocked by local tooling: installed pytest is under Python 3.9, while the package uses Python 3.10+ union syntax; Python 3.12 is present but has no pytest/Telethon installation. Dependencies were not installed. Source syntax can be checked separately, but this is not a substitute for the GSales runtime suite. |
 | Worker LAB queue | `python3.12 -m unittest services.agata.tests.test_worker_lab_queue -v` — 10 passed. |
 | Docker dependency/static schema tests | `python3 -m pytest -q tests/test_docker_dependency_manifests.py tests/test_static_schema_dependency.py` — 14 passed. |
 | Eros fixture | `node --check services/eros-engine/local-test-api-entrypoint.mjs` passed; 2 targeted local E2E topology/shim tests passed without invoking Docker. |
 | Whitespace | `git diff --check` passed. |
-| Package-manager lock validation | Not verified: available pnpm 11 rewrites this repository's pnpm v9 lock configuration and rejects the existing external `node_modules` symlink. The lockfile edit is limited to removing the deleted API dependency and deleted workspace importer; no install was run. |
+| Package-manager lock validation | pnpm 9.15.0 is available in the local Corepack cache. No dependency update was attempted: the remaining findings are transitive dependencies of the current Prisma/PostCSS toolchain and a deepmerge major-version change needs compatibility validation. |
 | Full Docker/Eros build | Not run locally by design; use the existing GPoint Release Pipeline. Docker Desktop was not used. |
 
-The supplied Dependabot baseline was 56 Conversation Lab advisories, 1 old AGATA Worker advisory, and 3 core GPoint dependency advisories. Dependabot API was not queried again. The current lock still resolves `effect` 3.21.0, `deepmerge-ts` 7.1.5, and `postcss-selector-parser` 6.1.4; updating these is outside this cleanup and should be handled as a separate dependency-security task with the repository's supported lockfile toolchain.
+The current Linear ME-64 record gives a baseline of 57 AGATA-related and 3 core GPoint Dependabot alerts (60 total). The live Dependabot alert endpoint could not be read: the configured `gh` authentication is invalid, and the GitHub connector does not expose that endpoint. This means the current alert count is unverified; it does not establish a GitHub service outage.
+
+The three known core findings map to these lockfile paths:
+
+- `effect@3.21.0` and `deepmerge-ts@7.1.5` are transitive dependencies of `@prisma/config@6.19.3` (Prisma CLI/toolchain).
+- `postcss-selector-parser@6.1.4` is brought through the existing PostCSS build tooling (`postcss-nested@6.2.0`).
+
+The applicable advisories identify fixed versions `effect@3.22.1` ([GHSA-7589-6fvf-x4pw](https://github.com/advisories/GHSA-7589-6fvf-x4pw)), `deepmerge-ts@8.0.0` ([GHSA-ggr8-5vv4-36mx](https://github.com/advisories/GHSA-ggr8-5vv4-36mx)), and `postcss-selector-parser@6.1.5` ([GHSA-rj75-hqrm-r3gf](https://github.com/advisories/GHSA-rj75-hqrm-r3gf)). An override to `deepmerge-ts@8` would cross a major-version boundary and Prisma 6 is at end of support, so upgrading the Prisma toolchain is not a safe cleanup-only edit. No alert was marked resolved and no dependency was changed without compatibility tests. The `effect` and PostCSS patch/minor updates are candidates for a dedicated dependency change with the normal lockfile and workspace validation.
 
 ## Remaining blockers before deleting the old Worker
 
 1. Reconcile the live GSales Mac Worker bundle and its configured hashes before removing or renaming `services/agata/worker/agata_worker_pool.py` or `lab_queue.py`. No host transition was performed here.
 2. Decide and execute a separate retention/migration plan before removing historical AGATA database migrations, records, backup/restore, or rollback support.
-3. Refresh the three core dependency advisories using the supported pinned pnpm version and update only after compatibility review.
+3. Refresh the current Dependabot list through an authorized GitHub account; evaluate the two compatible patch/minor updates separately, and validate any Prisma/deepmerge major change against supported Prisma versions before updating.
 
 These are scoped follow-up gates, not blockers to removing the API fallback, package, synthetic AGATA API, and isolated evaluator stack completed here.
 
@@ -68,4 +77,4 @@ These are scoped follow-up gates, not blockers to removing the API fallback, pac
 
 Base: `075efe20980bd808a2d3d2aa21280e8de371e28c`.
 
-Status: `LOCAL_PENDING_RELEASE`. This report does not claim production runtime proof or readiness to publish.
+Status: `LOCAL_PENDING_RELEASE`. The canonical pre-push gate cannot be completed because its required successful production Deployment SHA is not verified: the release journal is historical, the GitHub connector's deployments endpoint is unsupported, and the available `gh` login is invalid. The remote `main` exact ref was verified through the GitHub connector at `075efe20980bd808a2d3d2aa21280e8de371e28c`; the stale local `origin` points to a worktree and is not used as evidence. No claim of `READY_FOR_RELEASE` is made.
