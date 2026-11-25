@@ -71,6 +71,10 @@ function approvalStore(payload: string, telegramId: string, approvedCount: () =>
       },
       updateMany: async (args: any) => {
         assert.equal(args.where.id, 'authorization-1');
+        assert.equal(args.where.telegramChallengeHash, hashCodexCredential(payload));
+        assert.ok(args.where.expiresAt.gt instanceof Date);
+        assert.equal(args.where.userId, null);
+        assert.equal(args.where.consumedAt, null);
         approvedCount();
         return { count: 1 };
       },
@@ -176,9 +180,30 @@ test('Codex Telegram approval refuses an Eros relationship without existing hist
   });
 });
 
-test('Codex Telegram approval refuses Eros history when GPoint consent is absent', async () => {
+test('Codex Telegram approval allows existing Eros history when age-eligible without extra chat consent records', async () => {
   const telegramId = String(Date.now() + 300_004);
   const payload = 'D'.repeat(43);
+  let updates = 0;
+  await withOwnedErosEnvironment(async () => {
+    const eros = await startErosFixture(true);
+    try {
+      const result = await approveCodexDeviceWithTelegram(
+        { 'x-telegram-webhook-secret': 'disposable-test-webhook-secret' },
+        { payload, chat: { id: telegramId, type: 'private' }, from: { id: telegramId } },
+        approvalStore(payload, telegramId, () => { updates += 1; }, { consents: [] }),
+      );
+      assert.deepEqual(result, { approved: true });
+      assert.equal(updates, 1);
+      assert.equal(eros.paths.length, 2);
+    } finally {
+      await eros.close();
+    }
+  });
+});
+
+test('Codex Telegram approval still refuses age-ineligible owners before reading Eros history', async () => {
+  const telegramId = String(Date.now() + 300_005);
+  const payload = 'E'.repeat(43);
   let updates = 0;
   await withOwnedErosEnvironment(async () => {
     const eros = await startErosFixture(true);
@@ -187,12 +212,12 @@ test('Codex Telegram approval refuses Eros history when GPoint consent is absent
         approveCodexDeviceWithTelegram(
           { 'x-telegram-webhook-secret': 'disposable-test-webhook-secret' },
           { payload, chat: { id: telegramId, type: 'private' }, from: { id: telegramId } },
-          approvalStore(payload, telegramId, () => { updates += 1; }, { consents: [] }),
+          approvalStore(payload, telegramId, () => { updates += 1; }, { ages: [] }),
         ),
         (error: unknown) => error instanceof UnauthorizedException,
       );
       assert.equal(updates, 0);
-      assert.equal(eros.paths.length, 0, 'consent is checked before reading Eros history');
+      assert.equal(eros.paths.length, 0, 'age eligibility is checked before reading Eros history');
     } finally {
       await eros.close();
     }
