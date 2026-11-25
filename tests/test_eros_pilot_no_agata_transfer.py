@@ -95,8 +95,20 @@ def test_global_self_attestation_version_accounts_for_legacy_non_global_age_rows
 
 def test_gpoint_messages_never_reuses_legacy_agata_jurisdiction():
     source = (ROOT / "apps/api/src/messages.ts").read_text()
-    assert "current.jurisdiction" not in source
-    assert source.count("jurisdiction: 'GLOBAL'") == 2
+    # The retired AGATA transport carried an explicit GLOBAL jurisdiction.
+    # Eros uses the tenant-pinned GPoint policy, without a jurisdiction field.
+    store = (ROOT / "apps/api/src/gpoint-chat-store.ts").read_text()
+    assert "jurisdiction" not in source
+    assert "jurisdiction" not in store
+    assert "agata-client" not in source
+    assert "agata-integration" not in source
+    assert not re.search(r"\bagata\s*\.", source, re.IGNORECASE)
+    assert "return recordGpointChatConsent(prisma, userId," in source
+    assert "return recordGpointSelfAttestation(prisma, userId," in source
+    assert "sourceTenantId: tenantId" in store
+    assert "GPOINT_CHAT_POLICY_TENANT_ID" in store
+    assert "await requireMessageAgeAssurance(userId);" in source
+    assert "return await sendErosMessage(userId, creatorId, creator, body.clientMessageId, text);" in source
 
 
 def test_local_eros_queue_integration_uses_test_allowlist_mode():
