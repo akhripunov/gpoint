@@ -328,4 +328,12 @@ def test_deepseek_chat_disables_thinking_only_for_companion():
     ]
     assert config["tasks"]["chat_companion"]["model"] == "deepseek-flash@deepseek"
     assert config["tasks"]["chat_companion"]["retry_depth"] == 0
-    assert config["tasks"]["chat_companion"].get("max_tokens", config["defaults"].get("fallback_max_tokens", 200)) == 200
+    assert config["tasks"]["chat_companion"] == {
+        "model": "deepseek-flash@deepseek",
+        "retry_depth": 0,
+        "temperature": 0.8,
+        "top_p": 0.9,
+        "frequency_penalty": 0.4,
+        "presence_penalty": 0.2,
+        "max_tokens": 1600,
+    }

@@ -7,11 +7,18 @@ fallback_temperature = 1.0
 [tasks.chat_companion]
 model = "deepseek-flash@deepseek"
 retry_depth = 0
+# Stock Eros 2.8.1 example chat sampling and token cap.
+# Direct DeepSeek Flash ignores top_p in non-thinking mode and both penalties.
+temperature = 0.8
+top_p = 0.9
+frequency_penalty = 0.4
+presence_penalty = 0.2
+max_tokens = 1600
 
 [providers.deepseek]
 chat = "https://api.deepseek.com/chat/completions"
 
-# Ordinary chat renders visible content; keep the existing 200-token budget.
+# Stock Eros renders visible chat content; disable provider reasoning.
 [[providers.deepseek.body]]
 tasks = ["chat_companion"]
 params = { thinking = { type = "disabled" } }
