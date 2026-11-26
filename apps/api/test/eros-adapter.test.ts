@@ -699,8 +699,8 @@ test('hosted disposable PostgreSQL verifies actual application enrollment, isola
   // GitHub-hosted service only, never a process-supplied or production DSN.
   const dbName = 'gpoint_world_enrollment_test';
   const conn = ['-h','127.0.0.1','-p','5432','-U','gpoint'];
-  const env = { ...process.env, PGPASSWORD: 'gpoint_dev_only' };
-  for (const key of ['PGSERVICE','PGSERVICEFILE','PGOPTIONS','PGDATABASE','PGHOST','PGHOSTADDR','PGPORT','PGUSER']) delete env[key as keyof typeof env];
+  const env: NodeJS.ProcessEnv = { ...process.env, PGPASSWORD: 'gpoint_dev_only' };
+  for (const key of ['PGSERVICE','PGSERVICEFILE','PGOPTIONS','PGDATABASE','PGHOST','PGHOSTADDR','PGPORT','PGUSER']) delete env[key];
   const psql = (database: string, sql: string) => execFileSync('psql', ['-X',...conn,'-d',database,'-v','ON_ERROR_STOP=1'], {env,input:sql,encoding:'utf8',timeout:15_000});
   execFileSync('createdb', [...conn,dbName], {env,timeout:15_000});
   let admin: PrismaClient | undefined;
