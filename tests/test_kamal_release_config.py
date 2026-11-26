@@ -1196,7 +1196,7 @@ def test_runtime_prisma_readbacks_resolve_the_api_workspace_dependencies():
     rollback_text = (ROOT / '.github/workflows/gpoint-operations.yml').read_text()
     calls = [line for line in (workflow + rollback_text).splitlines()
              if 'docker exec' in line and 'require("@prisma/client")' in line]
-    assert len(calls) == 3
+    assert len(calls) == 4
     assert all('docker exec --workdir /app/apps/api ' in line for line in calls)
 
 def test_ordinary_core_api_preserves_worker_proxy_alias_on_default_kamal_network():

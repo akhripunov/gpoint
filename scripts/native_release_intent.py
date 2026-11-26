@@ -63,6 +63,7 @@ KNOWN_NON_RUNTIME_FILES = frozenset({
     "scripts/check-kamal-configs.sh",
     "scripts/classify-release-prepush.py",
     "scripts/eros-native-database.py",
+    "scripts/eros-world-writer.py",
     "scripts/eros-production-secrets.py",
     "scripts/gpoint-bot-bootstrap.sh",
     "scripts/gpoint-backup-policy.py",
