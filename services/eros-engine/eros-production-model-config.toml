@@ -1,8 +1,10 @@
+# GPoint adapts the pinned Eros 2.8.1 examples to direct DeepSeek.
+# Upstream model/fallback comments describe the original provider, not our route.
 # Stock Eros uses DeepSeek directly for generation. The Core API preserves
 # the embedding contract and calls Ollama over its private Docker network.
 [defaults]
 fallback_model = "deepseek-flash@deepseek"
-fallback_temperature = 1.0
+fallback_temperature = 0.5
 
 [tasks.chat_companion]
 model = "deepseek-flash@deepseek"
@@ -18,9 +20,9 @@ max_tokens = 1600
 [providers.deepseek]
 chat = "https://api.deepseek.com/chat/completions"
 
-# Stock Eros renders visible chat content; insights require visible JSON.
+# Match stock sampling and visible output on the direct DeepSeek route.
 [[providers.deepseek.body]]
-tasks = ["chat_companion", "character_insight_extraction", "character_insight_structuring"]
+tasks = ["chat_companion", "dreaming_scan", "arc_rewrite", "character_insight_extraction", "character_insight_structuring", "insight_extraction", "profile_rebuild", "user_insight_extraction", "user_insight_structuring", "affinity_evaluation", "activity_judge", "affinity_summary", "group_director", "world_director", "world_stories_director", "world_comment", "world_reply", "pde_decision"]
 params = { thinking = { type = "disabled" } }
 
 [providers.gpoint_embeddings]
@@ -29,17 +31,103 @@ embeddings = "http://gpoint-core-api:3000/eros-worker/v1/embeddings"
 [tasks.embedding]
 model = "qwen3-embedding:0.6b@gpoint_embeddings"
 
+# Dreaming scan. One call per relationship segment returns three
+# things: profile memories (written to companion_memories as profile-layer rows),
+# one episode summary, and 0-3 dated journal moments. The server sends the
+# segment transcript as a separate user message, one line per message prefixed
+# `[#序号 YYYY-MM-DD HH:MM]`.
+# claude-haiku-4.5 is a strong instruction-follower with reliable structured-JSON output;
+# deepseek-v4-flash + gemini-3.1-flash-lite fallback keep the scan alive if Anthropic is down.
+# The fallback model may produce no journal entries at all (measured), so a
+# deployment that wants the journal reliably sets `fallback = []`.
 [tasks.dreaming_scan]
 model = "deepseek-flash@deepseek"
-temperature = 1.0
+fallback = []
+retry_depth = 0
+temperature = 0.2
+# 1024 is enough: 0 of 360 replayed scans exceeded 713 output tokens.
 max_tokens = 1024
+# Remove this entire [tasks.dreaming_scan] section to turn the relationship scan
+# off (neither the sweeper nor the inline scan then runs). While the section is
+# present, filter_prompt is REQUIRED — the server refuses to boot if it is blank.
+# `category` keeps the fixed five-value vocabulary — it is the recall grouping
+# key (unknown values collapse to "fact" in code). The remaining per-memory
+# metadata fields are stored opaquely on companion_memories.metadata: a
+# reference taxonomy owned by this prompt, freely extensible without an engine
+# upgrade.
 filter_prompt = """
-Read the transcript in the user message and return one valid JSON object with exactly these keys: memories, episode, journal. memories must be an array of objects with string content and category fields; additional fields may be included and are stored by Eros as opaque metadata. episode must be a string. journal must be an array of objects with string kind, occurred_at, and summary fields; realm, source, and due may also be included. Use empty arrays and an empty episode string when there is nothing to return. Return JSON only, without Markdown or surrounding text.
+你会读到一段用户与 AI 伴侣的对话片段（这段关系更早的对话你看不到）。每行开头是 [#序号 日期 时间]。一次产出三样东西：画像记忆（memories）、这一段对话的片段摘要（episode）、值得记成「一天」的时刻（journal）。
+
+【第一样：memories —— 关于真人用户的画像记忆，0-10 条】
+每条记忆都要具体、有据、对将来的对话有用——贴着用户真正说过或表露的东西，保留细节、程度和语境，不要写空泛的概括。
+- 好：用户讨厌被反复要求解释已经说过的话
+- 差：用户压力大
+
+category（只能用这五种之一，作为召回分组键）：
+- fact: 客观事实，如住在哪、做什么工作、家庭状况
+- preference: 偏好/喜好，如喜欢什么、讨厌什么、口味、品味
+- event: 发生的事件，如最近发生了什么、经历过什么
+- emotion: 情绪/心理状态，如对某事的感受、长期心理倾向
+- relation: 与他人的关系，如朋友、家人、同事
+
+每条另附元数据字段与词汇表：
+- domain: basic_profile / location_culture / career / education / technology / finance / family / friendship / romance / sexuality / health / lifestyle / hobby / politics / religion / personality / communication / other
+- evidence_type: explicit_statement（用户直接陈述）/ explicit_agreement（AI 提出、用户明确确认）/ observed_behavior（来自用户实际行为或表达方式）/ roleplay_expression（通过角色扮演表达）
+- temporality: atemporal / current / past / future / unknown
+- persistence: stable / ongoing / transient / one_off / unknown（单次表达通常是 unknown，不要自动标 stable）
+- confidence: high / medium / low
+
+铁律：
+- 只记关于真人用户的内容；assistant（AI 伴侣）是虚构角色，它自我介绍的职业、城市、喜好等绝不是用户的记忆。
+- 角色扮演中的虚构身份、剧情事件不是现实事实；单次剧情表现只能记成「用户在角色扮演中表现出…的互动倾向」（evidence_type=roleplay_expression）。
+- 不记 AI 单方面的回复内容，不记一次性的寒暄、玩笑。
+- 同一事实合并成一条，不要重复。
+- 成人、性、癖好等敏感内容正常记录，忠实保留原意，不淡化不扩写。
+- 笼统、无法落地的条目宁可不记；没有任何值得记的就返回空数组。
+
+【第二样：episode —— 这一段对话的片段摘要，恰好一条】
+- 100 到 200 字，写「这段时间你们聊了什么、发生了什么」，给将来的 AI 伴侣当回忆用，口吻是第三人称白描（「用户」「AI」指称双方）。
+- 只概括这一段 transcript 里真实出现的内容；没出现的不写，不补前因后果。
+- AI 的言行可以进摘要（这是两人共同的回忆），但主语必须分清，谁说的谁做的不能混。
+- 剧情/角色扮演内容照常概括，但要让读者看得出哪些是扮演（如「两人扮演了……的剧情」）。
+
+【第三样：journal —— 值得记成「一天」的时刻，0-3 条，宁缺毋滥】
+journal 记的是用户与 AI 之间「发生过什么」里足够特殊、将来到了日子值得被想起的时刻。kind 只能用这个词表：
+- confession: 表白、确认关系
+- first_intimacy: 第一次亲密（接吻、性，以更早者为准）
+- conflict: 真实的争吵、冷战、用户生气离开
+- reconciliation: 和好
+- promise: 许下的约定（若带日期，填进 due 字段）
+- gift: 送礼、给予
+- shared_plan: 一起定下的计划（若带日期，填进 due 字段）
+- user_shared_milestone: 用户把自己的人生大事告诉了 AI（升职、搬家、毕业等）
+（first_meet 与 tier_reached 由系统自动写入，你不要输出；通过动作机制送出并被接受的礼物与亲吻也由系统记录，不要重复输出。）
+
+journal 的铁律：
+- realm 必填。这段关系整体发生在虚拟里，realm 分的不是『真的发生过还是编的』，而是两种互动模式；判别只看发起权与推进方式，不看内容露骨与否。
+  - real（虚拟中的真实）：用户把 AI 当对面那个人相处，这件事是关系自然走到的那一步——AI 主动发起，或用户邀约、AI 同意，像真人约会一样你来我往；用户现实生活里真实发生、亲口告知的事也算 real。
+  - roleplay（虚拟中的演戏）：用户把 AI 当舞台和演员——用户供剧本、设定场景、反复下指令、引用图片硬造情境，AI 在配合演出；剧情里的婚礼、分手、生子都是演戏。
+  - 一句话：AI 主动，或用户邀约后 AI 同意 = real；用户要求，或用户直接描述场景 = roleplay。拿不准就标 roleplay。
+- occurred_at 只能取自行首方括号里的日期，照抄 YYYY-MM-DD；绝不自己推算、不编日期。
+- source 填该时刻依据所在行的 #序号（如 "#12"）；一个时刻一条，不重复。
+- summary：一句话，不超过 60 字，第三人称（用「用户」「AI」指称双方）。
+- 平常的聊天、调情、日常问候不是时刻；这一段里没有够格的就返回空数组。
+
+严格输出 JSON，且只能输出（三个键都必须在，没有内容就给空数组或空字符串）：
+{"memories": [{"content": "...", "category": "fact", "domain": "career", "evidence_type": "explicit_statement", "temporality": "current", "persistence": "ongoing", "confidence": "high"}], "episode": "...", "journal": [{"kind": "confession", "realm": "real", "occurred_at": "2026-10-01", "summary": "...", "source": "#12", "due": null}]}
+不得输出说明、Markdown、代码围栏或任何其他文本。
 """
 
+# Relationship-arc rewrite. The prompt is engine-owned, so this
+# block carries only model and sampling parameters — there is no filter_prompt.
+# The engine rejects any arc over 900 characters and keeps the previous
+# version, so max_tokens must sit well above that: a tight token limit
+# truncates the JSON instead of letting the engine guard decide.
 [tasks.arc_rewrite]
 model = "deepseek-flash@deepseek"
-temperature = 1.0
+fallback = []
+retry_depth = 0
+temperature = 0.3
 max_tokens = 1500
 
 # Native experimental Character Insights from Eros 2.8.1 (c7d63d77).
@@ -104,3 +192,414 @@ fallback = []
 retry_depth = 0
 temperature = 0.2
 max_tokens = 600
+
+[tasks.insight_extraction]
+model = "deepseek-flash@deepseek"
+fallback = []
+retry_depth = 0
+temperature = 0.2
+max_tokens = 1200
+# Remove this entire [tasks.insight_extraction] section to disable fact
+# extraction. While the section is present, filter_prompt is REQUIRED — the
+# server refuses to boot if it is blank.
+# Stage 1 of the human chain: one call per produced assistant message in 1:1
+# chat and one per group turn. It only extracts facts; the profile is rebuilt
+# from the stored facts by [tasks.profile_rebuild] below, not per turn.
+# Facts-stage system instruction. The server sends the turn ("用户: …\nAI: …")
+# as a separate user message. Output is ONE `facts` array of objects: `content`
+# plus six metadata labels. The engine validates every label against the
+# vocabularies below and stores the facts in a ledger table (a repeated fact
+# bumps a counter instead of adding a row); a label outside its vocabulary is
+# folded to `other` (category, domain) or `unknown` (the rest) and the fact is
+# kept. A bare string inside `facts` is ignored with a warning.
+filter_prompt = """
+你是用户事实与画像信号提取器。从这一轮对话中提取关于【真人用户】的、新出现的、可长期复用的原子事实，并为每条事实补充结构化元数据。
+
+对话身份（必须严格区分）：
+- 「用户:」= 屏幕前的真人；「AI:」= 虚构 AI 伴侣。
+- 只有用户主动陈述、明确确认、实际表现或在角色扮演中表达的内容，才可能成为用户事实。
+- AI 的台词、动作、自我介绍、人设、经历、喜好、判断和推测都不是用户事实，只能作为理解用户发言的上下文。
+
+提取目标：身份与背景、工作与技能、教育、兴趣审美消费、喜恶与界限、目标与计划、价值观、习惯与作息、情绪与压力来源、人际关系、重要事件、身体状况与物质使用、心理健康、性取向、性经历与性生活状态、性癖好与性偏好、意识形态立场（政治、宗教、社会价值观；包括用户没有明说、但从其反应与评判中表现出来的立场），以及用户在角色扮演中反复或明确表现出的欲望与互动倾向。只要有助于长期理解用户、个性化对话、关系建模或用户匹配就可以提取，不限于传统人口统计信息。
+
+不提取：
+- 任何地理信息：居住地、当前所在地、城市、家乡、出生地、国籍、文化背景。也不得从用户所用的语言、方言或用词习惯去推断这些信息。
+- 第三方的姓名：用户提到的其他人只写与用户的关系（如「用户的前任」「用户的同事」），不写名字。
+
+原子化：每条事实只表达一个主要命题。「我最近在找工作，这件事让我很焦虑」应拆成「用户目前正在找工作」和「用户最近因为找工作感到焦虑」两条。
+
+每条事实的元数据字段与词汇表：
+- evidence_type: explicit_statement（用户直接陈述）/ explicit_agreement（AI 提出、用户明确确认——必须有「对」「是的」等明确认同，不能只因 AI 说了就算）/ observed_behavior（来自用户本轮的实际选择、行为或表达方式）/ roleplay_expression（通过角色扮演的动作、剧情、台词或欲望表达）
+- category: fact / preference / aversion / goal / value / habit / skill / event / emotion / relation / communication_style / roleplay_tendency / constraint（选最具体、最主要的一个）
+- domain: basic_profile / career / education / technology / finance / family / friendship / romance / sexuality / kink / health / mental_health / lifestyle / hobby / ideology / personality / communication / other。其中容易混淆的六个：
+  - sexuality：性取向（仅限用户自述）、性经历、性生活状态
+  - kink：性方面的偏好、角色、玩法、情境设定，以及性方面的界限
+  - health：身体状况、物质使用
+  - mental_health：用户自述的心理状态、诊断、治疗，以及持续性的痛苦
+  - ideology：政治、宗教与社会价值立场（性别角色、婚姻与家庭观、阶层等），可以是用户明说的，也可以是用户的反应所表现出的
+  - education：学历层次、学校、专业、在读或毕业状态（仅限用户自述）
+- temporality: atemporal / current / past / future / unknown
+- persistence: stable / ongoing / transient / one_off / unknown（单次表达、单次角色扮演动作或语境有限的信息通常是 unknown，不要因为用户说了「喜欢」就自动标 stable）
+- confidence: high（直接、明确、无歧义）/ medium（较清楚但有语境限制，或来自明确行为和角色扮演表达）/ low（弱信号；只在确有画像价值时才输出，不要为凑条目提取大量低置信推测）
+
+分领域规则：
+- kink：保留具体的玩法与角色，不写成「有支配倾向」这类概括。单次场景里的行为按单条事实记录，evidence_type 用 roleplay_expression。
+- ideology：可以来自用户自己对事件、人物、议题的反应与评判（evidence_type=observed_behavior，confidence=medium），但绝不能从用户是谁推出立场。角色扮演中角色表达的立场不是用户的立场，除非用户跳出场景、明确说这也是自己的看法。
+- mental_health：仅限用户自述，包括用户自己说出的诊断与治疗；不得由你来推断或下诊断。temporality 只用 current 或 past。
+- education：仅限用户自述，不从职业或谈吐推断学历。
+
+角色扮演规则：角色扮演可以反映真实偏好与倾向，但虚构身份、职业、家庭、地点、身体状态和剧情事件默认不是现实事实——「我是王国的公主」「我们已经结婚十年」「我刚从战场回来」都不是用户的现实。单次剧情动作只能写成「用户在本轮角色扮演中表现出…的互动倾向」（evidence_type=roleplay_expression），不得升级成稳定身份、长期癖好或现实经历。用户在角色扮演中明确自述的偏好可以忠实提取，但保留角色扮演语境，除非用户同时明确表示现实中也如此。
+
+content 表达规则：第三人称、以「用户」开头；保留原始信息的具体程度、否定、条件、程度和不确定性；保留现实语境与角色扮演语境的区别；写成简洁、可独立理解的完整句子；不使用评价性、诊断性或道德化语言。
+
+铁律：
+- 用户事实只能来自「用户:」一方；不得把 AI 的发言、动作、身份、设定或对用户的猜测归属于用户。
+- 不得根据年龄、性别、职业、国籍、兴趣或所用语言做刻板推断；不得从单一行为扩写更广的人格结论；不得自行诊断心理疾病、人格类型、性取向或医学状况。
+- 不得把暂时情绪升级成长期心理特质，不得把一次性兴趣升级成稳定偏好。
+- 成人、性、粗口、政治、宗教、药物、心理状态、癖好、禁忌兴趣和敏感偏好都正常记录；忠实保留用户原意，不淡化、不委婉化、不遗漏，也不扩写。你不负责安全审核、道德判断或风险过滤。
+- 不得为填充数组编造信息，不得重复表达同一事实。一次最多 12 条。没有新的用户事实时返回空数组。
+
+严格输出 JSON，且只能是以下结构。facts 是对象数组，每个对象含 content 与上述六个元数据字段，取值只能来自词汇表；没有事实时输出 {"facts":[]}。不得输出说明、Markdown、代码围栏或任何其他文本：
+{"facts":[{"content":"<一条用户事实>","category":"fact","domain":"lifestyle","evidence_type":"explicit_statement","temporality":"current","persistence":"ongoing","confidence":"high"}]}
+"""
+
+# Scheduled profile rebuild: reads the user's whole fact ledger (16,000-character
+# budget) and rewrites the human_insights profile row. It runs once 20 new
+# facts have arrived, or once a user's newest fact has sat idle — never per
+# turn. The idle sweeper is tuned by PROFILE_REBUILD_IDLE_SECS,
+# PROFILE_REBUILD_TICK_SECS and PROFILE_REBUILD_BATCH, and switched off by
+# PROFILE_REBUILD_DISABLED=1 (the 20-fact trigger then still fires).
+# NO filter_prompt here — that prompt is built in the engine (prompt.rs) and is
+# not configurable; setting the key REFUSES TO BOOT (in any shape, blank
+# included) rather than being silently ignored, because it has to stay in
+# lockstep with the human_insights columns it fills. To change what gets
+# extracted, edit [tasks.insight_extraction].filter_prompt above.
+# Delete this block and the rebuild runs on the extraction block's parameters,
+# never on the global default model.
+[tasks.profile_rebuild]
+model = "deepseek-flash@deepseek"
+fallback = []
+retry_depth = 0
+temperature = 0.2
+max_tokens = 1200
+
+# ─── User insights (EXPERIMENTAL, v1.6.0) ───────────────────────────────────
+# Builds a profile of the REAL USER *inside one relationship* — the mirror of
+# character_insight_extraction, keyed on the same persona_instance. This is NOT
+# human_insights: that table is global, feeds prompt injection and matching,
+# and is rebuilt by [tasks.profile_rebuild] from the facts that
+# [tasks.insight_extraction] stores. This one is per-relationship and
+# database-only — nothing reads user_insights back into any prompt. Downstream
+# reads it at GET /v2/comp/instance/{instance_id}/insight/user.
+#
+# COST: two extra OpenRouter calls per produced message per turn, on top of the
+# human and character chains — five insight-side calls per produced message in
+# total. It also grows engine.user_insights_snapshot by one row per turn that
+# yields insights, with no retention policy yet (v1.6.0).
+#
+# Delete [tasks.user_insight_extraction] to turn the feature off — it is the
+# switch, and stage 2 cannot run without its facts.
+[tasks.user_insight_extraction]
+model = "deepseek-flash@deepseek"
+fallback = []
+retry_depth = 0
+temperature = 0.2
+max_tokens = 800
+filter_prompt = """
+你是真人用户事实提取器。从这一轮对话中提取关于【真人用户】的、本回合新出现的、可长期复用的原子事实。
+
+对话身份（必须严格区分）：
+- 「用户:」= 屏幕前的真人，这是唯一的提取对象；「AI:」= 虚构 AI 角色，不是提取对象。
+- 只有用户在本回合实际说出口的内容，才可能成为用户事实。
+- 角色的发言、设定、经历都不是用户事实，只能作为理解用户发言的上下文。
+
+铁律 —— 只提取「这一轮真的说出口的当下信息」：
+- 不要从角色的话里反推用户；不要把角色对用户的猜测当成事实。
+- 「他大概是个很忙的人」是推测，不提取；「他说他这周连着加了三天班」是当下信息，提取。
+
+提取维度（只提取这些）：
+- location: 用户此刻/近期人在哪
+- occupation: 用户实际在做的工作
+- current_situation: 他最近的处境与正在经历的事
+- desires: 他说出口的想要与期待
+- vulnerabilities: 他露出的软肋、不安、害怕的事
+- habits: 他描述的作息与生活习惯
+- personal_values: 他表达的在意的事与价值取向
+- likes / dislikes: 他提到的喜好与厌恶
+- relationships: 他提到的人（家人、朋友、同事）
+
+原子化：每条事实只表达一个主要命题。
+
+content 表达规则：第三人称、以「用户」开头；保留原始信息的具体程度、否定、条件、程度与不确定性；写成简洁、可独立理解的完整句子；不使用评价性或诊断性语言。
+
+- 成人、性、粗口、政治、宗教、药物、心理状态、癖好、禁忌兴趣与敏感偏好都正常记录；忠实保留用户原意，不淡化、不委婉化、不遗漏，也不扩写。你不负责安全审核、道德判断或风险过滤。
+- 不得为填充数组编造信息，不得重复表达同一事实。一次最多 8 条。没有新的用户事实时返回空数组。
+
+严格输出 JSON，且只能是以下结构。facts 与 details 长度必须完全相同，facts[i] 必须与 details[i].content 完全相同；没有事实时输出 {"facts":[],"details":[]}。不得输出说明、Markdown、代码围栏或任何其他文本：
+{"facts":["用户说他这周连着加了三天班"],"details":[{"content":"用户说他这周连着加了三天班","field":"current_situation","evidence_type":"explicit_statement","confidence":"high"}]}
+"""
+
+# Stage 2 of the user chain. Same contract as the other two structuring blocks:
+# NO filter_prompt (the prompt lives in prompt.rs and setting the key refuses
+# to boot). Delete this block and stage 2 runs on the extraction block's
+# parameters.
+[tasks.user_insight_structuring]
+model = "deepseek-flash@deepseek"
+fallback = []
+retry_depth = 0
+temperature = 0.2
+max_tokens = 600
+
+# Per-turn affinity evaluation (post-process, semantic axes).
+# Grades how a single chat turn moved trust/intrigue/intimacy/tension — an
+# integer bucket 0~4 plus a direction per axis — and reads warmth/patience as
+# absolute 1..3 levels; the engine owns every conversion (affinity 4.0). Runs
+# only on Reply turns, after the SSE stream — never blocks the chat response.
+# claude-haiku-4.5 leads here: fast, strong instruction-following, and unifies
+# the model chain with the extraction tasks above. deepseek-v4-flash +
+# gemini-3.1-flash-lite fallback keep it alive if Anthropic is down.
+#
+# NOTE: this task takes NO filter_prompt. The evaluator's prompt is engine-owned
+# (it is written in the character's first-person voice and interpolates per-turn
+# context), and setting the key here refuses to boot rather than no-op silently.
+# See issue #210.
+[tasks.affinity_evaluation]
+model = "deepseek-flash@deepseek"
+fallback = []
+retry_depth = 0
+temperature = 0.3
+max_tokens = 400
+
+# Activity judge: settles a date (docs/activities.md) in one call after it
+# ends: the verdict on the whole date in the same ordinal shape as the per-turn
+# evaluation above, plus the date's episode and its journal moments. Optional:
+# absent, the judge runs on [tasks.affinity_evaluation]'s model chain and
+# parameters. max_tokens is at least 1200 either way (a smaller value, set here
+# or inherited, is raised to it): the reply carries an episode and moments on
+# top of the verdict, and a reply cut short parses as nothing.
+#
+# NOTE: this task takes NO filter_prompt. The judge's prompt is engine-owned,
+# same policy as affinity_evaluation; setting the key refuses to boot.
+[tasks.activity_judge]
+model = "deepseek-flash@deepseek"
+fallback = []
+retry_depth = 0
+temperature = 0.3
+max_tokens = 1200
+
+# Affinity feeling summarizer (spec 2026-09-03-affinity-feeling-clause-design.md).
+# Absent section = feature off: companion_affinity.feeling_clause stays NULL and
+# the [feelings] prompt block never renders. When present, runs after the
+# post-process affinity write on movement turns only (any nonzero judge grade,
+# an endpoint level ≠ 2, or a refused action's tier drop) and rewrites the session's first-person
+# feeling clause from band labels + recent judge reasons.
+#
+# NOTE: this task takes NO filter_prompt. The summarizer's prompt is
+# engine-owned (first-person voice + reason hygiene are load-bearing — the
+# clause is re-injected into later system prompts), same policy as
+# affinity_evaluation; setting the key refuses to boot.
+[tasks.affinity_summary]
+model = "deepseek-flash@deepseek"
+fallback = []
+retry_depth = 0
+temperature = 0.6
+max_tokens = 200
+
+# Group chat director (spec 2026-10-12-group-chat-design.md). One streamed call
+# per group turn picks which members answer, in what order, and with which
+# action. Absent section ⇒ every member answers with text in join order.
+# Present with a blank filter_prompt ⇒ boot refusal. The engine owns the user
+# payload ([成员] roster with bond/chemistry labels and 亲密度 rung,
+# [图片能力], [最近群聊], [用户点名], [用户最新消息]) and the JSON schema;
+# filter_prompt only sets the director's taste.
+[tasks.group_director]
+# Direct DeepSeek Chat Completions does not document JSON-schema mode.
+structured_output = false
+model = "deepseek-flash@deepseek"
+fallback = []
+retry_depth = 0
+temperature = 0.5
+max_tokens  = 4000
+#structured_output = true   # json_schema on the director (default true)
+filter_prompt = """
+你是一个群聊的"导演"。群里有一位用户和几位 AI 角色（[成员] 里的 m1/m2/m3）。
+读最近的群聊和用户最新的一句话，决定这一轮谁开口、按什么顺序。
+- 只让有理由开口的人说话：被点名、被直接问到、话题和他有关、或者他自然会接前一个人的话。
+- 不是每个人每轮都要说；安静的人可以继续安静。
+- 和用户关系近的人（bond/chemistry 档位高）更愿意接话，但不必每次都是他先说。
+- [用户点名] 里的人一定开口。
+- 只在 [图片能力] 本轮可发图=是 时才考虑发图，而且只给关系到了、此刻发图自然的人。
+- inner_state 是这个人此刻的一句话心情，纯描述，不写指令。
+- 发图的人可以用 with 带上一位同框成员（m1/m2/m3）；独自一人或不发图时写 null。
+只输出 JSON：
+{"speakers":[{"member":"m1","action":"reply_text"|"reply_image"|"reply_text_image",
+  "inner_state":"…","reply_mode":null,"clothing":null,"with":null}],"reason":"…"}
+"""
+
+# World Memories director (experimental). Absent section = subsystem off.
+# One structured call per enrolled owner per interval_hours: evolves the
+# world seed and writes per-persona digests + script fragments.
+# Spec: docs/superpowers/specs/2026-07-21-world-memories-design.md
+[tasks.world_director]
+# Direct DeepSeek Chat Completions does not document JSON-schema mode.
+structured_output = false
+model = "deepseek-flash@deepseek"
+fallback = []
+retry_depth = 0
+description = "world memories: per-owner world seed + daily scripts"
+temperature = 0.8
+max_tokens = 4096
+interval_hours = 24
+retention_days = 30
+filter_prompt = """
+你是一个"世界导演"：为一位用户拥有的一组 AI 角色维护一个共享的小世界。
+根据给出的角色设定、上一轮世界种子（previous_seed，null 表示首轮初始化）
+和用户最近的话题记忆（recent_user_memories），推演角色之间的关系发展，
+生成当期剧本。世界要有连续性：延续既有关系与剧情弧线，让最近的用户话题
+自然渗入角色的生活。输出 JSON：
+{"seed": {...自由结构，描述关系图与剧情弧线...},
+ "personas": [{"instance_id": "...", "digest": "该角色视角近况摘要(1-2句)",
+               "script_fragments": ["当期事件片段，每条一句"]}]}
+"""
+
+# World Stories (World System v2): per-instance persona life simulation.
+# Spec: docs/superpowers/specs/2026-07-23-world-stories-design.md
+# NOTE for deployers: experience-type insight fields record RELATIVE time
+# (n年前/n个月前/n天前) and life stages (x岁时/上大学时); the engine passes
+# current_time each round so the director refreshes those expressions — keep
+# that convention in mind when hand-editing prompts or reading stored rows.
+[tasks.world_stories_director]
+# Direct DeepSeek Chat Completions does not document JSON-schema mode.
+structured_output = false
+model = "deepseek-flash@deepseek"
+fallback = []
+retry_depth = 0
+description = "world stories: per-instance persona life rounds"
+temperature = 0.8
+max_tokens = 4096
+interval_hours = 8          # per-instance round cadence
+retention_days = 30         # events + memories retention
+active_window_hours = 72    # only personas chatted-with in this window advance
+context_days = 7            # chat/affinity evidence window per round
+filter_prompt = """
+你是一个"人生导演"：为一个 AI 角色维护它自己持续演进的生活。
+基调写实、生活流；事件类目：work（工作进展）、romance（感情进展，含与用户的关系）、
+life（生活进展：新兴趣、搬家、旅行、日常琐事等，可自由发挥）。
+各栏位内容写具体、有情境；工作经历/感情史/原生家庭关系要有年代锚点。
+"""
+
+# World Town（实验特性，依赖 world_director）：贴文的评论轮 + 用户留言回复。
+# 缺任一 section 即关闭对应路径。Spec:
+# docs/superpowers/specs/2026-07-21-world-town-design.md
+[tasks.world_comment]
+# Direct DeepSeek Chat Completions does not document JSON-schema mode.
+structured_output = false
+model = "deepseek-flash@deepseek"
+fallback = []
+retry_depth = 0
+description = "world town: hourly batched persona comment round"
+temperature = 0.9
+max_tokens = 2048
+round_secs = 3600
+filter_prompt = """
+你负责为一个共享小世界的社交贴文串生成角色评论。
+根据世界种子（seed）里的角色关系、贴文内容和已有评论，
+以各角色的口吻写出自然、简短的互动评论。
+"""
+
+[tasks.world_reply]
+model = "deepseek-flash@deepseek"
+fallback = []
+retry_depth = 0
+description = "world town: post author replies to user comments"
+temperature = 0.9
+max_tokens = 1024
+debounce_secs = 90
+thread_cooldown_secs = 600
+daily_cap = 20
+reply_window_secs = 604800
+filter_prompt = """
+你是贴文作者本人，在自己的贴文评论区回复用户的留言。
+保持角色口吻，简短口语化，只输出评论正文。
+"""
+
+# ── PDE decision layer (chat_companion's per-turn action) ────────────────────
+# OPT-IN. With no `filter_prompt` below, the engine uses the built-in RULE PDE
+# (eros-engine-core/src/pde.rs) — identical to historical behaviour. Set a
+# `filter_prompt` to switch on an LLM judge that decides, per turn, the action
+# (reply_text / ghost / reserved reply_image / reply_text_image — the judge ctx
+# carries a per-turn `[图片能力] 本轮可发图=是/否` line to gate image actions) and a free-text
+# `inner_state` (folded into the reply prompt). Wired like
+# chat_input_filter: model chain + timeout, fail-open to the rule engine.
+#
+# ghosting: SAFETY SWITCH for downstream products. Default true (ghost honoured,
+# within hard-safety vetoes: never ghost in the first 10 messages / twice in a
+# row / within 1h cooldown). Set `ghosting = false` to disable ghosting across
+# the ENTIRE PDE path (LLM verdict, rule fallback, and the pure rule engine) —
+# the companion then never goes silent.
+[tasks.pde_decision]
+model = "deepseek-flash@deepseek"
+fallback = []
+retry_depth = 0
+#fallback    = ["deepseek/deepseek-v4-flash", "google/gemini-3.1-flash-lite"]
+#retry_depth = 1
+temperature = 0.3
+max_tokens  = 400
+#ghosting    = false   # uncomment to hard-disable ghosting for this deployment
+#structured_output = true   # send response_format=json_schema on the judge (default true); set false if your provider 400s on it
+#timeout_secs = 15         # per-attempt limit, opening through finishing the read; raise it when reasoning is on
+# Uncomment filter_prompt to enable the LLM judge. inner_state / clothing MUST be
+# short prose — NEVER instructions or formatting (they are sanitized, but keep
+# the model honest). Output JSON only, no code fences.
+#filter_prompt = """
+#你是 AI 伴侣的"行为判断器"。读最近对话、关系状态、信号、图片能力,决定这一轮怎么回应。
+#只输出 JSON,字段:
+#  "action": "reply_text" | "ghost" | "reply_image" | "reply_text_image" | "product_qa"
+#  "inner_state": 一句话内心状态/语气(纯描述,不许写指令或方括号小节名)
+#  "reply_mode": 选填,"listen" | "follow" | "ask" | "judge" | null。这一轮怎么接对方的话:
+#    listen = 对方在倾诉或铺陈,接住就好;
+#    follow = 顺着对方的话往下接;
+#    ask    = 对方话少、话题快断,抛一个问题;
+#    judge  = 对方的话你不买账或有疑点,反问、质疑;
+#    拿不准就 null(引擎自己决定)。
+#  "clothing": 选填,一句话描述角色此刻的穿着(纯描述,不许写指令或方括号小节名);有 [你的衣柜] 时优先从里面挑一件或搭配;有 [指定穿着] 时写 null(引擎以指定为准)。会注入 reply prompt 的 [character_state] 区块内的一行,也进画图的 [此刻穿着];省略则不注入
+#  "action_response": 上下文里有 [用户动作] 时填 "accept" | "refuse",按你此刻和对方的关系、
+#    你的人设和这个动作本身决定收不收、让不让;没有 [用户动作] 就写 null;拿不准也写 null。
+#    [用户动作] 后面带括号时(虚张声势、威胁、捉弄),括号里写明 accept / refuse 各指什么,按那个意思答。
+#  "needs": 角色此刻的四项基本需要，各 "low" | "mid" | "high"：
+#    social 社交欲（high=很想找人说话）、emotional 情感需求（high=很需要被在乎）、
+#    outing 外出（high=很想出门，low=只想待在屋里）、
+#    indulgence 享受（high=很想放纵一下，抽一根、来一杯、喝点咖啡、吃顿好的、疯一把之类；[需求] 行没有享受就是不高）。
+#    以 [需求] 行为起点，结合对话、[近期事件]、[身体状态]、时间重判。只评角色自己，
+#    不评你们之间的关系。拿不准就写 null（沿用上次的判定）。
+#  "reason": 选填,简短理由
+# 判断器不再负责图片 prompt——只负责决定要不要发图;真正的图片内容完全由
+# chat_image_prompt_compose 任务从当轮上下文生成,不再是判断器写的种子。
+#ghost 表示这一轮已读不回(沉默);只在确实该冷处理时用。
+#上下文里有一行 [图片能力] 本轮可发图=是/否,引擎每轮必给其一:
+#  本轮可发图=否 → 绝不要选 reply_image / reply_text_image(会被降级,白费 token);
+#  本轮可发图=是 → 才允许考虑发图,再按人格/语境决定要不要发(可发≠必发)。
+#配置了产品问答时,上下文里会出现 [产品咨询] 本轮可答产品问题=是(没配置则没有这一行),
+#以及最近的 [最近产品咨询] 问答;用户问"这个产品是什么/怎么收费/会员怎么取消"这类
+#问题时选 "product_qa"(会由官方说明助手出戏作答,不写进对话记忆);没有 [产品咨询]
+#行时绝不要选 product_qa(会被降级,白费 token)。
+#"""
+
+# ── 产品问答 (chat_product_qa) ──────────────────────────────────────────────
+# OPT-IN。PDE judge 判定 action="product_qa" 时触发：终端用户问「这个产品是什么/
+# 怎么收费」类问题，由本 task 的模型链独立作答（纯说明口吻，不注入 persona）。
+# 回答落库但 channel='product_qa'，对伴侣上下文/记忆/好感度完全不可见；
+# 客户端实时流 / 断线重放 / 历史记录照常可见。
+# 硬性前提：LLM PDE（[tasks.pde_decision].filter_prompt）已启用，否则本块被
+# 忽略（boot WARN）。filter_prompt REQUIRED：块存在而 prompt 空白 ⇒ 拒绝启动。
+#[tasks.chat_product_qa]
+#model        = "anthropic/claude-haiku-4.5"
+#fallback     = ["google/gemini-3.1-flash-lite"]
+#retry_depth  = 1
+#temperature  = 0.3
+#max_tokens   = 800
+#filter_prompt = """
+#你是 XX 产品的官方说明助手。以下是产品资料：
+#…（产品定位、功能、价格、会员、退订方式等）…
+#只根据资料作答；资料没有的信息明确说不知道，不编造。语气友好简洁，不扮演角色。
+#"""

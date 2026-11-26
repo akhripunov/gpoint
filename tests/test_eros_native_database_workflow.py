@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+import hashlib
 
 import yaml
 
@@ -249,7 +250,10 @@ def test_kamal_roles_share_the_private_eros_network_with_stable_service_aliases(
     assert model.count("http://gpoint-core-api:3000/eros-worker/v1/") == 1
     assert "https://api.deepseek.com/chat/completions" in model
     assert "gpoint-codex@gpoint" not in model
-    assert model.count("deepseek-flash@deepseek") == 6
+    tasks = tomllib.loads(model)["tasks"]
+    assert tasks["embedding"]["model"] == "qwen3-embedding:0.6b@gpoint_embeddings"
+    assert all(task["model"] == "deepseek-flash@deepseek"
+               for name, task in tasks.items() if name != "embedding")
 
 
 def test_hosted_stock_eros_e2e_uses_exact_build_digest_and_approved_local_alias():
@@ -321,10 +325,10 @@ def test_deepseek_runtime_verification_and_rollback_provider_guard():
     assert 'Eros rollback target lacks compatible provider networking' in retained
 
 
-def test_deepseek_disables_thinking_for_companion_and_character_insights():
+def test_deepseek_disables_thinking_for_all_configured_text_tasks():
     config = tomllib.loads((ROOT / "services/eros-engine/eros-production-model-config.toml").read_text())
     assert config["providers"]["deepseek"]["body"] == [
-        {"tasks": ["chat_companion", "character_insight_extraction", "character_insight_structuring"],
+        {"tasks": [name for name in config["tasks"] if name != "embedding"],
          "params": {"thinking": {"type": "disabled"}}}
     ]
     assert config["tasks"]["chat_companion"]["model"] == "deepseek-flash@deepseek"
@@ -353,3 +357,61 @@ def test_native_character_insights_have_bounded_direct_deepseek_tasks():
         "model": "deepseek-flash@deepseek", "fallback": [], "retry_depth": 0,
         "temperature": 0.2, "max_tokens": 600,
     }
+
+def test_stock_eros_text_task_parity():
+    config = tomllib.loads((ROOT / "services/eros-engine/eros-production-model-config.toml").read_text())
+    expected = {
+        "chat_companion": (0.8, 1600),
+        "dreaming_scan": (0.2, 1024),
+        "arc_rewrite": (0.3, 1500),
+        "character_insight_extraction": (0.2, 800),
+        "character_insight_structuring": (0.2, 600),
+        "insight_extraction": (0.2, 1200),
+        "profile_rebuild": (0.2, 1200),
+        "user_insight_extraction": (0.2, 800),
+        "user_insight_structuring": (0.2, 600),
+        "affinity_evaluation": (0.3, 400),
+        "activity_judge": (0.3, 1200),
+        "affinity_summary": (0.6, 200),
+        "group_director": (0.5, 4000),
+        "world_director": (0.8, 4096),
+        "world_stories_director": (0.8, 4096),
+        "world_comment": (0.9, 2048),
+        "world_reply": (0.9, 1024),
+        "pde_decision": (0.3, 400),
+    }
+    tasks = config["tasks"]
+    assert set(tasks) == set(expected) | {"embedding"}
+    assert config["defaults"]["fallback_temperature"] == 0.5
+    for name, (temperature, max_tokens) in expected.items():
+        task = tasks[name]
+        assert (task["temperature"], task["max_tokens"]) == (temperature, max_tokens), name
+        assert task["model"] == "deepseek-flash@deepseek", name
+        assert task["retry_depth"] == 0, name
+        if name != "chat_companion":
+            assert task["fallback"] == [], name
+    # Source: Eros v2.8.1 c7d63d77, examples/model_config.d.
+    # Hash the parsed prompt, not the TOML formatting.
+    prompts = {
+        "dreaming_scan": "289513d33da87001b9ffe4a237ed313a358d4be69b1f2094cb5f708ee61451f9",
+        "character_insight_extraction": "db2f06cd32f92b27cfefa0ecf81027ec3fa7c3570680362471bb83313f12c2ba",
+        "insight_extraction": "9ba059b3c325c4c0d4326ad696b4e6ecc7a9757b3f66fede692a28f913d0a177",
+        "user_insight_extraction": "881016104709f3b2b8920c8dbbfde0b442497feee04125bf3e51f81abbf7a45b",
+        "group_director": "6eeee1664c42106d2fc6045a2ec583298b931971dea1e3e6258e95423a3966a3",
+        "world_director": "532a4cd219c80d559ede860c4f9fa63d6bf9bdd6a3478cd66f56dcf3d1c83a08",
+        "world_stories_director": "5c2a06b775cb72fe7731e34487311752fb89ef2bfc2078184370291231b2fbf4",
+        "world_comment": "98940c36c87eccf0d9887aa91d9c09bd53411c18e0befc6ce522287a01be34cb",
+        "world_reply": "058ef651120346e085a3b931e45f094847f2108677b6280a2bf975b3822a4a4c",
+    }
+    assert {name for name, task in tasks.items() if "filter_prompt" in task} == set(prompts)
+    for name, digest in prompts.items():
+        assert hashlib.sha256(tasks[name]["filter_prompt"].encode()).hexdigest() == digest, name
+    assert {name for name, task in tasks.items() if task.get("structured_output") is False} == {
+        "group_director", "world_director", "world_stories_director", "world_comment",
+    }
+    assert (tasks["world_director"]["interval_hours"], tasks["world_director"]["retention_days"]) == (24, 30)
+    assert tuple(tasks["world_stories_director"][k] for k in
+                 ("interval_hours", "retention_days", "active_window_hours", "context_days")) == (8, 30, 72, 7)
+    assert tasks["world_comment"]["round_secs"] == 3600
+    assert tuple(tasks["world_reply"][k] for k in
+                 ("debounce_secs", "thread_cooldown_secs", "daily_cap", "reply_window_secs")) == (90, 600, 20, 604800)

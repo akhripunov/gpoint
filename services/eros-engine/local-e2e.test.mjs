@@ -167,7 +167,7 @@ test('model config routes chat, embeddings and synthetic dreaming scan to the in
   assert.match(config, /^\[tasks\.arc_rewrite\]/m);
   assert.doesNotMatch(config, /^\[tasks\.memory_extraction\]/m);
   assert.match(config, /filter_prompt\s*=\s*"""[\s\S]*SYNTHETIC_DREAMING_SCAN_RESULT/i);
-  const dreaming = config.split('[tasks.dreaming_scan]')[1]?.split('\n[tasks.')[0] ?? '';
+  const dreaming = config.split(/^\[tasks\.dreaming_scan\][ \t]*$/m)[1]?.split(/^\[tasks\./m)[0] ?? '';
   assert.match(dreaming, /temperature\s*=\s*1\.0/);
   assert.match(compose, /DREAMING_TICK_SECS/);
   assert.match(compose, /DREAMING_IDLE_SECS/);
@@ -183,18 +183,27 @@ test('model config routes chat, embeddings and synthetic dreaming scan to the in
 test('runtime Eros profiles preserve the dreaming scan output contract and parameters-only arc rewrite', () => {
   for (const name of ['eros-production-model-config.toml', 'eros-pilot-model-config.toml']) {
     const config = readFileSync(new URL(name, directory), 'utf8');
-    const dreaming = config.split('[tasks.dreaming_scan]')[1]?.split('\n[tasks.')[0] ?? '';
-    const arc = config.split('[tasks.arc_rewrite]')[1]?.split('\n[tasks.')[0] ?? '';
+    const dreaming = config.split(/^\[tasks\.dreaming_scan\][ \t]*$/m)[1]?.split(/^\[tasks\./m)[0] ?? '';
+    const arc = config.split(/^\[tasks\.arc_rewrite\][ \t]*$/m)[1]?.split(/^\[tasks\./m)[0] ?? '';
     assert.match(config, /^\[tasks\.dreaming_scan\]/m, name);
     assert.match(config, /^\[tasks\.arc_rewrite\]/m, name);
     assert.doesNotMatch(config, /^\[tasks\.memory_extraction\]/m, name);
     assert.match(dreaming, /filter_prompt\s*=\s*"""/, name);
-    assert.match(dreaming, /memories must be an array of objects with string content and category fields/i, name);
-    assert.match(dreaming, /additional fields may be included and are stored by Eros as opaque metadata/i, name);
-    assert.doesNotMatch(dreaming, /privacy rules|never retain|non-sensitive|return only|0–10|0-10|sensitive data/i, name);
     assert.doesNotMatch(arc, /filter_prompt\s*=/, name);
-    assert.match(dreaming, /temperature\s*=\s*1\.0/, name);
-    assert.match(arc, /temperature\s*=\s*1\.0/, name);
+    if (name === 'eros-production-model-config.toml') {
+      assert.match(dreaming, /"memories"\s*:/, name);
+      assert.match(dreaming, /"episode"\s*:/, name);
+      assert.match(dreaming, /"journal"\s*:/, name);
+      assert.match(dreaming, /"evidence_type"\s*:/, name);
+      assert.match(dreaming, /temperature\s*=\s*0\.2/, name);
+      assert.match(arc, /temperature\s*=\s*0\.3/, name);
+    } else {
+      assert.match(dreaming, /memories must be an array of objects with string content and category fields/i, name);
+      assert.match(dreaming, /additional fields may be included and are stored by Eros as opaque metadata/i, name);
+      assert.doesNotMatch(dreaming, /privacy rules|never retain|non-sensitive|return only|0–10|0-10|sensitive data/i, name);
+      assert.match(dreaming, /temperature\s*=\s*1\.0/, name);
+      assert.match(arc, /temperature\s*=\s*1\.0/, name);
+    }
   }
   const fixture = readFileSync(new URL('test-model-config.toml', directory), 'utf8');
   const fixtureDreaming = fixture.split('[tasks.dreaming_scan]')[1]?.split('\n[tasks.')[0] ?? '';
