@@ -126,6 +126,88 @@ def _read_env(path: Path = ENV_PATH) -> dict[str, str]:
     return rows
 
 
+# Product-owned world enrollment is the only additional production login.
+# Effective grants, including PUBLIC grants and role membership, must match
+# this exact column allowlist. No changes to the stock SQLx ledger.
+WORLD_WRITER = "eros_world_writer"
+WORLD_WRITER_COLUMNS = {
+    ("chat_sessions", "SELECT"): ("id", "user_id", "instance_id", "channel", "archived"),
+    ("persona_instances", "SELECT"): ("id", "owner_uid", "status", "genome_id"),
+    ("world_enrollments", "SELECT"): ("owner_uid", "stories_enabled", "town_enabled"),
+    ("world_enrollments", "INSERT"): ("owner_uid", "stories_enabled", "town_enabled"),
+    ("world_enrollments", "UPDATE"): ("stories_enabled", "town_enabled"),
+    ("world_worldviews", "SELECT"): ("owner_uid", "content"),
+    ("world_worldviews", "INSERT"): ("owner_uid", "content"),
+    ("world_worldviews", "UPDATE"): ("content", "updated_at"),
+}
+
+
+def world_writer_acl_query(login: bool = True) -> str:
+    allowed = ",".join(
+        f"('engine','{table}','{column}','{privilege}')"
+        for (table, privilege), columns in WORLD_WRITER_COLUMNS.items()
+        for column in columns
+    )
+    login_sql = "true" if login else "false"
+    return f"""WITH writer AS (
+      SELECT * FROM pg_roles WHERE rolname='eros_world_writer'
+    ), relations AS (
+      SELECT c.oid,c.relkind,n.nspname::text AS schema_name,c.relname::text AS table_name
+      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE left(n.nspname,3) <> 'pg_' AND n.nspname <> 'information_schema'
+    ), columns AS (
+      SELECT r.*,a.attnum,a.attname::text AS column_name FROM relations r
+      JOIN pg_attribute a ON a.attrelid=r.oid AND a.attnum>0 AND NOT a.attisdropped
+      WHERE r.relkind IN ('r','p','v','m','f')
+    ), allowed(schema_name,table_name,column_name,privilege) AS (VALUES {allowed}),
+    actual AS (
+      SELECT c.schema_name,c.table_name,c.column_name,p.privilege
+      FROM columns c CROSS JOIN writer w
+      CROSS JOIN (VALUES ('SELECT'),('INSERT'),('UPDATE'),('REFERENCES')) p(privilege)
+      WHERE has_column_privilege(w.oid,c.oid,c.attnum,p.privilege)
+    )
+    SELECT EXISTS (
+      SELECT 1 FROM writer w
+      WHERE w.rolcanlogin={login_sql} AND NOT w.rolsuper AND NOT w.rolcreatedb
+        AND NOT w.rolcreaterole AND NOT w.rolinherit AND w.rolbypassrls
+        AND NOT w.rolreplication AND w.rolconnlimit=6 AND w.rolconfig IS NULL
+        AND NOT EXISTS(SELECT FROM pg_auth_members m WHERE w.oid IN (m.roleid,m.member))
+        AND NOT EXISTS(SELECT FROM pg_db_role_setting s WHERE s.setrole=w.oid)
+        AND NOT EXISTS(SELECT FROM pg_shdepend s WHERE s.refclassid='pg_authid'::regclass
+          AND s.refobjid=w.oid AND s.deptype='o')
+        AND has_database_privilege(w.oid,current_database(),'CONNECT')
+        AND NOT has_database_privilege(w.oid,current_database(),'CREATE')
+        AND NOT has_database_privilege(w.oid,current_database(),'CONNECT WITH GRANT OPTION')
+        AND NOT EXISTS(SELECT FROM pg_database d WHERE d.datallowconn
+          AND d.datname<>current_database() AND has_database_privilege(w.oid,d.oid,'CONNECT'))
+        AND has_schema_privilege(w.oid,'engine','USAGE')
+        AND NOT EXISTS(SELECT FROM pg_namespace n
+          WHERE left(n.nspname,3)<>'pg_' AND n.nspname<>'information_schema'
+            AND (has_schema_privilege(w.oid,n.oid,'CREATE')
+              OR (n.nspname NOT IN ('engine','public') AND has_schema_privilege(w.oid,n.oid,'USAGE'))))
+        AND NOT EXISTS(SELECT FROM relations r
+          CROSS JOIN (VALUES ('SELECT'),('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE'),('REFERENCES'),('TRIGGER')) p(privilege)
+          WHERE r.relkind IN ('r','p','v','m','f') AND has_table_privilege(w.oid,r.oid,p.privilege))
+        AND NOT EXISTS(SELECT FROM relations r
+          CROSS JOIN (VALUES ('USAGE'),('SELECT'),('UPDATE')) p(privilege)
+          WHERE r.relkind='S' AND has_sequence_privilege(w.oid,r.oid,p.privilege))
+        AND NOT EXISTS(SELECT FROM columns c
+          CROSS JOIN (VALUES ('SELECT'),('INSERT'),('UPDATE'),('REFERENCES')) p(privilege)
+          WHERE has_column_privilege(w.oid,c.oid,c.attnum,p.privilege || ' WITH GRANT OPTION'))
+        AND NOT EXISTS(SELECT FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+          WHERE left(n.nspname,3)<>'pg_' AND n.nspname<>'information_schema'
+          AND p.prosecdef AND has_schema_privilege(w.oid,n.oid,'USAGE')
+          AND has_function_privilege(w.oid,p.oid,'EXECUTE'))
+        AND NOT EXISTS((SELECT * FROM actual EXCEPT SELECT * FROM allowed)
+          UNION ALL (SELECT * FROM allowed EXCEPT SELECT * FROM actual))
+    )"""
+
+
+def verify_world_writer() -> None:
+    if _docker_psql("eros", world_writer_acl_query()) != "t":
+        raise RuntimeError("Eros world writer effective ACL differs from exact approved scope")
+
+
 def _database_facts(expected_identity: str, database: str = "eros") -> dict:
     if database != "eros" and not DB_NAME.fullmatch(database):
         raise ValueError("database name is outside the Eros lifecycle scope")
@@ -145,6 +227,7 @@ def _database_facts(expected_identity: str, database: str = "eros") -> dict:
       'otherConnect',(SELECT coalesce(json_agg(r.rolname ORDER BY r.rolname),'[]'::json)
         FROM pg_roles r WHERE NOT r.rolsuper AND r.rolname NOT IN ('eros_ddl','eros_runtime','eros_migrator')
           AND has_database_privilege(r.oid,d.oid,'CONNECT')),
+      'worldWriterExists',EXISTS(SELECT FROM pg_roles WHERE rolname='eros_world_writer'),
       'marker',(SELECT identity FROM public.eros_deployment_identity WHERE singleton=true),
       'extension',(SELECT extversion FROM pg_extension WHERE extname='vector'),
       'engineOwner',(SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='engine'),
@@ -176,11 +259,12 @@ def _database_facts(expected_identity: str, database: str = "eros") -> dict:
         facts = json.loads(raw)
     except (ValueError, TypeError, json.JSONDecodeError):
         raise RuntimeError("dedicated Eros database inventory is invalid") from None
+    expected_other = [WORLD_WRITER] if database == 'eros' and facts.get('worldWriterExists') is True else []
     if (facts.get("name") != database or facts.get("owner") != "eros_ddl" or facts.get("allowConnect") is not True
             or facts.get("publicConnect") is not False or facts.get("runtimeConnect") is not True
             or facts.get("runtimeDbCreate") is not False or facts.get("migratorDbCreate") is not False
             or facts.get("runtimeDbTemp") is not True
-            or facts.get("migratorConnect") is not True or facts.get("otherConnect") != []
+            or facts.get("migratorConnect") is not True or facts.get("otherConnect") != expected_other
             or facts.get("runtimeSchemaUsage") is not True or facts.get("runtimeSchemaCreate") is not False
             or facts.get("runtimePublicSchemaCreate") is not False
             or facts.get("migratorSchemaUsage") is not True or facts.get("migratorSchemaCreate") is not True
@@ -203,6 +287,8 @@ def _database_facts(expected_identity: str, database: str = "eros") -> dict:
             or not runtime["bypassrls"] or runtime["inherit"] or not migrator["login"] or migrator["superuser"]
             or migrator["createdb"] or migrator["createrole"] or migrator["bypassrls"] or migrator["inherit"]):
         raise RuntimeError("dedicated Eros role privileges differ from the approved ACL")
+    if expected_other:
+        verify_world_writer()
     return facts
 
 

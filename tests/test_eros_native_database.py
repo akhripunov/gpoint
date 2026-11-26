@@ -88,6 +88,26 @@ class ErosNativeDatabaseTests(unittest.TestCase):
                     DB._encrypt_backup_to_staged_path(source, staged)
             self.assertFalse(staged.exists())
 
+    def test_world_writer_requires_exact_effective_permissions_and_no_foreign_connect(self):
+        valid = facts()
+        valid["worldWriterExists"] = True
+        valid["otherConnect"] = ["eros_world_writer"]
+        with patch.object(DB, "_docker_psql", side_effect=[json.dumps(valid), "t"]) as psql:
+            self.assertEqual(DB._database_facts("a" * 48)["otherConnect"], ["eros_world_writer"])
+            self.assertIn("WITH writer AS", psql.call_args.args[1])
+        with patch.object(DB, "_docker_psql", side_effect=[json.dumps(valid), "f"]):
+            with self.assertRaisesRegex(RuntimeError, "world writer effective ACL"):
+                DB._database_facts("a" * 48)
+        for unexpected in ([], ["eros_world_writer", "other_role"]):
+            bad = dict(valid, otherConnect=unexpected)
+            with patch.object(DB, "_docker_psql", return_value=json.dumps(bad)):
+                with self.assertRaisesRegex(RuntimeError, "identity or ACL"):
+                    DB._database_facts("a" * 48)
+        restored = dict(facts("eros_check_123_1"), worldWriterExists=True)
+        with patch.object(DB, "_docker_psql", return_value=json.dumps(restored)) as psql:
+            DB._database_facts("a" * 48, "eros_check_123_1")
+            self.assertEqual(psql.call_count, 1)
+
     def test_database_inventory_quotes_database_names_as_sql_string_literals(self):
         database = "eros_check_123_1"
         with patch.object(DB, "_docker_psql", return_value=json.dumps(facts(database))) as psql:

@@ -20,6 +20,7 @@ import uuid
 ENV_PATH = Path('/opt/gpoint/env/eros.env')
 NATIVE_ENV_PATH = Path('/opt/gpoint/env/eros-engine.env')
 NATIVE_API_ENV_PATH = Path('/opt/gpoint/env/eros-api.env')
+WORLD_WRITER_ENV_PATH = Path('/opt/gpoint/env/eros-world-writer.env')
 SOURCE_ENV_PATH = Path('/opt/gpoint/env/production.env')
 DEEPSEEK_ENV_PATH = Path('/opt/gpoint/env/deepseek.env')
 SECRET_KEYS = (
@@ -429,7 +430,29 @@ def write_native_engine_env(path=ENV_PATH, output=NATIVE_ENV_PATH, *, deepseek_e
     return 'EROS_NATIVE_ENV=READY'
 
 
-def write_native_api_env(path=ENV_PATH, source_env=SOURCE_ENV_PATH, output=NATIVE_API_ENV_PATH):
+
+def read_world_writer_env(path=WORLD_WRITER_ENV_PATH):
+    """A separate, non-rotating secret exclusively for the Core API."""
+    path = Path(path)
+    if not path.exists() and not path.is_symlink():
+        return {}
+    info = path.stat()
+    if (path.is_symlink() or path.parent.is_symlink() or not stat.S_ISREG(info.st_mode)
+            or info.st_mode & 0o077 or info.st_nlink != 1
+            or (path == WORLD_WRITER_ENV_PATH and (info.st_uid != 0 or path.parent.stat().st_uid != 0))
+            or path.parent.stat().st_mode & 0o077):
+        raise RuntimeError('protected Eros world writer environment permissions are unsafe')
+    rows = path.read_text().splitlines()
+    key = 'EROS_WORLD_ENROLLMENT_DATABASE_URL='
+    if len(rows) != 1 or not rows[0].startswith(key):
+        raise RuntimeError('protected Eros world writer environment is malformed')
+    raw = rows[0][len(key):]
+    if not re.fullmatch(r'postgresql://eros_world_writer:[A-Za-z0-9_-]{64}@gpoint-eros-db:5432/eros', raw):
+        raise RuntimeError('protected Eros world writer connection is invalid')
+    return {'EROS_WORLD_ENROLLMENT_DATABASE_URL': raw, 'EROS_WORLD_ENROLLMENT_REQUIRED': 'true'}
+
+
+def write_native_api_env(path=ENV_PATH, source_env=SOURCE_ENV_PATH, output=NATIVE_API_ENV_PATH, *, world_writer_env=None):
     """Create the Core API's Eros bridge environment without exposing values."""
     values = read_env(Path(path))
     required_secrets = {'EROS_JWT_SECRET', 'EROS_BRIDGE_API_KEY', 'EROS_EMBEDDING_API_KEY',
@@ -469,6 +492,8 @@ def write_native_api_env(path=ENV_PATH, source_env=SOURCE_ENV_PATH, output=NATIV
         'EROS_PRODUCTION_TEST_CREATOR_IDS': '',
     }
     target = Path(output)
+    if world_writer_env is not None or target == NATIVE_API_ENV_PATH:
+        env.update(read_world_writer_env(world_writer_env or WORLD_WRITER_ENV_PATH))
     if target.parent.is_symlink():
         raise RuntimeError('Eros API environment directory cannot be a symlink')
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

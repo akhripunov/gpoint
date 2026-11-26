@@ -425,3 +425,17 @@ class ErosProductionSecretTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ErosWorldWriterSecretTests(unittest.TestCase):
+    def test_read_only_narrow_world_writer_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'world.env'
+            self.assertEqual(MODULE.read_world_writer_env(path), {})
+            raw = 'postgresql://eros_world_writer:' + 'a' * 64 + '@gpoint-eros-db:5432/eros'
+            path.write_text('EROS_WORLD_ENROLLMENT_DATABASE_URL=' + raw + '\n')
+            path.chmod(0o600)
+            self.assertEqual(MODULE.read_world_writer_env(path), {'EROS_WORLD_ENROLLMENT_DATABASE_URL': raw, 'EROS_WORLD_ENROLLMENT_REQUIRED': 'true'})
+            path.write_text('EROS_WORLD_ENROLLMENT_DATABASE_URL=' + raw.replace('eros_world_writer', 'eros_runtime') + '\n')
+            with self.assertRaisesRegex(RuntimeError, 'connection is invalid'):
+                MODULE.read_world_writer_env(path)

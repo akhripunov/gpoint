@@ -8,7 +8,7 @@ DO $$ BEGIN
   IF current_database() <> 'eros' OR EXISTS(SELECT FROM pg_roles WHERE rolname='eros_world_writer')
   THEN RAISE EXCEPTION 'Expected verified Eros database and new writer role'; END IF;
 END $$;
-CREATE ROLE eros_world_writer NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT BYPASSRLS NOREPLICATION;
+CREATE ROLE eros_world_writer NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT BYPASSRLS NOREPLICATION CONNECTION LIMIT 6;
 GRANT CONNECT ON DATABASE eros TO eros_world_writer;
 GRANT USAGE ON SCHEMA engine TO eros_world_writer;
 GRANT SELECT(id,user_id,instance_id,channel,archived) ON engine.chat_sessions TO eros_world_writer;
