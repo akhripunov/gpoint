@@ -840,14 +840,22 @@ def lifecycle(mode: str, candidate: str, image: str, run_id: str, *, rollback: b
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("prepare", "apply", "rollback-check", "verify-unchanged", "verify-prepared", "verify-applied"), required=True)
+    parser.add_argument("--mode", choices=("prepare", "apply", "rollback-check", "verify-unchanged", "verify-prepared", "verify-applied", "verify-world-writer"), required=True)
     parser.add_argument("--candidate", required=True)
     parser.add_argument("--image", required=True)
     parser.add_argument("--run-id", required=True)
     args = parser.parse_args()
     try:
-        lifecycle(args.mode, args.candidate, args.image, args.run_id,
-                  rollback=args.mode == "rollback-check")
+        if args.mode == "verify-world-writer":
+            if not SHA40.fullmatch(args.candidate) or not IMAGE.fullmatch(args.image) or not RUN_ID.fullmatch(args.run_id):
+                raise ValueError("exact Eros candidate, digest and run identity are required")
+            facts = _database_facts(_read_env()["EROS_DATABASE_IDENTITY"])
+            if facts.get("worldWriterExists") is not True:
+                raise RuntimeError("Eros world writer is not provisioned")
+            print("EROS_WORLD_WRITER_ACL=PASS")
+        else:
+            lifecycle(args.mode, args.candidate, args.image, args.run_id,
+                      rollback=args.mode == "rollback-check")
     except Exception as error:
         print("EROS_DATABASE_LIFECYCLE=BLOCKED reason=" + str(error), file=sys.stderr)
         return 1
