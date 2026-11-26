@@ -70,6 +70,12 @@ alter its installed configuration.
   `anthropic/claude-haiku-4.5`, retaining upstream fallback roles and
   native Voyage embeddings. The direct DeepSeek credential is retained
   separately for recovery; there is no new runtime service.
+  Keep the upstream default JSON-schema response format on the four Claude
+  director tasks (group, world, world stories, world comment). The former direct
+  DeepSeek `structured_output = false` exception does not apply to OpenRouter
+  Haiku: a synthetic stock `world_stories_round` schema probe succeeded.
+  A successful story round must persist `last_run_at`; repeated parse failures
+  leave it due again on the next sweeper tick and incur further provider cost.
 - Stock `classify_session` performs model/extraction and embedding before an
   unconditional memory upsert; archive deletes relationship memory. A delayed
   write crossing archive is a plausible data-resurrection risk, not a proven

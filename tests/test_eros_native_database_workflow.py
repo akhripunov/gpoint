@@ -590,9 +590,11 @@ def test_stock_eros_text_task_parity():
     assert {name for name, task in tasks.items() if "filter_prompt" in task} == set(prompts)
     for name, digest in prompts.items():
         assert hashlib.sha256(tasks[name]["filter_prompt"].encode()).hexdigest() == digest, name
-    assert {name for name, task in tasks.items() if task.get("structured_output") is False} == {
-        "group_director", "world_director", "world_stories_director", "world_comment",
-    }
+    # Native OpenRouter Claude routes use the upstream default JSON-schema mode.
+    # Do not retain the direct DeepSeek provider exception on these tasks.
+    for name in ("group_director", "world_director", "world_stories_director", "world_comment"):
+        assert tasks[name].get("structured_output", True) is True, name
+    assert not any(task.get("structured_output") is False for task in tasks.values())
     assert (tasks["world_director"]["interval_hours"], tasks["world_director"]["retention_days"]) == (24, 30)
     assert tuple(tasks["world_stories_director"][k] for k in
                  ("interval_hours", "retention_days", "active_window_hours", "context_days")) == (8, 30, 72, 7)

@@ -395,8 +395,6 @@ max_tokens = 200
 # [图片能力], [最近群聊], [用户点名], [用户最新消息]) and the JSON schema;
 # filter_prompt only sets the director's taste.
 [tasks.group_director]
-# Direct DeepSeek Chat Completions does not document JSON-schema mode.
-structured_output = false
 model = "anthropic/claude-haiku-4.5"
 fallback = ["deepseek/deepseek-v4.1-flash-1017"]
 temperature = 0.5
@@ -422,8 +420,6 @@ filter_prompt = """
 # world seed and writes per-persona digests + script fragments.
 # Spec: docs/superpowers/specs/2026-07-21-world-memories-design.md
 [tasks.world_director]
-# Direct DeepSeek Chat Completions does not document JSON-schema mode.
-structured_output = false
 model = "anthropic/claude-haiku-4.5"
 fallback = []
 description = "world memories: per-owner world seed + daily scripts"
@@ -449,8 +445,6 @@ filter_prompt = """
 # current_time each round so the director refreshes those expressions — keep
 # that convention in mind when hand-editing prompts or reading stored rows.
 [tasks.world_stories_director]
-# Direct DeepSeek Chat Completions does not document JSON-schema mode.
-structured_output = false
 model = "anthropic/claude-haiku-4.5"
 fallback = []
 description = "world stories: per-instance persona life rounds"
@@ -471,8 +465,6 @@ life（生活进展：新兴趣、搬家、旅行、日常琐事等，可自由�
 # 缺任一 section 即关闭对应路径。Spec:
 # docs/superpowers/specs/2026-07-21-world-town-design.md
 [tasks.world_comment]
-# Direct DeepSeek Chat Completions does not document JSON-schema mode.
-structured_output = false
 model = "anthropic/claude-haiku-4.5"
 fallback = []
 description = "world town: hourly batched persona comment round"
