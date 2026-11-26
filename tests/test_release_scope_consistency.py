@@ -157,3 +157,23 @@ def test_missing_live_component_is_forced_into_deploy_scope(tmp_path):
 def test_build_input_changes_select_owning_components(tmp_path, path, expected_scope):
     repo, _baseline, candidate, inventory = _scope_repo(tmp_path, changed_paths=(path,))
     assert intent.classify_component_scope(repo, candidate, inventory)["scope"] == expected_scope
+
+
+@pytest.mark.parametrize(("path", "expected_scope"), [
+    ("services/eros-engine/eros-production-model-config.toml", "EROS"),
+    ("services/eros-engine/eros-pilot-model-config.toml", "NONE"),
+    ("services/eros-engine/test-model-config.toml", "NONE"),
+])
+def test_model_config_changes_select_only_production_eros(tmp_path, path, expected_scope):
+    repo, _baseline, candidate, inventory = _scope_repo(tmp_path, changed_paths=(path,))
+    scope = intent.classify_component_scope(repo, candidate, inventory)
+    assert scope["scope"] == expected_scope
+    assert scope["deploy_eros"] == (expected_scope == "EROS")
+    assert not scope["deploy_core"] and not scope["deploy_miniapp"]
+    assert intent.paths_match_filter({path}, "eros_engine") == (expected_scope == "EROS")
+    assert intent.paths_match_filter({path}, "eros_config")
+
+
+def test_retired_staging_model_config_stays_outside_eros_deploy():
+    path = "services/eros-engine/eros-layer7-staging-model-config.toml"
+    assert not intent.paths_match_filter({path}, "eros_engine")

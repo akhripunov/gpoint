@@ -43,7 +43,9 @@
   "eros_engine": [
     "config/deploy.eros.yml",
     "services/eros-engine/**",
-    "!services/eros-engine/*.toml",
+    "!services/eros-engine/eros-pilot-model-config.toml",
+    "!services/eros-engine/test-model-config.toml",
+    "!services/eros-engine/eros-layer7-staging-model-config.toml",
     "!services/eros-engine/eros-pilot-embedding-relay*",
     "!services/eros-engine/open-mac-ollama-tunnel.sh",
     "!services/eros-engine/ollama-model.lock.json",
