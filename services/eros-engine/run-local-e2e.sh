@@ -257,6 +257,26 @@ migrator_container=$(compose ps --all --quiet eros-migrate)
 migrator_status=$(docker_local wait "$migrator_container")
 [ "$migrator_status" = 0 ] || { echo "LOCAL_E2E_STOCK_MIGRATIONS=FAIL exit_code=$migrator_status" >&2; exit 1; }
 echo LOCAL_E2E_STOCK_MIGRATIONS=PASS
+# Same least-privilege grants, rehearsed on the actual stock schema.
+sed -e "s/current_database() <> 'eros'/current_database() <> 'eros_test'/" \
+  -e 's/GRANT CONNECT ON DATABASE eros TO/GRANT CONNECT ON DATABASE eros_test TO/' \
+  "$repo/services/eros-engine/world-enrollment/writer-acl.sql" \
+  | compose exec -T postgres psql -U eros_test_admin -d eros_test -v ON_ERROR_STOP=1
+compose exec -T postgres psql -U eros_test_admin -d eros_test -v ON_ERROR_STOP=1 <<'SQL'
+REVOKE CONNECT ON DATABASE gpoint_test,postgres,template1 FROM PUBLIC;
+ALTER ROLE eros_world_writer LOGIN PASSWORD 'local-only-world-writer';
+SQL
+writer_acl_query=$(python3 - "$repo/scripts/eros-native-database.py" <<'PY'
+import importlib.util,sys
+spec=importlib.util.spec_from_file_location("eros_native_database",sys.argv[1])
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(module.world_writer_acl_query()+';')
+PY
+)
+writer_acl="$(printf '%s\n' "$writer_acl_query" | compose exec -T postgres psql -U eros_test_admin -d eros_test -XqAt -v ON_ERROR_STOP=1)"
+[ "$writer_acl" = t ] || { echo LOCAL_E2E_WORLD_WRITER_ACL=FAIL >&2; exit 1; }
+echo LOCAL_E2E_WORLD_WRITER_ACL=PASS
 compose exec -T postgres psql -U eros_test_admin -d eros_test -v ON_ERROR_STOP=1 <<'SQL'
 GRANT USAGE ON SCHEMA engine TO eros_runtime, eros_runtime_nobypass;
 GRANT ALL ON ALL TABLES IN SCHEMA engine TO eros_runtime;
@@ -365,6 +385,19 @@ session_count=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -A
 session_id=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -Atc "SELECT id FROM engine.chat_sessions WHERE channel <> 'group' ORDER BY created_at DESC LIMIT 1;")
 [ -n "$session_id" ] || { echo LOCAL_E2E_MEMORY_FIXTURE_SESSION=FAIL >&2; exit 1; }
 session_id=$(python3 -c 'import sys,uuid; print(uuid.UUID(sys.argv[1]))' "$session_id") || { echo LOCAL_E2E_MEMORY_FIXTURE_SESSION=FAIL >&2; exit 1; }
+# Existing synthetic relationship, real stock tables, exact application query.
+world_owner=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -XqAtc "SELECT user_id FROM engine.chat_sessions WHERE id='$session_id'::uuid")
+world_instance=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -XqAtc "SELECT instance_id FROM engine.chat_sessions WHERE id='$session_id'::uuid")
+compose exec -w "$api_root/apps/api" -T gpoint-api node --import tsx --input-type=module -e '
+import { PrismaClient } from "@prisma/client";
+import { enrollErosWorld } from "./src/eros-world-enrollment.ts";
+const db=new PrismaClient({datasourceUrl:"postgresql://eros_world_writer:local-only-world-writer@postgres:5432/eros_test",log:[]});
+try { const [owner,session,instance]=process.argv.slice(1);await Promise.all([enrollErosWorld(db,owner,session,instance),enrollErosWorld(db,owner,session,instance)]);await enrollErosWorld(db,owner,session,instance); }
+finally { await db.$disconnect(); }
+' "$world_owner" "$session_id" "$world_instance"
+world_ready=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -XqAtc "SELECT count(*) FROM engine.world_enrollments e JOIN engine.world_worldviews w USING(owner_uid) WHERE e.owner_uid='$world_owner'::uuid AND e.town_enabled AND e.stories_enabled AND w.content ~ '[^[:space:]]'")
+[ "$world_ready" = 1 ] || { echo LOCAL_E2E_WORLD_ENROLLMENT=FAIL >&2; exit 1; }
+echo LOCAL_E2E_WORLD_ENROLLMENT=PASS
 scan_state_pending=$(compose exec -T postgres psql -U eros_test_admin -d eros_test -v ON_ERROR_STOP=1 -Atc \
   "WITH aged_scan_state AS (UPDATE engine.relationship_scan_state SET last_turn_at = now() - interval '2 minutes' WHERE instance_id = (SELECT instance_id FROM engine.chat_sessions WHERE id = '$session_id'::uuid) AND pending_turns >= 3 RETURNING pending_turns) SELECT pending_turns FROM aged_scan_state;")
 [[ "$scan_state_pending" =~ ^[0-9]+$ ]] && [ "$scan_state_pending" -ge 3 ] || {

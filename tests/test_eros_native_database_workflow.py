@@ -415,3 +415,20 @@ def test_stock_eros_text_task_parity():
     assert tasks["world_comment"]["round_secs"] == 3600
     assert tuple(tasks["world_reply"][k] for k in
                  ("debounce_secs", "thread_cooldown_secs", "daily_cap", "reply_window_secs")) == (90, 600, 20, 604800)
+
+
+def test_world_writer_protected_lifecycle_and_stock_fixture():
+    deploy = steps_for("deploy")
+    gate = next(step for step in deploy if step.get("id") == "eros_database")
+    body = gate["run"]
+    assert body.index("--mode apply") < body.index('python3 "$writer_stage/scripts/eros-world-writer.py"')
+    assert "--acl-sha" in body and "writer-acl.sql" in body
+    apply = next(step for step in deploy if step.get("id") == "kamal_apply")
+    assert apply["run"].index("--mode verify-world-writer") < apply["run"].index("kamal redeploy")
+    helper = (ROOT / "scripts/eros-world-writer.py").read_text()
+    assert 'DB.lifecycle("verify-applied"' in helper
+    assert "assert_acl(False)" in helper and "assert_acl(True)" in helper
+    assert "SEC.write_native_api_env()" in helper
+    runner = (ROOT / "services/eros-engine/run-local-e2e.sh").read_text()
+    assert "LOCAL_E2E_WORLD_WRITER_ACL=PASS" in runner
+    assert "LOCAL_E2E_WORLD_ENROLLMENT=PASS" in runner
