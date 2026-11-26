@@ -3,7 +3,10 @@ import { GPOINT_EROS_RESPONSE_PROMPT_TRAITS } from '../src/eros-response-prompt.
 import test from 'node:test';
 import { jwtVerify } from 'jose';
 import { verifyBridgeIdentity } from '../src/eros-worker-contract.js';
-import { createErosWorldEnrollment, worldEnrollmentConnection } from '../src/eros-world-enrollment.js';
+import { createErosWorldEnrollment, enrollErosWorld, worldEnrollmentConnection } from '../src/eros-world-enrollment.js';
+import { PrismaClient } from '@prisma/client';
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { createErosEngineClient, decodeErosCursor, encodeErosCursor, ErosAdapterError, ErosEngineClient, erosGenomeCardFor, erosGenomeIdentityFor, erosIdentityFor, erosTestCreatorIds, isErosChatAllowed, isSyntheticErosPair, markErosAssistantMessagesRead, erosInboxLastMessageSummary, prepareErosRelationship, recordErosAssistantMessage, resolveErosRelationshipInstanceId, syncErosAssistantMessageStates, unreadErosAssistantCounts, uuidV5 } from '../src/eros-adapter.js';
 
 test('Creator genomes use a stable identity namespace and a non-invented stock card', () => {
@@ -687,4 +690,80 @@ test('world enrollment runs before a validated message and never on session star
   failEnrollment = true;
   await assert.rejects(client.sendMessage(owner, session, message, 'Hello', {creatorId: instance, instanceId: instance}), /eros_world_enrollment_failed/);
   assert.deepEqual(events, ['start','enroll','send','enroll']);
+});
+
+test('hosted disposable PostgreSQL verifies actual application enrollment, isolation, race and ACL', {
+  skip: process.env.GITHUB_ACTIONS !== 'true',
+  timeout: 90_000,
+}, async () => {
+  // GitHub-hosted service only, never a process-supplied or production DSN.
+  const dbName = 'gpoint_world_enrollment_test';
+  const conn = ['-h','127.0.0.1','-p','5432','-U','gpoint'];
+  const env = { ...process.env, PGPASSWORD: 'gpoint_dev_only' };
+  for (const key of ['PGSERVICE','PGSERVICEFILE','PGOPTIONS','PGDATABASE','PGHOST','PGHOSTADDR','PGPORT','PGUSER']) delete env[key as keyof typeof env];
+  const psql = (database: string, sql: string) => execFileSync('psql', ['-X',...conn,'-d',database,'-v','ON_ERROR_STOP=1'], {env,input:sql,encoding:'utf8',timeout:15_000});
+  execFileSync('createdb', [...conn,dbName], {env,timeout:15_000});
+  let admin: PrismaClient | undefined;
+  let writer: PrismaClient | undefined;
+  let roleCreated = false;
+  try {
+    psql(dbName, `
+      CREATE SCHEMA engine;
+      CREATE TABLE engine.persona_instances(id uuid PRIMARY KEY, genome_id uuid, owner_uid uuid NOT NULL, status text NOT NULL);
+      CREATE TABLE engine.chat_sessions(id uuid PRIMARY KEY, user_id uuid NOT NULL, instance_id uuid, channel text NOT NULL, archived boolean NOT NULL DEFAULT false);
+      CREATE TABLE engine.world_enrollments(owner_uid uuid PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now(), town_enabled boolean NOT NULL DEFAULT false, stories_enabled boolean NOT NULL DEFAULT false);
+      CREATE TABLE engine.world_worldviews(owner_uid uuid PRIMARY KEY, content text NOT NULL CHECK(char_length(content) BETWEEN 1 AND 10000), updated_at timestamptz NOT NULL DEFAULT now());
+      CREATE TABLE engine.chat_messages(id uuid PRIMARY KEY, content text);
+      ALTER TABLE engine.persona_instances ENABLE ROW LEVEL SECURITY;
+      ALTER TABLE engine.chat_sessions ENABLE ROW LEVEL SECURITY;
+      ALTER TABLE engine.world_enrollments ENABLE ROW LEVEL SECURITY;
+      ALTER TABLE engine.world_worldviews ENABLE ROW LEVEL SECURITY;
+      REVOKE CONNECT ON DATABASE gpoint_world_enrollment_test FROM PUBLIC;
+    `);
+    const acl = readFileSync(new URL('../../../services/eros-engine/world-enrollment/writer-acl.sql', import.meta.url), 'utf8')
+      .replace("current_database() <> 'eros'", "current_database() <> 'gpoint_world_enrollment_test'")
+      .replace("GRANT CONNECT ON DATABASE eros TO", "GRANT CONNECT ON DATABASE gpoint_world_enrollment_test TO");
+    psql(dbName, acl);
+    roleCreated = true;
+    psql(dbName, "ALTER ROLE eros_world_writer LOGIN PASSWORD 'fixture-only-writer';");
+    admin = new PrismaClient({ datasourceUrl: 'postgresql://gpoint:gpoint_dev_only@127.0.0.1:5432/'+dbName });
+    writer = new PrismaClient({ datasourceUrl: 'postgresql://eros_world_writer:fixture-only-writer@127.0.0.1:5432/'+dbName+'?connection_limit=2' });
+    const ids = (n: number) => ({
+      owner: '10000000-0000-4000-8000-'+String(n).padStart(12,'0'),
+      session: '20000000-0000-4000-8000-'+String(n).padStart(12,'0'),
+      instance: '30000000-0000-4000-8000-'+String(n).padStart(12,'0'),
+    });
+    const [a,b,c,d] = [1,2,3,4].map(ids);
+    for (const v of [a,b,c,d]) {
+      const genome = v === d ? null : '40000000-0000-4000-8000-000000000001';
+      await admin.$executeRaw`INSERT INTO engine.persona_instances VALUES (${v.instance}::uuid,${genome}::uuid,${v.owner}::uuid,'active')`;
+      await admin.$executeRaw`INSERT INTO engine.chat_sessions VALUES (${v.session}::uuid,${v.owner}::uuid,${v.instance}::uuid,'text',${v === c})`;
+    }
+    await admin.$executeRaw`INSERT INTO engine.world_worldviews(owner_uid,content,updated_at) VALUES (${b.owner}::uuid,'Existing world','2020-01-01T00:00:00Z')`;
+    await admin.$executeRaw`INSERT INTO engine.world_enrollments(owner_uid) VALUES (${b.owner}::uuid)`;
+    const ensure = (v: typeof a) => enrollErosWorld(writer!,v.owner,v.session,v.instance);
+    await Promise.all([ensure(a),ensure(a)]);
+    await ensure(b);
+    await ensure(a);
+    await assert.rejects(ensure(c), /eros_world_relationship_invalid/);
+    await assert.rejects(ensure(d), /eros_world_relationship_invalid/);
+    await assert.rejects(enrollErosWorld(writer,a.owner,b.session,b.instance), /eros_world_relationship_invalid/);
+    const rows = await admin.$queryRaw<Array<{owner_uid:string,town_enabled:boolean,stories_enabled:boolean,content:string,updated_at:Date}>>`
+      SELECT e.owner_uid,e.town_enabled,e.stories_enabled,w.content,w.updated_at
+      FROM engine.world_enrollments e JOIN engine.world_worldviews w USING(owner_uid) ORDER BY e.owner_uid
+    `;
+    assert.equal(rows.length,2);
+    assert.deepEqual(rows.map(x=>x.owner_uid),[a.owner,b.owner]);
+    assert.ok(rows.every(x=>x.town_enabled && x.stories_enabled));
+    assert.equal(rows[1].content,'Existing world');
+    assert.equal(rows[1].updated_at.toISOString(),'2020-01-01T00:00:00.000Z');
+    await assert.rejects(writer.$queryRaw`SELECT content FROM engine.chat_messages`);
+    await assert.rejects(writer.$executeRaw`DELETE FROM engine.world_enrollments`);
+    await assert.rejects(writer.$executeRaw`UPDATE engine.persona_instances SET status='inactive'`);
+  } finally {
+    await writer?.$disconnect();
+    await admin?.$disconnect();
+    execFileSync('dropdb',[...conn,dbName],{env,timeout:15_000});
+    if (roleCreated) psql('gpoint','DROP ROLE eros_world_writer;');
+  }
 });

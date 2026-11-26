@@ -37,7 +37,11 @@ export function createErosWorldEnrollment(env: NodeJS.ProcessEnv): ErosWorldEnro
   if (pool && pool.url !== url) throw new Error('eros_world_database_changed');
   if (!pool) pool = { url, db: new PrismaClient({ datasourceUrl: url, log: [] }) };
   const db = pool.db;
-  return async (ownerId, sessionId, instanceId) => {
+  return (ownerId, sessionId, instanceId) => enrollErosWorld(db, ownerId, sessionId, instanceId);
+}
+
+/** Exported for isolated PostgreSQL contract tests; never takes caller DSNs. */
+export async function enrollErosWorld(db: PrismaClient, ownerId: string, sessionId: string, instanceId: string): Promise<void> {
     if (![ownerId, sessionId, instanceId].every(id => UUID.test(id))) {
       throw new Error('eros_world_identity_invalid');
     }
@@ -75,5 +79,4 @@ export function createErosWorldEnrollment(env: NodeJS.ProcessEnv): ErosWorldEnro
           WHERE NOT engine.world_enrollments.stories_enabled OR NOT engine.world_enrollments.town_enabled
       `;
     }, { maxWait: 2000, timeout: 5000 });
-  };
 }
