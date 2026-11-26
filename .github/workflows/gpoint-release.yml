@@ -1281,6 +1281,8 @@ jobs:
           CANDIDATE_SHA: ${{ github.sha }}
           EROS_DIGEST: ${{ steps.component_plan.outputs.eros_digest }}
           EROS_BOOTSTRAP: ${{ steps.component_plan.outputs.eros_bootstrap }}
+          DEPLOY_CORE: ${{ steps.component_plan.outputs.deploy_core }}
+          APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
@@ -1309,8 +1311,13 @@ jobs:
           REMOTE_MODEL_CONFIG
           remote_docker_config="/run/gpoint-eros-ghcr-$run_identity"
           ssh -T "root@${GPOINT_PRODUCTION_HOST}" install -d -o root -g root -m 0700 "$remote_docker_config"
+          writer_stage="/run/gpoint-eros-world-writer-$run_identity"
+          writer_stage_created=false
           cleanup_remote_docker_config() {
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" rm -rf -- "$remote_docker_config"
+            if [[ "$writer_stage_created" == true ]]; then
+              ssh -T "root@${GPOINT_PRODUCTION_HOST}" rm -rf -- "$writer_stage"
+            fi
           }
           trap cleanup_remote_docker_config EXIT
           printf '%s' "$GHCR_TOKEN" | ssh -T "root@${GPOINT_PRODUCTION_HOST}" \
@@ -1330,6 +1337,26 @@ jobs:
             --candidate "$CANDIDATE_SHA" --image "$eros_image" --run-id "$run_identity" \
             < scripts/eros-native-database.py
           echo "EROS_DATABASE_LIFECYCLE=PASS IMAGE=$eros_image" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$DEPLOY_CORE" == true ]]; then
+            [[ "$APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            app_image="ghcr.io/akhripunov/gpoint-runtime@$APP_DIGEST"
+            acl_sha="$(sha256sum services/eros-engine/world-enrollment/writer-acl.sql | awk '{print $1}')"
+            [[ "$acl_sha" =~ ^[0-9a-f]{64}$ ]]
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$writer_stage" <<'REMOTE_WORLD_STAGE'
+          set -euo pipefail
+          [[ "$1" =~ ^/run/gpoint-eros-world-writer-[0-9]+-[0-9]+$ ]]
+          test ! -e "$1"
+          install -d -o root -g root -m 0700 "$1"
+          REMOTE_WORLD_STAGE
+            writer_stage_created=true
+            tar -cf - scripts/eros-world-writer.py scripts/eros-native-database.py scripts/eros-production-secrets.py services/eros-engine/world-enrollment/writer-acl.sql \
+              | ssh -T "root@${GPOINT_PRODUCTION_HOST}" "tar --no-same-owner -xf -C '$writer_stage'"
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" env DOCKER_CONFIG="$remote_docker_config" docker pull --platform linux/amd64 "$app_image"
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" env DOCKER_CONFIG="$remote_docker_config" \
+              python3 "$writer_stage/scripts/eros-world-writer.py" --candidate "$CANDIDATE_SHA" \
+              --image "$eros_image" --run-id "$run_identity" --acl-sha "$acl_sha" --app-image "$app_image"
+            echo "EROS_WORLD_WRITER_PROVISION=PASS" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Deploy exact immutable images with stock Kamal
         id: kamal_apply
         if: needs.tests.outputs.mode == 'DEPLOY' && ((success()) && inputs.mode != 'rollback')
@@ -1359,6 +1386,21 @@ jobs:
               < "$GITHUB_WORKSPACE/scripts/verify-kamal-role.sh"
           }
           if [[ "$DEPLOY_CORE" == true && ( "$EROS_INSTALLED" == true || "$DEPLOY_EROS" == true ) ]]; then
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - --mode verify-world-writer \
+              --candidate "$GPOINT_COMMIT_SHA" --image "ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST" \
+              --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" < scripts/eros-native-database.py
+            ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - <<'REMOTE_WORLD_ENV'
+          from pathlib import Path
+          import re, stat
+          path = Path('/opt/gpoint/env/eros-api.env')
+          info = path.stat()
+          assert not path.is_symlink() and stat.S_ISREG(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o077
+          rows = path.read_text().splitlines()
+          assert rows.count('EROS_WORLD_ENROLLMENT_REQUIRED=true') == 1
+          urls = [x for x in rows if x.startswith('EROS_WORLD_ENROLLMENT_DATABASE_URL=')]
+          assert len(urls) == 1 and re.fullmatch(r'EROS_WORLD_ENROLLMENT_DATABASE_URL=postgresql://eros_world_writer:[A-Za-z0-9_-]{64}@gpoint-eros-db:5432/eros', urls[0])
+          print('EROS_WORLD_WRITER_ENV=PASS')
+          REMOTE_WORLD_ENV
             ollama_container=gpoint-ollama-ollama
             EROS_OLLAMA_MODEL_DIGEST="$(python3 -c 'import json; print(json.load(open("services/eros-engine/ollama-model.lock.json"))["digest"])')"
             accessory_result="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - "$EROS_OLLAMA_MODEL_DIGEST" --prepare < scripts/verify-layer7-ollama.py)"
@@ -1673,6 +1715,8 @@ jobs:
             python3 "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py" "gpoint-eros-pilot-engine-$eros_version" "$expected_eros_upstream" none
             rm -f -- "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py"
             echo "GPOINT_EROS_HEALTH=PASS UPSTREAM_SHA=$expected_eros_upstream DIGEST=$eros_digest"
+            docker exec "gpoint-core-api-$core_version" node --input-type=module -e 'import { createRequire } from "node:module";const require=createRequire("/app/apps/api/package.json");const {PrismaClient}=require("@prisma/client");if(process.env.EROS_WORLD_ENROLLMENT_REQUIRED!=="true"||!process.env.EROS_WORLD_ENROLLMENT_DATABASE_URL)process.exit(1);const db=new PrismaClient({datasourceUrl:process.env.EROS_WORLD_ENROLLMENT_DATABASE_URL,log:[]});try{const rows=await db.$queryRawUnsafe("SELECT current_user AS role,current_database() AS db");if(rows.length!==1||rows[0].role!=="eros_world_writer"||rows[0].db!=="eros")process.exitCode=1}catch{process.exitCode=1}finally{await db.$disconnect()}'
+            echo EROS_WORLD_WRITER_RUNTIME=PASS
           fi
           docker exec "gpoint-core-api-$core_version" node -e 'const fs=require("node:fs");const crypto=require("node:crypto");const p="/data/media/.gpoint-runtime-verify-"+crypto.randomUUID();let created=false;try{fs.writeFileSync(p,"gpoint-media-read-write-pass",{flag:"wx"});created=true;if(fs.readFileSync(p,"utf8")!=="gpoint-media-read-write-pass")process.exit(1)}finally{if(created)fs.unlinkSync(p)}'
           media_mounts="$(docker inspect "gpoint-core-api-$core_version" --format '{{json .Mounts}}')"
