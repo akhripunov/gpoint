@@ -11,8 +11,10 @@
   "production_baseline_sha": "968f05c0bb8326b62b16633138b5d45d9e441f85",
   "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
   "allowed_paths": [
-    ".release-authorizations/gpoint-voyage-4-lite-20261126-001.json",
     ".github/workflows/gpoint-release.yml",
+    ".kamal/hooks/post-app-boot",
+    ".release-authorizations/addenda/gpoint-voyage-4-lite-20261126-001/voyage-provider-exclusive-cutover.json",
+    ".release-authorizations/gpoint-voyage-4-lite-20261126-001.json",
     "config/deploy.eros-api.yml",
     "config/deploy.eros.yml",
     "config/deploy.ollama.yml",
@@ -26,7 +28,9 @@
     "tests/test_eros_native_database_workflow.py",
     "tests/test_eros_secret_provision.py",
     "tests/test_kamal_native_automatic_release.py",
+    "tests/test_kamal_post_app_boot_hook.py",
     "tests/test_kamal_release_config.py",
+    "tests/test_native_build_boundary.py",
     "tests/test_native_change_surface.py"
   ],
   "allowed_operations": [
@@ -58,8 +62,10 @@
   "risk_contracts": {
     "release_infrastructure": {
       "allowed_paths": [
-        ".release-authorizations/gpoint-voyage-4-lite-20261126-001.json",
         ".github/workflows/gpoint-release.yml",
+        ".kamal/hooks/post-app-boot",
+        ".release-authorizations/addenda/gpoint-voyage-4-lite-20261126-001/voyage-provider-exclusive-cutover.json",
+        ".release-authorizations/gpoint-voyage-4-lite-20261126-001.json",
         "config/deploy.eros-api.yml",
         "config/deploy.eros.yml",
         "config/deploy.ollama.yml",
@@ -73,7 +79,9 @@
         "tests/test_eros_native_database_workflow.py",
         "tests/test_eros_secret_provision.py",
         "tests/test_kamal_native_automatic_release.py",
+        "tests/test_kamal_post_app_boot_hook.py",
         "tests/test_kamal_release_config.py",
+        "tests/test_native_build_boundary.py",
         "tests/test_native_change_surface.py"
       ],
       "allowed_operations": [
@@ -146,8 +154,10 @@
     },
     "test_memory_cleanup": {
       "allowed_paths": [
-        ".release-authorizations/gpoint-voyage-4-lite-20261126-001.json",
         ".github/workflows/gpoint-release.yml",
+        ".kamal/hooks/post-app-boot",
+        ".release-authorizations/addenda/gpoint-voyage-4-lite-20261126-001/voyage-provider-exclusive-cutover.json",
+        ".release-authorizations/gpoint-voyage-4-lite-20261126-001.json",
         "config/deploy.eros-api.yml",
         "config/deploy.eros.yml",
         "config/deploy.ollama.yml",
@@ -161,7 +171,9 @@
         "tests/test_eros_native_database_workflow.py",
         "tests/test_eros_secret_provision.py",
         "tests/test_kamal_native_automatic_release.py",
+        "tests/test_kamal_post_app_boot_hook.py",
         "tests/test_kamal_release_config.py",
+        "tests/test_native_build_boundary.py",
         "tests/test_native_change_surface.py"
       ],
       "risk_description": "Remove only the exact OWNER-confirmed synthetic test vectors from two Eros memory tables after a verified backup and before any test-only new Voyage memory is written. The action must fail closed unless current counts match 476 companion_memories and 11 relationship_journal rows, all rows carry 512-dimensional vectors, and database identity/schema/FKs/triggers are unchanged.",
@@ -192,5 +204,5 @@
   "state": "ACTIVE",
   "revoked": false,
   "consumed": false,
-  "owner_task_commitment_sha256": "305a3f40e6b9bba69ad1a9711c4e9e20ad352d3dbe519fa2b854a5ab562f7a87"
+  "owner_task_commitment_sha256": "be44289b82ccfce18ff2f785bb4e40ffb81c382a82d15f46b7045aae738f5562"
 }

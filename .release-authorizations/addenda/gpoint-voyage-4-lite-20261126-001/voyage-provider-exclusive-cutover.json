@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "project": "gpoint",
+  "authorization_id": "gpoint-voyage-4-lite-20261126-001",
+  "amendment_id": "voyage-provider-exclusive-cutover",
+  "original_authorization_record_blob_sha": "6c6db749f4f1b659ee2f227ac89990f0f2806b7e",
+  "source_instruction_identifier": "OWNER_ADDITIONAL_REQUIREMENTS_2026-11-26_GPOINT_VOYAGE_CUTOVER",
+  "owner_task_reference": "OWNER requires provider exclusivity, no Qwen/Voyage vector overlap, safe Qwen retirement after native memory verification, and no repeat deletion.",
+  "scope_additions": [
+    {
+      "path": ".kamal/hooks/post-app-boot",
+      "reason": "Prevent later Core API boots from reconnecting the retired Ollama network."
+    },
+    {
+      "path": "tests/test_kamal_post_app_boot_hook.py",
+      "reason": "Keep the hook regression test aligned with the approved disconnected network topology."
+    },
+    {
+      "path": "tests/test_native_build_boundary.py",
+      "reason": "Assert the one-time relay retirement occurs only after Voyage verification and outside Kamal Apply."
+    }
+  ],
+  "additional_safety_contract": {
+    "provider_exclusivity": "After successful Voyage memory write/recall, detach the live Core API from the private Ollama network, stop the legacy Qwen embedding relay and stop the pinned Ollama container. Preserve its immutable image and model volume.",
+    "idempotency": "Treat already detached/stopped exact identities as completed states. Never remove the relay or Ollama containers, images, model volume or network.",
+    "workflow_scope": "No changes to Tests, Build, Kamal lifecycle, Eros upstream, or release architecture."
+  },
+  "amendment_commitment_sha256": "e4480106b0f969bbd2436cdbf68fe37e7c54c9047a76b5a3392fa109e9a4193c"
+}
