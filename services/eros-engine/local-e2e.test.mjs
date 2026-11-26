@@ -180,11 +180,11 @@ test('model config routes chat, embeddings and synthetic dreaming scan to the in
   assert.match(runner, /LOCAL_E2E_EROS_DATABASE_USER_RLS=NOT_AVAILABLE stock_api_ownership_test=PASS/);
 });
 
-test('runtime Eros profiles keep only the dreaming scan output contract and parameters-only arc rewrite', () => {
+test('runtime Eros profiles preserve the dreaming scan output contract and parameters-only arc rewrite', () => {
   for (const name of ['eros-production-model-config.toml', 'eros-pilot-model-config.toml']) {
     const config = readFileSync(new URL(name, directory), 'utf8');
     const dreaming = config.split('[tasks.dreaming_scan]')[1]?.split('\n[tasks.')[0] ?? '';
-    const arc = config.split('[tasks.arc_rewrite]')[1] ?? '';
+    const arc = config.split('[tasks.arc_rewrite]')[1]?.split('\n[tasks.')[0] ?? '';
     assert.match(config, /^\[tasks\.dreaming_scan\]/m, name);
     assert.match(config, /^\[tasks\.arc_rewrite\]/m, name);
     assert.doesNotMatch(config, /^\[tasks\.memory_extraction\]/m, name);
