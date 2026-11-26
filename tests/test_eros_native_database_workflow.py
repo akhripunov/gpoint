@@ -347,6 +347,14 @@ def test_component_deploys_use_stock_kamal_redeploy_without_automatic_prune():
     assert "kamal deploy --skip-push" not in body
 
 
+def test_release_docker_inspect_label_lookups_use_go_template_index():
+    import re
+    workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
+    assert not re.search(r'\{\{\s*\.Config\.Labels\s+"', workflow)
+    memory = next(step for step in steps_for("deploy") if step.get("id") == "voyage_memory_verify")
+    assert '{{index .Config.Labels "service"}}' in memory["run"]
+
+
 def test_runtime_verify_sends_512_dimension_embedding_from_inside_eros_container():
     memory = next(step for step in steps_for("deploy") if step.get("id") == "voyage_memory_verify")
     body = memory["run"]
@@ -355,6 +363,10 @@ def test_runtime_verify_sends_512_dimension_embedding_from_inside_eros_container
     assert "client.sendMessage" in body
     assert "client.history" in body
     assert "Zephyr Bay" in body and "cobalt pear" in body
+    assert "message.client_msg_id === recallClientId" in body
+    assert "history.messages[question + 1]" in body
+    assert "attempt < 10 && !persisted" in body
+    assert "response.content.toLowerCase().includes('cobalt pear')" in body
 
 
 def test_production_embedding_route_is_layer7_internal_and_not_mac_hosted():

@@ -1569,7 +1569,7 @@ jobs:
           set -euo pipefail
           name="$1"
           test "$(docker inspect --format '{{.State.Status}}' "$name")" = running
-          test "$(docker inspect --format '{{.Config.Labels "service"}}' "$name")" = gpoint-core
+          test "$(docker inspect --format '{{index .Config.Labels "service"}}' "$name")" = gpoint-core
           docker exec -i "$name" node --input-type=module - <<'NODE'
           import { createErosEngineClient, erosGenomeCardFor, erosGenomeIdentityFor, erosIdentityFor, uuidV5 } from '/app/apps/api/dist/apps/api/src/eros-adapter.js';
 
@@ -1619,11 +1619,20 @@ jobs:
           if (!answer.includes('zephyr bay') || !answer.includes('cobalt pear')) {
             throw new Error('synthetic durable memory recall failed');
           }
-          const history = await client.history(identity.userId, session.sessionId, 50);
-          if (!history.messages.some((message) => message.role === 'user' && message.content.includes('Zephyr Bay')) ||
-              !history.messages.some((message) => message.role === 'assistant' && message.id === recall.id)) {
-            throw new Error('synthetic Eros memory transcript persistence failed');
+          // The final SSE frame can precede the history read becoming visible.
+          // Poll read-only history; never resend a turn or weaken the recall check.
+          let persisted = false;
+          const recallClientId = uuidV5(namespace, 'voyage-memory-verification-16');
+          for (let attempt = 0; attempt < 10 && !persisted; attempt += 1) {
+            const history = await client.history(identity.userId, session.sessionId, 50);
+            const question = history.messages.findIndex((message) => message.role === 'user' && message.client_msg_id === recallClientId);
+            const response = question >= 0 ? history.messages[question + 1] : undefined;
+            persisted = history.messages.some((message) => message.role === 'user' && message.content.includes('Zephyr Bay')) &&
+              response?.role === 'assistant' && response.content.toLowerCase().includes('zephyr bay') &&
+              response.content.toLowerCase().includes('cobalt pear');
+            if (!persisted && attempt < 9) await new Promise((resolve) => setTimeout(resolve, 1000));
           }
+          if (!persisted) throw new Error('synthetic Eros memory transcript persistence failed');
           console.log('EROS_NATIVE_VOYAGE_MEMORY=PASS synthetic_turns=16 session_reopened=true recall=PASS history=PASS');
           NODE
           REMOTE_VOYAGE_MEMORY
@@ -2271,7 +2280,7 @@ jobs:
             esac
             target="$(docker ps -aq --filter "name=^/${prefix}-${version}$")"
             [[ -n "$target" && "$target" != *$'\n'* ]] || { echo "rollback target container is missing or ambiguous: $prefix" >&2; exit 1; }
-            test "$(docker inspect --format '{{.Config.Labels "org.opencontainers.image.revision"}}' "$target")" = "$source_sha"
+            test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$target")" = "$source_sha"
             image_id="$(docker inspect --format '{{.Image}}' "$target")"
             docker image inspect "$image_id" --format '{{json .RepoDigests}}' | grep -F "$expected_image" >/dev/null
           done
