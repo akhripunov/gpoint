@@ -134,7 +134,8 @@ class ErosProductionSecretTests(unittest.TestCase):
             MODULE.provision(source, source_sha='a' * 40,
                              image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
                              tenant_id=tenant)
-            production.write_text('GPOINT_AGATA_WORKER_TOKEN=worker-secret\n')
+            production.write_text('GPOINT_AGATA_WORKER_TOKEN=worker-secret\n'
+                                  'EROS_OLLAMA_EMBEDDING_URL=http://ollama:11434/api/embed\n')
             result = MODULE.write_native_api_env(source, production, output)
             values = dict(line.split('=', 1) for line in output.read_text().splitlines())
             self.assertEqual(result, 'EROS_API_ENV=READY')
@@ -148,7 +149,7 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertNotIn('GPOINT_CHAT_POLICY_MARKET', values)
             self.assertEqual(values['GPOINT_EROS_WORKER_TOKEN'], MODULE.read_env(source)['EROS_WORKER_GATEWAY_TOKEN'])
             self.assertNotIn('GPOINT_AGATA_WORKER_TOKEN', values)
-            self.assertNotIn('EROS_OLLAMA_EMBEDDING_URL', values)
+            self.assertEqual(values['EROS_OLLAMA_EMBEDDING_URL'], '')
             self.assertEqual(values['EROS_PRODUCTION_TEST_USER_IDS'], '')
             self.assertNotIn('worker-secret', result)
             for key in ('EROS_JWT_SECRET', 'EROS_BRIDGE_API_KEY', 'EROS_EMBEDDING_API_KEY', 'EROS_WORKER_SIGNING_SECRET'):

@@ -568,6 +568,10 @@ def write_native_api_env(path=ENV_PATH, source_env=SOURCE_ENV_PATH, output=NATIV
         'EROS_ENABLED': 'true',
         'EROS_DATA_MODE': 'gpoint-owned',
         'EROS_SERVICE_URL': 'http://gpoint-eros:8080',
+        # The shared production env may still contain the retired local-Qwen
+        # endpoint. Explicitly override it so the next Core API container
+        # cannot silently restore the old embedding route.
+        'EROS_OLLAMA_EMBEDDING_URL': '',
         'EROS_JWT_SECRET': values['EROS_JWT_SECRET'],
         'EROS_GENOME_WRITE_SECRET': values['GENOME_WRITE_SECRET'],
         'EROS_BRIDGE_API_KEY': values['EROS_BRIDGE_API_KEY'],

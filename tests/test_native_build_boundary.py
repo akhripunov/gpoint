@@ -513,7 +513,12 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("config/deploy.eros.yml", workflow_text)
         self.assertIn("DEPLOY_EROS", workflow_text)
         self.assertIn("gpoint-eros-pilot-engine", workflow_text)
-        self.assertNotIn("gpoint-eros-relay-relay", workflow_text)
+        deploy_steps = jobs["deploy"]["steps"]
+        qwen_cleanup = next(step for step in deploy_steps
+                            if step.get("name") == "Disable Qwen route and stop Ollama after Voyage verification")
+        kamal_apply = next(step for step in deploy_steps if step.get("id") == "kamal_apply")
+        self.assertIn("gpoint-eros-relay-relay", qwen_cleanup["run"])
+        self.assertNotIn("gpoint-eros-relay-relay", kamal_apply["run"])
         self.assertIn('image: akhripunov/gpoint-eros', (ROOT / "config/deploy.eros.yml").read_text())
         self.assertIn('--eros-digest "$eros_digest"', workflow_text)
         self.assertNotIn("docker compose", workflow_text)

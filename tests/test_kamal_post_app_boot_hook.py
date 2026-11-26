@@ -68,11 +68,11 @@ def test_eros_role_keeps_positional_arguments_when_no_network_is_attached(tmp_pa
     assert 'if [ "$networks" = "-" ]; then networks=""; fi' in stdin
 
 
-def test_core_role_still_passes_its_network_list(tmp_path):
+def test_core_role_does_not_reconnect_retired_ollama_network(tmp_path):
     result, args, stdin = _run_hook(tmp_path, "gpoint-core", roles="api")
     assert result.returncode == 0, result.stderr
     assert args[-8:] == [
         "gpoint-core", "api", f"{CANDIDATE}-42495781430-1",
-        "kamal:gpoint-core-api,gpoint_app:api,shared_internal:,gpoint_ollama_internal:", CANDIDATE, CANDIDATE, "candidate", CANDIDATE,
+        "kamal:gpoint-core-api,gpoint_app:api,shared_internal:", CANDIDATE, CANDIDATE, "candidate", CANDIDATE,
     ]
     assert 'if [ "$networks" = "-" ]; then networks=""; fi' in stdin

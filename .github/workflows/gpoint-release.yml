@@ -1627,33 +1627,61 @@ jobs:
           NODE
           REMOTE_VOYAGE_MEMORY
           echo 'EROS_NATIVE_VOYAGE_MEMORY=PASS' >> "$GITHUB_STEP_SUMMARY"
-      - name: Stop unused Ollama after Voyage verification
+      - name: Disable Qwen route and stop Ollama after Voyage verification
         if: steps.voyage_memory_verify.outcome == 'success' && steps.component_plan.outputs.voyage_memory_reset == 'true'
+        env:
+          CORE_API_VERSION: ${{ steps.component_plan.outputs.core_api_version }}
         run: |
           set -euo pipefail
-          model_digest="$(python3 -c 'import json; print(json.load(open("services/eros-engine/ollama-model.lock.json"))["digest"])')"
-          ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - "$model_digest" --verify-and-detach < scripts/verify-layer7-ollama.py
-          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s <<'REMOTE_STOP_OLLAMA'
+          [[ "$CORE_API_VERSION" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CORE_API_VERSION" <<'REMOTE_DISABLE_QWEN'
           set -euo pipefail
-          name=gpoint-ollama-ollama
-          facts="$(docker inspect --format '{{.State.Status}}|{{.Config.Image}}|{{json .Mounts}}|{{json .NetworkSettings.Networks}}' "$name")"
+          version="$1"
+          api="gpoint-core-api-$version"
+          ollama=gpoint-ollama-ollama
+          relay=gpoint-eros-relay-relay
+          test "$(docker inspect --format '{{.State.Status}}' "$api")" = running
+          test "$(docker inspect --format '{{index .Config.Labels "service"}}' "$api")" = gpoint-core
+          relay_state="$(docker inspect --format '{{.State.Status}}' "$relay")"
+          [[ "$relay_state" == running || "$relay_state" == exited ]]
+          test "$(docker inspect --format '{{index .Config.Labels "service"}}' "$relay")" = gpoint-eros-relay-relay
+          test "$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$relay")" = unless-stopped
+          test "$(docker inspect --format '{{json .Config.Cmd}}' "$relay")" = '["node","/app/services/eros-engine/eros-pilot-embedding-relay.mjs"]'
+          relay_image="$(docker inspect --format '{{.Config.Image}}' "$relay")"
+          [[ "$relay_image" =~ ^ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}$ ]]
+          docker network inspect gpoint_ollama_internal | python3 -c 'import json,sys; n=json.load(sys.stdin)[0]; assert n["Internal"] is True; names={x["Name"] for x in n["Containers"].values()}; assert names in ({"gpoint-ollama-ollama",sys.argv[1]},{"gpoint-ollama-ollama"},{sys.argv[1]},set())' "$api"
+          api_networks="$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$api")"
+          if python3 -c 'import json,sys; raise SystemExit(0 if "gpoint_ollama_internal" in json.loads(sys.argv[1]) else 1)' "$api_networks"; then
+            docker network disconnect gpoint_ollama_internal "$api"
+          fi
+          docker inspect --format '{{json .NetworkSettings.Networks}}' "$api" | python3 -c 'import json,sys; assert "gpoint_ollama_internal" not in json.load(sys.stdin)'
+          relay_state="$(docker inspect --format '{{.State.Status}}' "$relay")"
+          if [[ "$relay_state" == running ]]; then docker stop --time 30 "$relay" >/dev/null; fi
+          test "$(docker inspect --format '{{.State.Status}}' "$relay")" = exited
+          facts="$(docker inspect --format '{{.State.Status}}|{{.Config.Image}}|{{json .Mounts}}|{{json .NetworkSettings.Networks}}' "$ollama")"
           IFS='|' read -r state image mounts networks <<< "$facts"
-          [[ "$state" == running && "$image" == ollama/ollama@sha256:a717bfc1c56acfc2e85d3109bd40a7646258ec9062c40cea83b9ed0927eb4223 ]]
+          [[ "$state" == running || "$state" == exited ]]
+          [[ "$image" == ollama/ollama@sha256:a717bfc1c56acfc2e85d3109bd40a7646258ec9062c40cea83b9ed0927eb4223 ]]
+          test "$(docker inspect --format '{{index .Config.Labels "service"}}' "$ollama")" = gpoint-eros-relay-ollama
+          test "$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$ollama")" = unless-stopped
           python3 - "$mounts" "$networks" <<'PY'
           import json,sys
           mounts,networks=(json.loads(value) for value in sys.argv[1:])
           if not any(m.get('Name')=='ollama-layer7-models' and m.get('Destination')=='/root/.ollama' and m.get('RW') is True for m in mounts):
               raise SystemExit('Ollama recovery model volume is not preserved')
-          if set(networks)!={'gpoint_ollama_internal','kamal'}:
+          if set(networks) not in ({'gpoint_ollama_internal','kamal'}, {'gpoint_ollama_internal'}, set()):
               raise SystemExit('Ollama recovery network identity changed')
           PY
           test "$(docker volume inspect ollama-layer7-models --format '{{.Name}}')" = ollama-layer7-models
-          docker stop --time 30 "$name" >/dev/null
-          test "$(docker inspect --format '{{.State.Status}}' "$name")" = exited
-          test "$(docker inspect --format '{{json .Mounts}}' "$name" | python3 -c 'import json,sys; rows=json.load(sys.stdin); assert any(x.get("Name")=="ollama-layer7-models" and x.get("RW") is True for x in rows)')"
-          echo 'OLLAMA_STATE=STOPPED_RECOVERY_IMAGE_AND_VOLUME_RETAINED'
-          REMOTE_STOP_OLLAMA
-          echo 'OLLAMA_STOP=PASS recovery_image_and_volume=preserved' >> "$GITHUB_STEP_SUMMARY"
+          ollama_networks="$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$ollama")"
+          if [[ "$state" == running ]] && python3 -c 'import json,sys; raise SystemExit(0 if "kamal" in json.loads(sys.argv[1]) else 1)' "$ollama_networks"; then
+            docker network disconnect kamal "$ollama"
+          fi
+          if [[ "$state" == running ]]; then docker stop --time 30 "$ollama" >/dev/null; fi
+          test "$(docker inspect --format '{{.State.Status}}' "$ollama")" = exited
+          echo 'QWEN_STATE=DISABLED relay=stopped ollama=stopped recovery_image_and_volume=preserved api_network=detached'
+          REMOTE_DISABLE_QWEN
+          echo 'QWEN_DISABLE=PASS relay=stopped ollama=stopped api_network=detached recovery_image_and_volume=preserved' >> "$GITHUB_STEP_SUMMARY"
       - name: Verify public routes and exact running services
         if: (inputs.mode != 'rollback')
         id: verify

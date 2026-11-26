@@ -249,16 +249,22 @@ def test_memory_reset_repeat_with_complete_receipt_never_deletes_again(capsys):
     assert "EROS_TEST_MEMORY_RESET=SKIP_ALREADY_CLEARED" in capsys.readouterr().out
 
 
-def test_ollama_is_stopped_only_after_native_memory_write_and_recall_verification():
+def test_qwen_route_relay_and_ollama_are_disabled_only_after_native_memory_write_and_recall():
     deploy = steps_for("deploy")
     names = [step.get("name", "") for step in deploy]
     memory_verify = names.index("Verify native Voyage memory write and recall")
-    stop = names.index("Stop unused Ollama after Voyage verification")
+    stop = names.index("Disable Qwen route and stop Ollama after Voyage verification")
     runtime_verify = next(i for i, step in enumerate(deploy) if step.get("id") == "verify")
     assert memory_verify < stop < runtime_verify
     assert "docker stop" in deploy[stop]["run"]
     assert "docker rm" not in deploy[stop]["run"]
     assert "ollama-layer7-models" in deploy[stop]["run"]
+    assert "gpoint-eros-relay-relay" in deploy[stop]["run"]
+    assert "docker network disconnect gpoint_ollama_internal \"$api\"" in deploy[stop]["run"]
+    assert "docker network disconnect kamal \"$ollama\"" in deploy[stop]["run"]
+    assert "relay_state=\"$(docker inspect --format '{{.State.Status}}' \"$relay\")\"" in deploy[stop]["run"]
+    assert "if [[ \"$relay_state\" == running ]]; then docker stop" in deploy[stop]["run"]
+    assert "if [[ \"$state\" == running ]]; then docker stop" in deploy[stop]["run"]
 
 
 def test_voyage_secret_is_routed_only_to_eros_and_verified_from_vps():
@@ -340,7 +346,7 @@ def test_production_embedding_route_is_layer7_internal_and_not_mac_hosted():
     assert "http://gpoint-core-api:3000/eros-worker/v1/embeddings" not in model_config
     assert "Mac-hosted Ollama" not in readme
     assert "`voyage-4-lite` embedding route at 512 dimensions" in readme
-    assert "EROS_OLLAMA_EMBEDDING_URL" not in secret_writer
+    assert "'EROS_OLLAMA_EMBEDDING_URL': ''" in secret_writer
 
 
 def test_native_deploy_materializes_and_hash_verifies_the_required_model_config():

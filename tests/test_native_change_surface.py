@@ -108,8 +108,11 @@ def test_production_api_does_not_publish_ollama_to_public_networks():
     deploy = next(step for step in steps if step.get("name") == "Deploy exact immutable images with stock Kamal")
     body = deploy["run"]
     verifier = (ROOT / "scripts/verify-layer7-ollama.py").read_text()
-    stop = next(step for step in steps if step.get("name") == "Stop unused Ollama after Voyage verification")
-    assert "scripts/verify-layer7-ollama.py" in stop["run"]
+    stop = next(step for step in steps if step.get("name") == "Disable Qwen route and stop Ollama after Voyage verification")
+    assert "gpoint-eros-relay-relay" in stop["run"]
+    assert "docker network disconnect gpoint_ollama_internal \"$api\"" in stop["run"]
+    assert "docker stop --time 30 \"$relay\"" in stop["run"]
+    assert "docker stop --time 30 \"$ollama\"" in stop["run"]
     assert '"docker", "network", "create", "--internal", NETWORK' in verifier
     assert "gpoint_ollama_internal" in verifier
     assert "config/deploy.ollama.yml" not in body
