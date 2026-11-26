@@ -12,9 +12,9 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ErosProductionSecretTests(unittest.TestCase):
-    def _deepseek_fixture(self, root):
-        path = root / 'deepseek.env'
-        path.write_text('DEEPSEEK_API_KEY=synthetic-provider-key-123456789\n')
+    def _openrouter_fixture(self, root):
+        path = root / 'openrouter.env'
+        path.write_text('OPENROUTER_API_KEY=synthetic-provider-key-123456789\n')
         path.chmod(0o600)
         return path
 
@@ -24,31 +24,55 @@ class ErosProductionSecretTests(unittest.TestCase):
         path.chmod(0o600)
         return path
 
-    def test_deepseek_credential_required_and_preserved_on_regeneration(self):
+    def test_openrouter_credential_required_and_preserved_on_regeneration(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / 'eros.env'
             output = root / 'eros-engine.env'
-            key_path = root / 'deepseek.env'
+            key_path = root / 'openrouter.env'
             MODULE.provision(source, source_sha='a' * 40,
                              image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
                              tenant_id='12345678-1234-4234-8234-123456789abc')
             with self.assertRaisesRegex(RuntimeError, 'credential is unavailable'):
-                MODULE.write_native_engine_env(source, output, deepseek_env=key_path)
+                MODULE.write_native_engine_env(source, output, openrouter_env=key_path)
             self.assertFalse(output.exists())
-            key_path = self._deepseek_fixture(root)
+            key_path = self._openrouter_fixture(root)
             voyage_path = self._voyage_fixture(root)
-            first = MODULE.write_native_engine_env(source, output, deepseek_env=key_path, voyage_env=voyage_path)
+            first = MODULE.write_native_engine_env(source, output, openrouter_env=key_path, voyage_env=voyage_path)
             original = output.read_bytes()
-            second = MODULE.write_native_engine_env(source, output, deepseek_env=key_path, voyage_env=voyage_path)
+            second = MODULE.write_native_engine_env(source, output, openrouter_env=key_path, voyage_env=voyage_path)
             self.assertEqual(original, output.read_bytes())
             self.assertEqual(first, second)
-            self.assertIn(b'DEEPSEEK_API_KEY=synthetic-provider-key-123456789', original)
+            self.assertIn(b'OPENROUTER_API_KEY=synthetic-provider-key-123456789', original)
             self.assertNotIn('synthetic-provider-key', first)
             key_path.chmod(0o644)
             with self.assertRaisesRegex(RuntimeError, 'permissions are unsafe'):
-                MODULE.write_native_engine_env(source, output, deepseek_env=key_path, voyage_env=voyage_path)
+                MODULE.write_native_engine_env(source, output, openrouter_env=key_path, voyage_env=voyage_path)
             self.assertEqual(original, output.read_bytes())
+
+    def test_openrouter_model_preflight_checks_pinned_models_without_live_network(self):
+        import json
+        from unittest.mock import MagicMock
+        with tempfile.TemporaryDirectory() as tmp:
+            key_path = self._openrouter_fixture(Path(tmp))
+            calls = []
+            def fake(request, timeout):
+                body = json.loads(request.data)
+                calls.append(body)
+                response = MagicMock()
+                response.status = 200
+                response.read.return_value = json.dumps({'model': body['model'], 'choices': [{'message': {'content': 'READY'}}]}).encode()
+                response.__enter__.return_value = response
+                return response
+            models = MODULE.verify_openrouter_models(credential_path=key_path, requester=fake)
+            self.assertEqual(models, ('deepseek/deepseek-v4.1-flash-1017', 'anthropic/claude-haiku-4.5'))
+            self.assertEqual([x['model'] for x in calls], list(models))
+            self.assertTrue(all(x['max_tokens'] == 32 for x in calls))
+            self.assertEqual(calls[0]['reasoning'], {'enabled': False})
+            def rejected(request, timeout):
+                raise MODULE.HTTPError(request.full_url, 402, 'synthetic failure', None, None)
+            with self.assertRaisesRegex(RuntimeError, 'HTTP 402'):
+                MODULE.verify_openrouter_models(credential_path=key_path, requester=rejected)
 
     def test_generates_persistent_credentials_without_emitting_values(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -87,7 +111,7 @@ class ErosProductionSecretTests(unittest.TestCase):
             MODULE.provision(source, source_sha='a' * 40,
                              image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
                              tenant_id='12345678-1234-4234-8234-123456789abc')
-            self.assertEqual(MODULE.write_native_engine_env(source, output, deepseek_env=self._deepseek_fixture(root),
+            self.assertEqual(MODULE.write_native_engine_env(source, output, openrouter_env=self._openrouter_fixture(root),
                                                             voyage_env=self._voyage_fixture(root)), 'EROS_NATIVE_ENV=READY')
             values = dict(line.split('=', 1) for line in output.read_text().splitlines())
             secrets = MODULE.read_env(source)
@@ -97,7 +121,7 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertEqual(values['SUPABASE_JWT_SECRET'], secrets['EROS_JWT_SECRET'])
             self.assertNotIn('EROS_PILOT_EMBEDDING_PROBE_URL', values)
             self.assertEqual(values['MODEL_CONFIG_PATH'], '/etc/eros-engine/model_config.toml')
-            self.assertEqual(values['OPENROUTER_API_KEY'], '')
+            self.assertEqual(values['OPENROUTER_API_KEY'], 'synthetic-provider-key-123456789')
             self.assertNotIn('EROS_MIGRATOR_DATABASE_URL', values)
 
     def test_native_engine_environment_reads_voyage_key_from_protected_file_only(self):
@@ -105,14 +129,14 @@ class ErosProductionSecretTests(unittest.TestCase):
             root = Path(tmp)
             source = root / 'eros.env'
             output = root / 'eros-engine.env'
-            deepseek = self._deepseek_fixture(root)
+            openrouter = self._openrouter_fixture(root)
             voyage = root / 'voyage.env'
             voyage.write_text('VOYAGE_API_KEY=synthetic-voyage-key-abcdefghijklmnopqrstuvwxyz\n')
             voyage.chmod(0o600)
             MODULE.provision(source, source_sha='a' * 40,
                              image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
                              tenant_id='12345678-1234-4234-8234-123456789abc')
-            result = MODULE.write_native_engine_env(source, output, deepseek_env=deepseek,
+            result = MODULE.write_native_engine_env(source, output, openrouter_env=openrouter,
                                                     voyage_env=voyage)
             values = dict(line.split('=', 1) for line in output.read_text().splitlines())
             self.assertEqual(values['VOYAGE_API_KEY'], 'synthetic-voyage-key-abcdefghijklmnopqrstuvwxyz')
@@ -121,7 +145,7 @@ class ErosProductionSecretTests(unittest.TestCase):
             voyage.chmod(0o644)
             original = output.read_bytes()
             with self.assertRaisesRegex(RuntimeError, 'Voyage credential permissions are unsafe'):
-                MODULE.write_native_engine_env(source, output, deepseek_env=deepseek, voyage_env=voyage)
+                MODULE.write_native_engine_env(source, output, openrouter_env=openrouter, voyage_env=voyage)
             self.assertEqual(output.read_bytes(), original)
 
     def test_native_api_environment_is_created_with_required_keys_and_never_logs_values(self):
@@ -206,7 +230,7 @@ class ErosProductionSecretTests(unittest.TestCase):
                 if key in {'EROS_SOURCE_SHA', 'EROS_IMAGE', 'EROS_TEST_USER_IDS', 'EROS_TEST_CREATOR_IDS'}:
                     continue
                 self.assertEqual(upgraded[key], value, key)
-            MODULE.write_native_engine_env(source, engine_output, deepseek_env=self._deepseek_fixture(root),
+            MODULE.write_native_engine_env(source, engine_output, openrouter_env=self._openrouter_fixture(root),
                                            voyage_env=self._voyage_fixture(root))
             MODULE.write_native_api_env(source, production, api_output)
             engine = dict(line.split('=', 1) for line in engine_output.read_text().splitlines())

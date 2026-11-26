@@ -463,12 +463,13 @@ def test_kamal_roles_share_the_private_eros_network_with_stable_service_aliases(
     assert "network-alias: gpoint-eros" in engine
     assert "'EROS_SERVICE_URL': 'http://gpoint-eros:8080'" in (ROOT / "scripts/eros-production-secrets.py").read_text()
     assert "http://gpoint-core-api:3000/eros-worker/v1/" not in model
-    assert "https://api.deepseek.com/chat/completions" in model
+    assert "https://api.deepseek.com/chat/completions" not in model
     assert "gpoint-codex@gpoint" not in model
     tasks = tomllib.loads(model)["tasks"]
     assert tasks["embedding"]["model"] == "voyage-4-lite"
-    assert all(task["model"] == "deepseek-flash@deepseek"
-               for name, task in tasks.items() if name != "embedding")
+    assert tasks["chat_companion"]["model"] == "deepseek/deepseek-v4.1-flash-1017"
+    assert all(task["model"] == "anthropic/claude-haiku-4.5"
+               for name, task in tasks.items() if name not in {"embedding", "chat_companion"})
 
 
 def test_hosted_stock_eros_e2e_uses_exact_build_digest_and_approved_local_alias():
@@ -492,50 +493,50 @@ def test_normal_kamal_apply_does_not_boot_or_reconnect_ollama():
     assert "verify-layer7-ollama.py" not in verify
 
 
-def test_deepseek_runtime_verification_and_rollback_provider_guard():
+def test_openrouter_runtime_verification_and_rollback_provider_guard():
     deploy = steps_for("deploy")
     verify = next(step for step in deploy if step.get("id") == "verify")["run"]
-    assert 'EROS_PROVIDER_CONFIG=PASS provider=deepseek model=deepseek-flash' in verify
-    assert 'test -n "$DEEPSEEK_API_KEY"' in verify
+    assert 'EROS_PROVIDER_CONFIG=PASS provider=openrouter chat=deepseek/deepseek-v4.1-flash-1017 analysis=anthropic/claude-haiku-4.5' in verify
+    assert 'test -n "$OPENROUTER_API_KEY"' in verify
     assert 'sha256sum /opt/gpoint/env/eros-production-model-config.toml' in verify
     retained = next(step for step in deploy if step.get("name") == "Verify retained Eros rollback containers")["run"]
     assert 'EROS_ROLLBACK_PROVIDER_COMPATIBLE=PASS' in retained
-    assert 'Eros rollback target lacks DeepSeek credential' in retained
+    assert 'Eros rollback target lacks OpenRouter credential' in retained
     assert 'Eros rollback target lacks compatible provider networking' in retained
 
 
-def test_deepseek_disables_thinking_for_all_configured_text_tasks():
+def test_openrouter_uses_upstream_chat_and_group_reasoning_rules():
     config = tomllib.loads((ROOT / "services/eros-engine/eros-production-model-config.toml").read_text())
-    assert config["providers"]["deepseek"]["body"] == [
-        {"tasks": [name for name in config["tasks"] if name != "embedding"],
-         "params": {"thinking": {"type": "disabled"}}}
+    assert set(config["providers"]) == {"openrouter"}
+    assert config["providers"]["openrouter"]["body"] == [
+        {"tasks": ["chat_companion"], "params": {"reasoning": {"enabled": False}}},
+        {"tasks": ["group_director"], "params": {"reasoning": {"effort": "medium"}}},
     ]
-    assert config["tasks"]["chat_companion"]["model"] == "deepseek-flash@deepseek"
-    assert config["tasks"]["chat_companion"]["retry_depth"] == 0
     assert config["tasks"]["chat_companion"] == {
-        "model": "deepseek-flash@deepseek",
-        "retry_depth": 0,
-        "temperature": 0.8,
-        "top_p": 0.9,
-        "frequency_penalty": 0.4,
-        "presence_penalty": 0.2,
-        "max_tokens": 1600,
+        "model": "deepseek/deepseek-v4.1-flash-1017",
+        "fallback": ["thedrummer/cydonia-24b-v4.1", "z-ai/glm-4.7-flash"],
+        "temperature": 0.8, "top_p": 0.9, "frequency_penalty": 0.4,
+        "presence_penalty": 0.2, "max_tokens": 1600,
     }
 
-def test_native_character_insights_have_bounded_direct_deepseek_tasks():
+
+def test_native_character_insights_use_upstream_haiku():
     config = tomllib.loads((ROOT / "services/eros-engine/eros-production-model-config.toml").read_text())
     extraction = dict(config["tasks"]["character_insight_extraction"])
     prompt = extraction.pop("filter_prompt")
     assert extraction == {
-        "model": "deepseek-flash@deepseek", "fallback": [], "retry_depth": 0,
+        "model": "anthropic/claude-haiku-4.5",
+        "fallback": ["deepseek/deepseek-v4.1-flash-1017", "google/gemini-3.1-flash-lite"],
         "temperature": 0.2, "max_tokens": 800,
     }
     assert '"facts"' in prompt and '"details"' in prompt
     assert "current_situation" in prompt and "location" in prompt
     assert config["tasks"]["character_insight_structuring"] == {
-        "model": "deepseek-flash@deepseek", "fallback": [], "retry_depth": 0,
+        "model": "anthropic/claude-haiku-4.5",
+        "fallback": ["deepseek/deepseek-v4.1-flash-1017", "google/gemini-3.1-flash-lite"],
         "temperature": 0.2, "max_tokens": 600,
     }
+
 
 def test_stock_eros_text_task_parity():
     config = tomllib.loads((ROOT / "services/eros-engine/eros-production-model-config.toml").read_text())
@@ -565,10 +566,14 @@ def test_stock_eros_text_task_parity():
     for name, (temperature, max_tokens) in expected.items():
         task = tasks[name]
         assert (task["temperature"], task["max_tokens"]) == (temperature, max_tokens), name
-        assert task["model"] == "deepseek-flash@deepseek", name
-        assert task["retry_depth"] == 0, name
-        if name != "chat_companion":
+        assert task["model"] == ("deepseek/deepseek-v4.1-flash-1017" if name == "chat_companion" else "anthropic/claude-haiku-4.5"), name
+        assert "retry_depth" not in task, name
+        if name in {"pde_decision", "world_director", "world_stories_director", "world_comment", "world_reply"}:
             assert task["fallback"] == [], name
+        elif name == "group_director":
+            assert task["fallback"] == ["deepseek/deepseek-v4.1-flash-1017"], name
+        elif name != "chat_companion":
+            assert task["fallback"] == ["deepseek/deepseek-v4.1-flash-1017", "google/gemini-3.1-flash-lite"], name
     # Source: Eros v2.8.1 c7d63d77, examples/model_config.d.
     # Hash the parsed prompt, not the TOML formatting.
     prompts = {

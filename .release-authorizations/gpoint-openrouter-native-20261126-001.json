@@ -17,7 +17,8 @@
     "services/eros-engine/eros-production-model-config.toml",
     "services/eros-engine/README.md",
     "tests/test_eros_secret_provision.py",
-    "tests/test_eros_native_database_workflow.py"
+    "tests/test_eros_native_database_workflow.py",
+    "tests/test_eros_production_secrets_bootstrap.py"
   ],
   "allowed_operations": [
     "integrate",
@@ -45,7 +46,8 @@
         "services/eros-engine/eros-production-model-config.toml",
         "services/eros-engine/README.md",
         "tests/test_eros_secret_provision.py",
-        "tests/test_eros_native_database_workflow.py"
+        "tests/test_eros_native_database_workflow.py",
+        "tests/test_eros_production_secrets_bootstrap.py"
       ],
       "allowed_operations": [
         "integrate",
@@ -80,7 +82,8 @@
         "services/eros-engine/eros-production-model-config.toml",
         "services/eros-engine/README.md",
         "tests/test_eros_secret_provision.py",
-        "tests/test_eros_native_database_workflow.py"
+        "tests/test_eros_native_database_workflow.py",
+        "tests/test_eros_production_secrets_bootstrap.py"
       ],
       "risk_description": "Existing owner-created OpenRouter credential only; root-owned 0600, never printed or put into Git/CI logs.",
       "backup_plan": "No secret in backup artifacts; retain owner-managed recovery credentials.",
@@ -98,5 +101,5 @@
   "state": "ACTIVE",
   "revoked": false,
   "consumed": false,
-  "owner_task_commitment_sha256": "84a97bb0e2a273451a2de9b3fa6b65390a75749257c6bf126ac62192764ec6ec"
+  "owner_task_commitment_sha256": "22dbfebcfbcbfb1ae4fe5fd9cba762b5f69e2d5cccdd5cceda2b7ca5c654916a"
 }

@@ -65,9 +65,11 @@ alter its installed configuration.
   `voyage-4-lite` embedding route at 512 dimensions. The former Qwen/Ollama
   route is retained only as a recovery artifact; its Core API network route is
   removed, and the pinned Ollama container is stopped only after a production
-  synthetic memory write/recall check passes. The existing Mac Product Worker
-  remains the chat-inference route and is still required for real Eros dialogue
-  until that existing Worker is available to the request.
+  synthetic memory write/recall check passes. The production model configuration routes chat through native OpenRouter
+  (`deepseek/deepseek-v4.1-flash-1017`) and analysis through
+  `anthropic/claude-haiku-4.5`, retaining upstream fallback roles and
+  native Voyage embeddings. The direct DeepSeek credential is retained
+  separately for recovery; there is no new runtime service.
 - Stock `classify_session` performs model/extraction and embedding before an
   unconditional memory upsert; archive deletes relationship memory. A delayed
   write crossing archive is a plausible data-resurrection risk, not a proven

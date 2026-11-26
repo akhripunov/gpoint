@@ -1110,7 +1110,8 @@ jobs:
           # Read-only: validates the release identity, resolves the tenant from
           # the existing GPoint environment and, when the protected file already
           # exists, proves it is complete and consistent. It never writes,
-          # creates a network, a database or a role. Provisioning stays in the
+          # creates a network, a database or a role. Two bounded synthetic
+          # provider requests check paid model availability before Apply. Provisioning stays in the
           # apply phase, after the Prisma Apply is authorised.
           ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - \
             --check-only --source-sha "$CANDIDATE_SHA" --image "$eros_image" \
@@ -1873,13 +1874,14 @@ jobs:
             docker exec "gpoint-eros-pilot-engine-$eros_version" curl --connect-timeout 2 --max-time 10 --fail --silent http://127.0.0.1:8080/healthz >/dev/null
             docker exec "gpoint-eros-pilot-engine-$eros_version" grep -Fx 'model = "voyage-4-lite"' /etc/eros-engine/model_config.toml >/dev/null
             ! docker exec "gpoint-eros-pilot-engine-$eros_version" grep -F 'gpoint-core-api:3000/eros-worker/v1/embeddings' /etc/eros-engine/model_config.toml >/dev/null
-            docker exec "gpoint-eros-pilot-engine-$eros_version" grep -Fx 'model = "deepseek-flash@deepseek"' /etc/eros-engine/model_config.toml >/dev/null
-            docker exec "gpoint-eros-pilot-engine-$eros_version" grep -Fx 'chat = "https://api.deepseek.com/chat/completions"' /etc/eros-engine/model_config.toml >/dev/null
-            docker exec "gpoint-eros-pilot-engine-$eros_version" sh -c 'test -n "$DEEPSEEK_API_KEY" && ! grep -Fq "gpoint-codex@gpoint" /etc/eros-engine/model_config.toml'
+            docker exec "gpoint-eros-pilot-engine-$eros_version" grep -Fx 'model = "deepseek/deepseek-v4.1-flash-1017"' /etc/eros-engine/model_config.toml >/dev/null
+            docker exec "gpoint-eros-pilot-engine-$eros_version" grep -Fx 'model = "anthropic/claude-haiku-4.5"' /etc/eros-engine/model_config.toml >/dev/null
+            docker exec "gpoint-eros-pilot-engine-$eros_version" sh -c 'test -n "$OPENROUTER_API_KEY" && ! grep -Fq "gpoint-codex@gpoint" /etc/eros-engine/model_config.toml'
+            ! docker exec "gpoint-eros-pilot-engine-$eros_version" grep -Fq 'https://api.deepseek.com/chat/completions' /etc/eros-engine/model_config.toml
             docker exec "gpoint-eros-pilot-engine-$eros_version" sh -c 'test -n "$VOYAGE_API_KEY"'
             test "$(docker exec "gpoint-eros-pilot-engine-$eros_version" sha256sum /etc/eros-engine/model_config.toml | awk '{print $1}')" = "$(sha256sum /opt/gpoint/env/eros-production-model-config.toml | awk '{print $1}')"
             docker inspect --format '{{json .NetworkSettings.Networks}}' "gpoint-eros-pilot-engine-$eros_version" | python3 -c 'import json,sys; assert set(json.load(sys.stdin)) == {"gpoint_eros_data","kamal"}'
-            echo EROS_PROVIDER_CONFIG=PASS provider=deepseek model=deepseek-flash
+            echo EROS_PROVIDER_CONFIG=PASS provider=openrouter chat=deepseek/deepseek-v4.1-flash-1017 analysis=anthropic/claude-haiku-4.5
             echo EROS_EMBEDDING_PROVIDER=PASS provider=voyage model=voyage-4-lite dimensions=512
             python3 "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py" "gpoint-eros-pilot-engine-$eros_version" "$expected_eros_upstream" none
             rm -f -- "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py"
@@ -2322,11 +2324,12 @@ jobs:
             test "$(docker inspect --format "{{index .Config.Labels \"$label\"}}" "$ids")" = "$source"
             docker image inspect "$(docker inspect --format '{{.Image}}' "$ids")" --format '{{json .RepoDigests}}' | grep -F "$image" >/dev/null
           done
-          grep -Fx 'model = "deepseek-flash@deepseek"' /opt/gpoint/env/eros-production-model-config.toml >/dev/null
+          grep -Fx 'model = "deepseek/deepseek-v4.1-flash-1017"' /opt/gpoint/env/eros-production-model-config.toml >/dev/null
+          grep -Fx 'model = "anthropic/claude-haiku-4.5"' /opt/gpoint/env/eros-production-model-config.toml >/dev/null
           if grep -Fq 'gpoint-codex@gpoint' /opt/gpoint/env/eros-production-model-config.toml; then
             echo 'Eros rollback would use retired generation route' >&2; exit 1
           fi
-          docker inspect --format '{{json .Config.Env}}' "$ids" | python3 -c 'import json,sys; rows=json.load(sys.stdin); assert len([e for e in rows if e.startswith("DEEPSEEK_API_KEY=") and len(e.split("=",1)[1]) >= 16]) == 1, "Eros rollback target lacks DeepSeek credential"'
+          docker inspect --format '{{json .Config.Env}}' "$ids" | python3 -c 'import json,sys; rows=json.load(sys.stdin); assert len([e for e in rows if e.startswith("OPENROUTER_API_KEY=") and len(e.split("=",1)[1]) >= 16]) == 1, "Eros rollback target lacks OpenRouter credential"'
           docker inspect --format '{{json .NetworkSettings.Networks}}' "$ids" | python3 -c 'import json,sys; assert set(json.load(sys.stdin)) == {"gpoint_eros_data","kamal"}, "Eros rollback target lacks compatible provider networking"'
           echo EROS_ROLLBACK_PROVIDER_COMPATIBLE=PASS
           echo EROS_ROLLBACK_TARGET_RETAINED=PASS

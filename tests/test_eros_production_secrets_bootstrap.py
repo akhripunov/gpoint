@@ -83,7 +83,7 @@ def test_eros_prerequisites_run_before_the_prisma_apply():
     assert prereq < prisma, "Eros prerequisites must be verified before the Prisma Apply"
     # The prerequisite step reuses the existing provisioner, not a new mechanism.
     assert "eros-production-secrets.py" in steps[prereq]["run"]
-    assert steps[prereq]["if"] == "steps.component_plan.outputs.deploy_eros == 'true'"
+    assert steps[prereq]["if"] == "((steps.component_plan.outputs.deploy_eros == 'true') && inputs.mode != 'rollback')"
 
 
 def _run_cli(tmp_path, *args, source_env=None):
@@ -92,16 +92,21 @@ def _run_cli(tmp_path, *args, source_env=None):
     return subprocess.run(cmd, capture_output=True, text=True, cwd=tmp_path)
 
 
-def test_check_only_never_writes_a_missing_env(tmp_path):
+def test_check_only_never_writes_a_missing_env(tmp_path, monkeypatch, capsys):
     target_dir = tmp_path / "env"
     target_dir.mkdir(mode=0o700)
     target = target_dir / "eros.env"
     source = _source_env(tmp_path, str(uuid.uuid4()))
-    result = _run_cli(tmp_path, "--check-only", "--path", str(target),
-                      "--source-sha", SOURCE_SHA, "--image", IMAGE,
-                      "--source-env", str(source))
-    assert result.returncode == 0, result.stderr
-    assert "EROS_PREREQUISITES=READY state=WOULD_PROVISION" in result.stdout
+    # The CLI orchestration is tested with synthetic provider mocks only;
+    # actual credential validation and provider responses have their own tests.
+    monkeypatch.setattr(secrets_mod, "read_openrouter_key", lambda path: "synthetic")
+    monkeypatch.setattr(secrets_mod, "read_voyage_key", lambda: "synthetic")
+    monkeypatch.setattr(secrets_mod, "verify_openrouter_models", lambda **kwargs: (
+        "deepseek/deepseek-v4.1-flash-1017", "anthropic/claude-haiku-4.5"))
+    monkeypatch.setattr(sys, "argv", ["eros-production-secrets.py", "--check-only", "--path", str(target),
+                      "--source-sha", SOURCE_SHA, "--image", IMAGE, "--source-env", str(source)])
+    secrets_mod.main()
+    assert "EROS_PREREQUISITES=READY state=WOULD_PROVISION" in capsys.readouterr().out
     assert not target.exists(), "read-only preflight must not create the protected env"
 
 

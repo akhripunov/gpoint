@@ -26,7 +26,7 @@ NATIVE_ENV_PATH = Path('/opt/gpoint/env/eros-engine.env')
 NATIVE_API_ENV_PATH = Path('/opt/gpoint/env/eros-api.env')
 WORLD_WRITER_ENV_PATH = Path('/opt/gpoint/env/eros-world-writer.env')
 SOURCE_ENV_PATH = Path('/opt/gpoint/env/production.env')
-DEEPSEEK_ENV_PATH = Path('/opt/gpoint/env/deepseek.env')
+OPENROUTER_ENV_PATH = Path('/opt/gpoint/env/openrouter.env')
 VOYAGE_ENV_PATH = Path('/opt/gpoint/env/voyage.env')
 SECRET_KEYS = (
     'EROS_JWT_SECRET',
@@ -360,28 +360,57 @@ GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA engine TO eros_runtime;
     return 'EROS_DATABASE_ROLES=READY'
 
 
-def read_deepseek_key(path=DEEPSEEK_ENV_PATH):
+def read_openrouter_key(path=OPENROUTER_ENV_PATH):
     """Read the separately provisioned, non-generated provider credential."""
     path = Path(path)
     try:
         if path.parent.is_symlink() or path.is_symlink():
-            raise RuntimeError('DeepSeek credential path is unsafe')
+            raise RuntimeError('OpenRouter credential path is unsafe')
         parent = path.parent.stat()
         info = path.stat()
         if (parent.st_mode & 0o077 or not stat.S_ISREG(info.st_mode)
                 or info.st_mode & 0o077 or info.st_nlink != 1
-                or (path == DEEPSEEK_ENV_PATH and (info.st_uid != 0 or parent.st_uid != 0))):
-            raise RuntimeError('DeepSeek credential permissions are unsafe')
+                or (path == OPENROUTER_ENV_PATH and (info.st_uid != 0 or parent.st_uid != 0))):
+            raise RuntimeError('OpenRouter credential permissions are unsafe')
         lines = path.read_text().splitlines()
     except (OSError, UnicodeError):
-        raise RuntimeError('DeepSeek credential is unavailable') from None
+        raise RuntimeError('OpenRouter credential is unavailable') from None
     entries = [line for line in lines if line and not line.startswith('#')]
-    if len(entries) != 1 or not entries[0].startswith('DEEPSEEK_API_KEY='):
-        raise RuntimeError('DeepSeek credential file is malformed')
+    if len(entries) != 1 or not entries[0].startswith('OPENROUTER_API_KEY='):
+        raise RuntimeError('OpenRouter credential file is malformed')
     value = entries[0].split('=', 1)[1]
     if not re.fullmatch(r'[A-Za-z0-9_-]{16,256}', value):
-        raise RuntimeError('DeepSeek credential is missing or malformed')
+        raise RuntimeError('OpenRouter credential is missing or malformed')
     return value
+
+
+def verify_openrouter_models(*, credential_path=OPENROUTER_ENV_PATH, requester=None):
+    """Bounded synthetic provider preflight; never return response bodies or credentials."""
+    key = read_openrouter_key(credential_path)
+    send = requester or urlopen
+    models = ('deepseek/deepseek-v4.1-flash-1017', 'anthropic/claude-haiku-4.5')
+    for model in models:
+        payload = {'model': model, 'messages': [{'role': 'user', 'content': 'Reply with the single word READY.'}],
+                   'max_tokens': 32, 'stream': False}
+        if model.startswith('deepseek/'):
+            payload['reasoning'] = {'enabled': False}
+        request = Request('https://openrouter.ai/api/v1/chat/completions',
+                          data=json.dumps(payload).encode(), method='POST',
+                          headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})
+        try:
+            with send(request, timeout=30) as response:
+                if response.status != 200:
+                    raise RuntimeError(f'OpenRouter model preflight failed for {model} (HTTP {response.status})')
+                body = json.loads(response.read())
+            if body.get('model') != model or not body['choices'][0]['message']['content'].strip():
+                raise ValueError
+        except HTTPError as error:
+            raise RuntimeError(f'OpenRouter model preflight failed for {model} (HTTP {error.code})') from None
+        except (URLError, TimeoutError, OSError):
+            raise RuntimeError(f'OpenRouter model preflight failed for {model} (network)') from None
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+            raise RuntimeError(f'OpenRouter model preflight failed for {model} (invalid response)') from None
+    return models
 
 
 def read_voyage_key(path=VOYAGE_ENV_PATH):
@@ -468,9 +497,9 @@ def verify_voyage_api(*, credential_path=VOYAGE_ENV_PATH, requester=None, sleepe
 
 
 def write_native_engine_env(path=ENV_PATH, output=NATIVE_ENV_PATH, *,
-                            deepseek_env=DEEPSEEK_ENV_PATH, voyage_env=VOYAGE_ENV_PATH):
+                            openrouter_env=OPENROUTER_ENV_PATH, voyage_env=VOYAGE_ENV_PATH):
     """Materialize the minimal stock-image environment used by Kamal and SQLx."""
-    provider_key = read_deepseek_key(deepseek_env)
+    provider_key = read_openrouter_key(openrouter_env)
     voyage_key = read_voyage_key(voyage_env)
     values = read_env(Path(path))
     required = set(SECRET_KEYS) | {'EROS_RUNTIME_DATABASE_URL', 'EROS_MIGRATOR_DATABASE_URL'}
@@ -490,8 +519,7 @@ def write_native_engine_env(path=ENV_PATH, output=NATIVE_ENV_PATH, *,
         'GPOINT_WORKER_TENANT_ID': values['EROS_TENANT_ID'],
         'EROS_BRIDGE_API_KEY': values['EROS_BRIDGE_API_KEY'],
         'GENOME_WRITE_SECRET': values['GENOME_WRITE_SECRET'],
-        'OPENROUTER_API_KEY': '',
-        'DEEPSEEK_API_KEY': provider_key,
+        'OPENROUTER_API_KEY': provider_key,
         'VOYAGE_API_KEY': voyage_key,
         'SUPABASE_JWT_SECRET': values['EROS_JWT_SECRET'],
         'MODEL_CONFIG_PATH': '/etc/eros-engine/model_config.toml',
@@ -661,7 +689,7 @@ def main():
     parser.add_argument('--image')
     parser.add_argument('--tenant-id')
     parser.add_argument('--source-env', default=str(SOURCE_ENV_PATH))
-    parser.add_argument('--deepseek-env', default=str(DEEPSEEK_ENV_PATH))
+    parser.add_argument('--openrouter-env', default=str(OPENROUTER_ENV_PATH))
     parser.add_argument('--ensure-postgres-network', action='store_true')
     parser.add_argument('--check-only', action='store_true')
     parser.add_argument('--provision-database', action='store_true')
@@ -685,15 +713,17 @@ def main():
             if (args.provision_database or args.ensure_postgres_network
                     or args.write_native_engine_env or args.write_native_api_env):
                 raise ValueError('check-only cannot be combined with a provisioning flag')
-            read_deepseek_key(args.deepseek_env)
+            read_openrouter_key(args.openrouter_env)
             read_voyage_key()
             state = check_prerequisites(
                 args.path, source_sha=args.source_sha, image=args.image,
                 tenant_id=args.tenant_id, source_env=args.source_env)
+            for model in verify_openrouter_models(credential_path=args.openrouter_env):
+                print(f'OPENROUTER_MODEL=PASS model={model}')
             print(f'EROS_PREREQUISITES=READY state={state}')
             return
         if args.write_native_engine_env:
-            read_deepseek_key(args.deepseek_env)
+            read_openrouter_key(args.openrouter_env)
             read_voyage_key()
         if args.provision_database:
             assert_shared_database_acl_isolatable()
@@ -704,7 +734,7 @@ def main():
         if args.provision_database:
             print(provision_database(args.path))
         if args.write_native_engine_env:
-            print(write_native_engine_env(args.path, deepseek_env=args.deepseek_env))
+            print(write_native_engine_env(args.path, openrouter_env=args.openrouter_env))
         if args.write_native_api_env:
             print(write_native_api_env(args.path, args.source_env))
     except Exception as error:
