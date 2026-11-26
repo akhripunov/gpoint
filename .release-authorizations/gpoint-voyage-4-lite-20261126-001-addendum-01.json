@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "project": "gpoint",
+  "environment": "production",
+  "authorization_id": "gpoint-voyage-4-lite-20261126-001-addendum-01",
+  "parent_authorization_id": "gpoint-voyage-4-lite-20261126-001",
+  "parent_authorization_sha256": "642cd56c1412787596d647d79f2f56456b3e32e6c5b6ec336e7cd421052a35fa",
+  "source_instruction_identifier": "OWNER_ADDITIONAL_REQUIREMENTS_2026-11-26_GPOINT_VOYAGE_CUTOVER",
+  "owner_task_reference": "Additional OWNER requirements: prohibit Qwen/Voyage vector overlap; stop Eros before backup and cleanup; reset is backup-and-restore-gated and idempotent; verify native Voyage memory before stopping Ollama; remove temporary release-workflow cleanup logic after successful transition; do not run Dialogue Lab.",
+  "allowed_paths": [
+    ".release-authorizations/gpoint-voyage-4-lite-20261126-001-addendum-01.json",
+    ".kamal/hooks/post-app-boot",
+    ".github/workflows/gpoint-release.yml",
+    "config/deploy.eros-api.yml",
+    "scripts/eros-native-database.py",
+    "scripts/eros-production-secrets.py",
+    "services/eros-engine/README.md",
+    "services/eros-engine/eros-production-model-config.toml",
+    "tests/test_eros_native_database_workflow.py",
+    "tests/test_eros_secret_provision.py",
+    "tests/test_kamal_release_config.py",
+    "tests/test_native_change_surface.py"
+  ],
+  "additional_safety_contract": {
+    "quiescence": "Before backup and vector cleanup, stop the exact verified Eros engine with stock Kamal; keep it stopped until the native Voyage Eros image is running and its new-memory verification passes.",
+    "cleanup": "Use the parent authorization's exact target tables, row counts and database protections. Store a durable pre-delete intent and completion receipt. On repeat for the same exact candidate/image, verify the cleared state and never issue the DELETE a second time.",
+    "provider_exclusivity": "The active Eros model config selects native voyage-4-lite at 512 dimensions, and the Core API has no Ollama network membership or active Ollama embedding URL. Do not start Qwen while Voyage memory is active.",
+    "retirement": "Only after the new-memory write/recall verification succeeds may the pinned Ollama container be stopped. Preserve its image and model volume for separately gated recovery.",
+    "temporary_workflow_logic": "After this exact transition has successfully completed, remove the one-time vector-reset and Voyage-cutover gate from the normal release workflow in a follow-up local change and use the same protected release path to publish that cleanup. The cleanup must not repeat data deletion or trigger an unrelated component migration.",
+    "scope_exclusion": "Do not run full Dialogue Lab, add services/workers/workflows, access real-user data, or change unrelated product paths."
+  },
+  "state": "ACTIVE_APPEND_ONLY_ADDENDUM"
+}
