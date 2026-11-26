@@ -1,0 +1,75 @@
+{
+  "schema_version": 3,
+  "project": "gpoint",
+  "environment": "production",
+  "authorization_id": "gpoint-eros-structured-output-20261126-001",
+  "authorization_mode": "TASK_SCOPED_AUTO",
+  "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+  "source_instruction_identifier": "OWNER_2026-11-26_EROS_STRUCTURED_OUTPUT_FIX",
+  "owner_task_reference": "Current GPoint chat: after documented World Stories parse failures and proposal to restore original Structured Output for Claude, OWNER: «Изправляй выкатывай».",
+  "task": "Restore upstream default JSON-schema response_format for group_director, world_director, world_stories_director and world_comment; verify actual successful World Stories persistence after deployment.",
+  "production_baseline_sha": "de1c45a3c348db6f344b0cf71390380051326229",
+  "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+  "allowed_paths": [
+    ".release-authorizations/gpoint-eros-structured-output-20261126-001.json",
+    "services/eros-engine/eros-production-model-config.toml",
+    "services/eros-engine/README.md",
+    "tests/test_eros_native_database_workflow.py"
+  ],
+  "allowed_operations": [
+    "integrate",
+    "preflight",
+    "deploy",
+    "verify",
+    "publish_evidence"
+  ],
+  "acceptance_criteria": [
+    "Exact verified live baseline and current main; stock Eros 2.8.1 JSON-schema behavior restored for four Claude directors.",
+    "Synthetic OpenRouter Haiku world_stories_round schema probe PASS; existing targeted and hosted gates PASS.",
+    "Existing Eros E2E, encrypted backup/restore, SQLx verify, immutable Kamal and Runtime Verify; no migration/reset.",
+    "Post-deploy check for successful persona_story_insights.last_run_at and events; distinguish live acceptance from deployment status."
+  ],
+  "exclusions": [
+    "No model changes, no prompts change, no migration or memory deletion, no new infrastructure, no extra workflow, no unrelated instruction changes, no secret disclosure."
+  ],
+  "risk_contracts": {
+    "release_infrastructure": {
+      "allowed_paths": [
+        ".release-authorizations/gpoint-eros-structured-output-20261126-001.json",
+        "services/eros-engine/eros-production-model-config.toml",
+        "services/eros-engine/README.md",
+        "tests/test_eros_native_database_workflow.py"
+      ],
+      "allowed_operations": [
+        "integrate",
+        "preflight",
+        "deploy",
+        "verify",
+        "publish_evidence"
+      ],
+      "baseline_sha": "de1c45a3c348db6f344b0cf71390380051326229",
+      "risk_description": "Restore original native structured output for existing Claude director routes, after owner explicitly requested fix and rollout. No credential, database schema, code or release pipeline change.",
+      "required_gates": [
+        "Exact verified live baseline and current main; stock Eros 2.8.1 JSON-schema behavior restored for four Claude directors.",
+        "Synthetic OpenRouter Haiku world_stories_round schema probe PASS; existing targeted and hosted gates PASS.",
+        "Existing Eros E2E, encrypted backup/restore, SQLx verify, immutable Kamal and Runtime Verify; no migration/reset.",
+        "Post-deploy check for successful persona_story_insights.last_run_at and events; distinguish live acceptance from deployment status."
+      ],
+      "backup_plan": "Existing protected encrypted backup/restore; preserve memory and previous model config in Git.",
+      "rollback_plan": "If protected checks fail, stop and reconcile; canonical authorized config revert to exact previous compatible release; no database restore or reset.",
+      "stop_conditions": [
+        "provider schema probe fails",
+        "baseline drift",
+        "unexpected migration or memory reset",
+        "failed protected gate",
+        "ambiguous runtime state"
+      ]
+    }
+  },
+  "preauthorized_commits": [],
+  "preauthorized_paths": [],
+  "state": "ACTIVE",
+  "revoked": false,
+  "consumed": false,
+  "owner_task_commitment_sha256": "b21c657e10ff29555dcdf20b49dbc6d19ad2ae057ef2d138c1bb5020ae6aa62c"
+}
