@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 
 import yaml
 
@@ -318,3 +319,13 @@ def test_deepseek_runtime_verification_and_rollback_provider_guard():
     assert 'EROS_ROLLBACK_PROVIDER_COMPATIBLE=PASS' in retained
     assert 'Eros rollback target lacks DeepSeek credential' in retained
     assert 'Eros rollback target lacks compatible provider networking' in retained
+
+
+def test_deepseek_chat_disables_thinking_only_for_companion():
+    config = tomllib.loads((ROOT / "services/eros-engine/eros-production-model-config.toml").read_text())
+    assert config["providers"]["deepseek"]["body"] == [
+        {"tasks": ["chat_companion"], "params": {"thinking": {"type": "disabled"}}}
+    ]
+    assert config["tasks"]["chat_companion"]["model"] == "deepseek-flash@deepseek"
+    assert config["tasks"]["chat_companion"]["retry_depth"] == 0
+    assert config["tasks"]["chat_companion"].get("max_tokens", config["defaults"].get("fallback_max_tokens", 200)) == 200

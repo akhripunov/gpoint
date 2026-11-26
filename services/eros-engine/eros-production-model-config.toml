@@ -11,6 +11,11 @@ retry_depth = 0
 [providers.deepseek]
 chat = "https://api.deepseek.com/chat/completions"
 
+# Ordinary chat renders visible content; keep the existing 200-token budget.
+[[providers.deepseek.body]]
+tasks = ["chat_companion"]
+params = { thinking = { type = "disabled" } }
+
 [providers.gpoint_embeddings]
 embeddings = "http://gpoint-core-api:3000/eros-worker/v1/embeddings"
 
