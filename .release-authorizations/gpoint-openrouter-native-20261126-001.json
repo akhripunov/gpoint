@@ -1,0 +1,102 @@
+{
+  "schema_version": 3,
+  "project": "gpoint",
+  "environment": "production",
+  "authorization_id": "gpoint-openrouter-native-20261126-001",
+  "authorization_mode": "TASK_SCOPED_AUTO",
+  "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+  "source_instruction_identifier": "OWNER_2026-11-26_GPOINT_OPENROUTER_NATIVE",
+  "owner_task_reference": "Current GPoint chat: after funding OpenRouter and receiving the proposed DeepSeek + Haiku native routing plan, OWNER wrote: «Ну, проверяй и делай всё, что нужно, и внедряй.»",
+  "task": "Prepare native OpenRouter routing using pinned Eros 2.8.1 example model IDs and fallback chains; leave Voyage and current memory unchanged. Production publication is blocked until actual key provisioning and verification are available.",
+  "production_baseline_sha": "a207e387c9db42409e8a450c0e6caa1a427cbdf8",
+  "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+  "allowed_paths": [
+    ".release-authorizations/gpoint-openrouter-native-20261126-001.json",
+    ".github/workflows/gpoint-release.yml",
+    "scripts/eros-production-secrets.py",
+    "services/eros-engine/eros-production-model-config.toml",
+    "services/eros-engine/README.md",
+    "tests/test_eros_secret_provision.py",
+    "tests/test_eros_native_database_workflow.py"
+  ],
+  "allowed_operations": [
+    "integrate",
+    "preflight",
+    "provision_openrouter_secret",
+    "deploy",
+    "verify",
+    "publish_evidence"
+  ],
+  "acceptance_criteria": [
+    "Existing Eros tasks and prompts remain unchanged except model routing and upstream reasoning body rules.",
+    "No database reset or migration, no new service, no Ollama start.",
+    "OpenRouter key is confined to Eros, both primary models pass live smoke; all existing release gates pass.",
+    "Existing Voyage embeddings and history preserved."
+  ],
+  "exclusions": [
+    "No secret disclosure, no billing changes, no memory deletion, no new workflow or services, no changes to unrelated apps, no disabling safety gates."
+  ],
+  "risk_contracts": {
+    "release_infrastructure": {
+      "allowed_paths": [
+        ".release-authorizations/gpoint-openrouter-native-20261126-001.json",
+        ".github/workflows/gpoint-release.yml",
+        "scripts/eros-production-secrets.py",
+        "services/eros-engine/eros-production-model-config.toml",
+        "services/eros-engine/README.md",
+        "tests/test_eros_secret_provision.py",
+        "tests/test_eros_native_database_workflow.py"
+      ],
+      "allowed_operations": [
+        "integrate",
+        "preflight",
+        "verify",
+        "deploy"
+      ],
+      "baseline_sha": "a207e387c9db42409e8a450c0e6caa1a427cbdf8",
+      "risk_description": "Switch only stock Eros language-model routing to OpenRouter. User explicitly requested implementation and deployment after creating and funding the account. No database mutation, new services or release architecture changes.",
+      "required_gates": [
+        "exact live baseline and current main",
+        "provider credential installed through authorized secret-management path; synthetic primary model API checks pass before Apply",
+        "existing Eros E2E and encrypted database backup/restore, unchanged Voyage config, no cleanup, stock Kamal and runtime verification",
+        "verify inference, fallback availability and spend before declaring completion"
+      ],
+      "backup_plan": "Existing Eros protected backup/restore; retain existing DeepSeek configuration in Git and owner-managed credential for recovery; no secret in artifacts.",
+      "rollback_plan": "If provider or verification fails, stop and reconcile. Revert configuration via canonical protected release to last known direct DeepSeek + native Voyage. Never restore production DB or clear memory; old retained containers without OpenRouter key are not compatible with new provider config.",
+      "stop_conditions": [
+        "credential access or verification blocked",
+        "model unavailable or insufficient balance",
+        "live baseline drift",
+        "unexpected database migration or memory cleanup",
+        "provider key exposure",
+        "failed runtime verification"
+      ]
+    },
+    "secrets": {
+      "allowed_paths": [
+        ".release-authorizations/gpoint-openrouter-native-20261126-001.json",
+        ".github/workflows/gpoint-release.yml",
+        "scripts/eros-production-secrets.py",
+        "services/eros-engine/eros-production-model-config.toml",
+        "services/eros-engine/README.md",
+        "tests/test_eros_secret_provision.py",
+        "tests/test_eros_native_database_workflow.py"
+      ],
+      "risk_description": "Existing owner-created OpenRouter credential only; root-owned 0600, never printed or put into Git/CI logs.",
+      "backup_plan": "No secret in backup artifacts; retain owner-managed recovery credentials.",
+      "rollback_plan": "Keep prior direct DeepSeek credential; revert routing only via canonical release.",
+      "stop_conditions": [
+        "blocked credential handling",
+        "unsafe permissions",
+        "missing or invalid key",
+        "credential exposure"
+      ]
+    }
+  },
+  "preauthorized_commits": [],
+  "preauthorized_paths": [],
+  "state": "ACTIVE",
+  "revoked": false,
+  "consumed": false,
+  "owner_task_commitment_sha256": "84a97bb0e2a273451a2de9b3fa6b65390a75749257c6bf126ac62192764ec6ec"
+}
