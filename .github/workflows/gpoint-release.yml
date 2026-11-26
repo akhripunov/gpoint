@@ -635,6 +635,9 @@ jobs:
             BatchMode yes
             StrictHostKeyChecking yes
             UserKnownHostsFile $HOME/.ssh/known_hosts
+            ConnectTimeout 10
+            ServerAliveInterval 15
+            ServerAliveCountMax 3
           EOF
           chmod 600 "$HOME/.ssh/config"
           {
@@ -647,6 +650,7 @@ jobs:
           python-version: '3.12'
           cache: pip
       - name: Pull and verify pinned Kamal CLI image
+        timeout-minutes: 5
         env:
           KAMAL_IMAGE: ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625
         run: |
@@ -978,6 +982,7 @@ jobs:
               print(output + "=" + digest)
           PY
       - name: Verify immutable candidate images selected for the live scope
+        timeout-minutes: 6
         if: inputs.mode != 'rollback'
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1350,7 +1355,7 @@ jobs:
           REMOTE_WORLD_STAGE
             writer_stage_created=true
             tar -cf - scripts/eros-world-writer.py scripts/eros-native-database.py scripts/eros-production-secrets.py services/eros-engine/world-enrollment/writer-acl.sql \
-              | ssh -T "root@${GPOINT_PRODUCTION_HOST}" "tar --no-same-owner -xf -C '$writer_stage'"
+              | ssh -T "root@${GPOINT_PRODUCTION_HOST}" "tar --no-same-owner -xf - -C '$writer_stage'"
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" env DOCKER_CONFIG="$remote_docker_config" docker pull --platform linux/amd64 "$app_image"
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" env DOCKER_CONFIG="$remote_docker_config" \
               python3 "$writer_stage/scripts/eros-world-writer.py" --candidate "$CANDIDATE_SHA" \
@@ -1550,13 +1555,13 @@ jobs:
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 "$verify_remote" "$model_digest"
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" rm -f -- "$verify_remote"
           fi
-          curl --retry 12 --retry-connrefused --retry-delay 5 --fail --silent --show-error https://gpoint.one/api/health/live | grep -F '"status":"ok"' >/dev/null
+          curl --connect-timeout 5 --max-time 15 --retry-max-time 90 --retry 12 --retry-connrefused --retry-delay 5 --fail --silent --show-error https://gpoint.one/api/health/live | grep -F '"status":"ok"' >/dev/null
           for path in / /creators; do
-            curl --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" \
+            curl --connect-timeout 5 --max-time 15 --retry-max-time 45 --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" \
               | grep -F '<title>GPoint</title>' >/dev/null
           done
           media_body="$RUNNER_TEMP/gpoint-media-route-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
-          media_status="$(curl --retry 6 --retry-connrefused --retry-delay 2 --silent --show-error \
+          media_status="$(curl --connect-timeout 5 --max-time 15 --retry-max-time 45 --retry 6 --retry-connrefused --retry-delay 2 --silent --show-error \
             --output "$media_body" --write-out '%{http_code}' \
             https://gpoint.one/media/assets/kamal-route-verification-missing)"
           test "$media_status" = 404
@@ -1704,7 +1709,7 @@ jobs:
           docker exec "gpoint-miniapp-web-$miniapp_version" wget --spider --quiet http://127.0.0.1/
           if grep -q '^gpoint-eros-pilot-engine|' <<< "$runtime_rows"; then
             eros_version="$(sed -n 's/^gpoint-eros-pilot-engine|\([^|]*\).*/\1/p' <<< "$runtime_rows")"
-            docker exec "gpoint-eros-pilot-engine-$eros_version" curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null
+            docker exec "gpoint-eros-pilot-engine-$eros_version" curl --connect-timeout 2 --max-time 10 --fail --silent http://127.0.0.1:8080/healthz >/dev/null
             docker exec "gpoint-eros-pilot-engine-$eros_version" grep -F 'embeddings = "http://gpoint-core-api:3000/eros-worker/v1/embeddings"' /etc/eros-engine/model_config.toml >/dev/null
             docker exec "gpoint-eros-pilot-engine-$eros_version" grep -Fx 'model = "deepseek-flash@deepseek"' /etc/eros-engine/model_config.toml >/dev/null
             docker exec "gpoint-eros-pilot-engine-$eros_version" grep -Fx 'chat = "https://api.deepseek.com/chat/completions"' /etc/eros-engine/model_config.toml >/dev/null
