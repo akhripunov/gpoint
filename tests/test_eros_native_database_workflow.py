@@ -415,3 +415,28 @@ def test_stock_eros_text_task_parity():
     assert tasks["world_comment"]["round_secs"] == 3600
     assert tuple(tasks["world_reply"][k] for k in
                  ("debounce_secs", "thread_cooldown_secs", "daily_cap", "reply_window_secs")) == (90, 600, 20, 604800)
+
+
+def test_gpoint_world_enrollment_isolated_hosted_postgres():
+    # Existing Python hosted CI service only. Never accept a user-provided DSN.
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        import pytest
+        pytest.skip("isolated GitHub-hosted PostgreSQL fixture only")
+    import shutil
+    assert shutil.which("psql") and shutil.which("createdb") and shutil.which("dropdb")
+    env = dict(os.environ, PGPASSWORD="gpoint_dev_only")
+    for key in ("PGSERVICE", "PGSERVICEFILE", "PGOPTIONS", "PGDATABASE", "PGHOST", "PGHOSTADDR", "PGPORT", "PGUSER"):
+        env.pop(key, None)
+    conn = ["-h", "127.0.0.1", "-p", "5432", "-U", "gpoint"]
+    database = "gpoint_world_enrollment_test"
+    fixture = ROOT / "services/eros-engine/world-enrollment/fixture.sql"
+    subprocess.run(["createdb", *conn, database], env=env, check=True, timeout=20)
+    try:
+        result = subprocess.run(["psql", "-X", *conn, "-d", database,
+            "-v", "ON_ERROR_STOP=1", "-f", str(fixture)],
+            env=env, capture_output=True, text=True, timeout=60, check=True)
+        assert "GPOINT_WORLD_ENROLLMENT_FIXTURE=PASS" in result.stdout
+    finally:
+        subprocess.run(["dropdb", *conn, database], env=env, check=True, timeout=20)
+        subprocess.run(["psql", "-X", *conn, "-d", "gpoint", "-v", "ON_ERROR_STOP=1",
+            "-c", "DROP ROLE IF EXISTS eros_runtime"], env=env, check=True, timeout=20)
