@@ -1555,13 +1555,13 @@ jobs:
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 "$verify_remote" "$model_digest"
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" rm -f -- "$verify_remote"
           fi
-          curl --connect-timeout 5 --max-time 15 --retry-max-time 90 --retry 12 --retry-connrefused --retry-delay 5 --fail --silent --show-error https://gpoint.one/api/health/live | grep -F '"status":"ok"' >/dev/null
+          curl --retry 12 --retry-connrefused --retry-delay 5 --connect-timeout 5 --max-time 15 --retry-max-time 90 --fail --silent --show-error https://gpoint.one/api/health/live | grep -F '"status":"ok"' >/dev/null
           for path in / /creators; do
-            curl --connect-timeout 5 --max-time 15 --retry-max-time 45 --retry 6 --retry-connrefused --retry-delay 2 --fail --silent --show-error "https://gpoint.one$path" \
+            curl --retry 6 --retry-connrefused --retry-delay 2 --connect-timeout 5 --max-time 15 --retry-max-time 45 --fail --silent --show-error "https://gpoint.one$path" \
               | grep -F '<title>GPoint</title>' >/dev/null
           done
           media_body="$RUNNER_TEMP/gpoint-media-route-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
-          media_status="$(curl --connect-timeout 5 --max-time 15 --retry-max-time 45 --retry 6 --retry-connrefused --retry-delay 2 --silent --show-error \
+          media_status="$(curl --retry 6 --retry-connrefused --retry-delay 2 --connect-timeout 5 --max-time 15 --retry-max-time 45 --silent --show-error \
             --output "$media_body" --write-out '%{http_code}' \
             https://gpoint.one/media/assets/kamal-route-verification-missing)"
           test "$media_status" = 404
