@@ -249,7 +249,7 @@ def test_kamal_roles_share_the_private_eros_network_with_stable_service_aliases(
     assert model.count("http://gpoint-core-api:3000/eros-worker/v1/") == 1
     assert "https://api.deepseek.com/chat/completions" in model
     assert "gpoint-codex@gpoint" not in model
-    assert model.count("deepseek-flash@deepseek") == 4
+    assert model.count("deepseek-flash@deepseek") == 6
 
 
 def test_hosted_stock_eros_e2e_uses_exact_build_digest_and_approved_local_alias():
@@ -321,10 +321,11 @@ def test_deepseek_runtime_verification_and_rollback_provider_guard():
     assert 'Eros rollback target lacks compatible provider networking' in retained
 
 
-def test_deepseek_chat_disables_thinking_only_for_companion():
+def test_deepseek_disables_thinking_for_companion_and_character_insights():
     config = tomllib.loads((ROOT / "services/eros-engine/eros-production-model-config.toml").read_text())
     assert config["providers"]["deepseek"]["body"] == [
-        {"tasks": ["chat_companion"], "params": {"thinking": {"type": "disabled"}}}
+        {"tasks": ["chat_companion", "character_insight_extraction", "character_insight_structuring"],
+         "params": {"thinking": {"type": "disabled"}}}
     ]
     assert config["tasks"]["chat_companion"]["model"] == "deepseek-flash@deepseek"
     assert config["tasks"]["chat_companion"]["retry_depth"] == 0
@@ -336,4 +337,19 @@ def test_deepseek_chat_disables_thinking_only_for_companion():
         "frequency_penalty": 0.4,
         "presence_penalty": 0.2,
         "max_tokens": 1600,
+    }
+
+def test_native_character_insights_have_bounded_direct_deepseek_tasks():
+    config = tomllib.loads((ROOT / "services/eros-engine/eros-production-model-config.toml").read_text())
+    extraction = dict(config["tasks"]["character_insight_extraction"])
+    prompt = extraction.pop("filter_prompt")
+    assert extraction == {
+        "model": "deepseek-flash@deepseek", "fallback": [], "retry_depth": 0,
+        "temperature": 0.2, "max_tokens": 800,
+    }
+    assert '"facts"' in prompt and '"details"' in prompt
+    assert "current_situation" in prompt and "location" in prompt
+    assert config["tasks"]["character_insight_structuring"] == {
+        "model": "deepseek-flash@deepseek", "fallback": [], "retry_depth": 0,
+        "temperature": 0.2, "max_tokens": 600,
     }
