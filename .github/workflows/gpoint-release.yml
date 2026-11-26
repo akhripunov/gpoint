@@ -1443,7 +1443,7 @@ jobs:
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$@" \
               < "$GITHUB_WORKSPACE/scripts/verify-kamal-role.sh"
           }
-          if [[ "$DEPLOY_CORE" == true && ( "$EROS_INSTALLED" == true || "$DEPLOY_EROS" == true ) ]]; then
+          if [[ "$DEPLOY_CORE" == true && "$EROS_INSTALLED" == true ]] || [[ "$DEPLOY_CORE" == true && "$DEPLOY_EROS" == true ]]; then
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - --mode verify-world-writer \
               --candidate "$GPOINT_COMMIT_SHA" --image "ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST" \
               --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" < scripts/eros-native-database.py
@@ -1459,6 +1459,7 @@ jobs:
           assert len(urls) == 1 and re.fullmatch(r'EROS_WORLD_ENROLLMENT_DATABASE_URL=postgresql://eros_world_writer:[A-Za-z0-9_-]{64}@gpoint-eros-db:5432/eros', urls[0])
           print('EROS_WORLD_WRITER_ENV=PASS')
           REMOTE_WORLD_ENV
+          fi
           if [[ "$DEPLOY_EROS" == true ]]; then
             GPOINT_KAMAL_EXPECTED_DIGEST="$EROS_DIGEST" GPOINT_KAMAL_SERVICE=gpoint-eros-pilot KAMAL_ROLES=engine \
               kamal redeploy --skip-push --version "$IMAGE_VERSION" --roles engine --config-file config/deploy.eros.yml
