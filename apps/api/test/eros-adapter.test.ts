@@ -3,6 +3,7 @@ import { GPOINT_EROS_RESPONSE_PROMPT_TRAITS } from '../src/eros-response-prompt.
 import test from 'node:test';
 import { jwtVerify } from 'jose';
 import { verifyBridgeIdentity } from '../src/eros-worker-contract.js';
+import { createErosWorldEnrollment, worldEnrollmentConnection } from '../src/eros-world-enrollment.js';
 import { createErosEngineClient, decodeErosCursor, encodeErosCursor, ErosAdapterError, ErosEngineClient, erosGenomeCardFor, erosGenomeIdentityFor, erosIdentityFor, erosTestCreatorIds, isErosChatAllowed, isSyntheticErosPair, markErosAssistantMessagesRead, erosInboxLastMessageSummary, prepareErosRelationship, recordErosAssistantMessage, resolveErosRelationshipInstanceId, syncErosAssistantMessageStates, unreadErosAssistantCounts, uuidV5 } from '../src/eros-adapter.js';
 
 test('Creator genomes use a stable identity namespace and a non-invented stock card', () => {
@@ -632,4 +633,58 @@ test('Eros chat cursors preserve stock opaque message IDs and reject malformed v
   for (const value of ['50', 'eros-offset:50', 'eros-before:', 'eros-before:bad%2Fid', 'other:50']) {
     assert.throws(() => decodeErosCursor(value), (error: unknown) => error instanceof ErosAdapterError && error.code === 'eros_cursor_invalid');
   }
+});
+
+test('world enrollment requires the narrow private writer connection, not Core or runtime credentials', () => {
+  assert.equal(createErosWorldEnrollment({}), undefined);
+  assert.throws(() => createErosWorldEnrollment({ EROS_WORLD_ENROLLMENT_REQUIRED: 'true' }), /eros_world_database_missing/);
+  assert.equal(new URL(worldEnrollmentConnection('postgresql://eros_world_writer:test@gpoint-eros-db:5432/eros')).searchParams.get('connection_limit'), '2');
+  for (const dsn of [
+    'postgresql://eros_runtime:test@gpoint-eros-db:5432/eros',
+    'postgresql://eros_world_writer:test@evil.example:5432/eros',
+    'postgresql://eros_world_writer:test@gpoint-eros-db:5432/gpoint',
+    'postgresql://eros_world_writer:test@gpoint-eros-db:5432/eros?host=evil.example',
+  ]) assert.throws(() => worldEnrollmentConnection(dsn), /eros_world_database_invalid/);
+});
+
+test('world enrollment runs before a validated message and never on session start or rejected input', async () => {
+  const owner = '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc0';
+  const session = '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc1';
+  const instance = '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc2';
+  const message = '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc3';
+  const events: string[] = [];
+  let failEnrollment = false;
+  const client = new ErosEngineClient({
+    baseUrl: 'http://eros:8080',
+    jwtSecret: 'unit-test-eros-jwt-secret-at-least-32-bytes',
+    workerSigningSecret: 'unit-test-worker-signing-secret-at-least-32-bytes',
+    workerTenantId: '7f43ff08-7bf9-5647-9dc2-bb4a46f8edc5',
+    worldEnrollment: async (...ids) => {
+      assert.deepEqual(ids, [owner, session, instance]);
+      events.push('enroll');
+      if (failEnrollment) throw new Error('private database error');
+    },
+    fetchImpl: async input => {
+      if (String(input).endsWith('/comp/chat/start')) {
+        events.push('start');
+        return Response.json({ session_id: session, instance_id: instance });
+      }
+      events.push('send');
+      return new Response([
+        'data: '+JSON.stringify({ type: 'meta', message_id: message, action_type: 'reply' }),
+        'data: '+JSON.stringify({ type: 'delta', content: 'Hello!' }),
+        'data: '+JSON.stringify({ type: 'done', ghost_fallback: false }),
+        'data: '+JSON.stringify({ type: 'final' }),
+      ].join('\n\n')+'\n\n');
+    },
+  });
+  await client.startSession(owner, instance);
+  assert.deepEqual(events, ['start']);
+  await assert.rejects(client.sendMessage(owner, session, message, '', {creatorId: instance, instanceId: instance}));
+  assert.deepEqual(events, ['start']);
+  await client.sendMessage(owner, session, message, 'Hello', {creatorId: instance, instanceId: instance});
+  assert.deepEqual(events, ['start','enroll','send']);
+  failEnrollment = true;
+  await assert.rejects(client.sendMessage(owner, session, message, 'Hello', {creatorId: instance, instanceId: instance}), /eros_world_enrollment_failed/);
+  assert.deepEqual(events, ['start','enroll','send','enroll']);
 });

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { SignJWT } from 'jose';
 import { GPOINT_EROS_RESPONSE_PROMPT_TRAITS } from './eros-response-prompt.js';
 import { signBridgeIdentity } from './eros-worker-contract.js';
+import { createErosWorldEnrollment, type ErosWorldEnrollment } from './eros-world-enrollment.js';
 
 const USER_NAMESPACE = 'b92c2772-7534-5a7c-8eed-ec08e0a9c45b';
 const CREATOR_NAMESPACE = 'c9568a43-7e99-58a2-a41e-50e031eac7bc';
@@ -197,6 +198,7 @@ interface ErosClientOptions {
   workerSigningSecret?: string;
   workerTenantId?: string;
   genomeWriteSecret?: string;
+  worldEnrollment?: ErosWorldEnrollment;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
 }
@@ -390,6 +392,7 @@ export class ErosEngineClient {
   private readonly workerSecret?: Uint8Array;
   private readonly workerTenantId?: string;
   private readonly genomeWriteSecret?: string;
+  private readonly worldEnrollment?: ErosWorldEnrollment;
 
   constructor(options: ErosClientOptions) {
     const url = new URL(options.baseUrl);
@@ -399,6 +402,7 @@ export class ErosEngineClient {
     }
     this.baseUrl = url.toString().replace(/\/$/, '');
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.worldEnrollment = options.worldEnrollment;
     this.timeoutMs = Math.max(1_000, Math.min(options.timeoutMs ?? 15_000, MAX_EROS_REQUEST_TIMEOUT_MS));
     this.secret = new TextEncoder().encode(options.jwtSecret);
     if (this.secret.byteLength < 32) throw new Error('eros_jwt_secret_too_short');
@@ -550,6 +554,15 @@ export class ErosEngineClient {
       instanceId: identity.instanceId,
       requestId: clientMessageId,
     }, this.workerSecret);
+    // Only validated send operations enroll worlds, never history/start/read calls.
+    if (this.worldEnrollment) {
+      try {
+        await this.worldEnrollment(userId, sessionId, identity.instanceId);
+      } catch {
+        // Do not expose connection strings, SQL or private world data.
+        throw new ErosAdapterError('eros_world_enrollment_failed');
+      }
+    }
     const response = await this.request(`/comp/chat/${encodeURIComponent(sessionId)}/message/stream`, userId,
       {
         // Memory scope belongs to Eros; the GPoint adapter leaves it at the engine default.
@@ -690,6 +703,7 @@ export function createErosEngineClient(env: NodeJS.ProcessEnv = process.env, fet
     workerSigningSecret: env.EROS_WORKER_SIGNING_SECRET,
     workerTenantId: env.EROS_WORKER_TENANT_ID,
     genomeWriteSecret: env.EROS_GENOME_WRITE_SECRET,
+    worldEnrollment: createErosWorldEnrollment(env),
     timeoutMs,
     fetchImpl,
   });
