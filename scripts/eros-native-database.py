@@ -301,8 +301,11 @@ def _database_facts(expected_identity: str, database: str = "eros") -> dict:
 def _schema_fingerprint(database: str) -> str:
     if database != "eros" and not DB_NAME.fullmatch(database):
         raise ValueError("database name is outside the Eros lifecycle scope")
+    # The plain dump is hashed, never executed or restored. PostgreSQL's
+    # random psql restrict key would otherwise make identical schemas differ.
     result = _run(["docker", "exec", "-i", CONTAINER, "sh", "-ec",
-                   'exec pg_dump --schema-only --no-owner --no-privileges -U "$POSTGRES_USER" -d "$1"',
+                   'exec pg_dump --schema-only --no-owner --no-privileges '
+                   '--restrict-key=GpointSchemaFingerprint -U "$POSTGRES_USER" -d "$1"',
                    "eros-native-schema", database], timeout=180)
     return hashlib.sha256(result.stdout.encode("utf-8")).hexdigest()
 

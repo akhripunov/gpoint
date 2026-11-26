@@ -25,6 +25,25 @@ def steps_for(job):
     return WORKFLOW["jobs"][job]["steps"]
 
 
+def test_schema_fingerprint_uses_stable_pg_dump_restrict_key_without_ignoring_ddl(monkeypatch):
+    calls = []
+    ddl = ["CREATE TABLE engine.example (id bigint);\n"]
+
+    def dump(argv, **kwargs):
+        calls.append(argv)
+        # PostgreSQL 16.15 emits a random restrict guard by default.
+        command = argv[argv.index("-ec") + 1]
+        key = "GpointSchemaFingerprint" if "--restrict-key=GpointSchemaFingerprint" in command else str(len(calls))
+        return subprocess.CompletedProcess(argv, 0, "\\restrict " + key + "\n" + ddl[0] + "\\unrestrict " + key + "\n")
+
+    monkeypatch.setattr(DB, "_run", dump)
+    original = DB._schema_fingerprint("eros")
+    assert original == DB._schema_fingerprint("eros_check_123_1")
+    ddl[0] = "CREATE TABLE engine.example (id text);\n"
+    assert original != DB._schema_fingerprint("eros")
+    assert all("--schema-only --no-owner --no-privileges" in argv[argv.index("-ec") + 1] for argv in calls)
+
+
 def test_native_deploy_provisions_only_bootstrap_and_rehearses_exact_eros_sqlx_transition():
     deploy = steps_for("deploy")
     names = [step.get("name", "") for step in deploy]
