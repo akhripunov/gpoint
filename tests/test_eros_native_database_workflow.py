@@ -1,4 +1,5 @@
 from pathlib import Path
+import importlib.util
 import os
 import subprocess
 import sys
@@ -13,6 +14,9 @@ WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_t
 TRIGGERS = WORKFLOW.get("on", WORKFLOW.get(True, {}))
 ROLLBACK_WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/gpoint-release.yml").read_text())
 ROLLBACK_TRIGGERS = ROLLBACK_WORKFLOW.get("on", ROLLBACK_WORKFLOW.get(True, {}))
+DB_SPEC = importlib.util.spec_from_file_location("eros_native_database", ROOT / "scripts/eros-native-database.py")
+DB = importlib.util.module_from_spec(DB_SPEC)
+DB_SPEC.loader.exec_module(DB)
 
 
 def steps_for(job):
@@ -43,7 +47,7 @@ def test_eros_digest_is_available_to_kamal_apply_and_runtime_verify():
     assert verify["env"]["EROS_DIGEST"] == "${{ steps.component_plan.outputs.eros_digest }}"
 
 
-def test_ollama_network_and_eros_engine_start_before_core_api_uses_eros_config():
+def test_native_voyage_deploy_has_no_active_ollama_consumer():
     deploy = steps_for("deploy")
     kamal = next(step for step in deploy if step.get("name") == "Deploy exact immutable images with stock Kamal")
     body = kamal["run"]
@@ -56,10 +60,13 @@ def test_ollama_network_and_eros_engine_start_before_core_api_uses_eros_config()
     helper = (ROOT / "scripts/verify-layer7-ollama.py").read_text()
     assert 'LEGACY_CONTAINER = "gpoint-eros-relay-ollama"' in helper
     assert '"docker", "rename", LEGACY_CONTAINER, CONTAINER' in helper
-    assert "accessory boot ollama --config-file config/deploy.ollama.yml" in body
-    assert "accessory reboot ollama" not in body
+    assert "accessory boot ollama --config-file config/deploy.ollama.yml" not in body
+    assert "verify-layer7-ollama.py" not in body
     assert 'NETWORK = "gpoint_ollama_internal"' in helper
     assert "core_api_config=config/deploy.eros-api.yml" in body
+    assert "gpoint_ollama_internal" not in yaml.safe_load((ROOT / "config/deploy.eros-api.yml").read_text())["servers"]["api"]["options"]["network"]
+    hook = (ROOT / ".kamal/hooks/post-app-boot").read_text()
+    assert "gpoint-core:api) networks='kamal:gpoint-core-api,gpoint_app:api,shared_internal:'" in hook
 
 
 def test_runtime_verify_uses_executable_eros_label_helper_and_ci_exercises_docker_templates():
@@ -124,20 +131,187 @@ def test_ollama_is_a_pinned_persistent_private_kamal_accessory():
     assert ollama["options"]["memory-swap"] == "3g"
 
 
-def test_native_eros_deploy_uses_stock_kamal_accessory_and_verifies_direct_route():
+def test_native_eros_deploy_uses_stock_kamal_without_qwen_accessory():
     deploy = steps_for("deploy")
     kamal = next(step for step in deploy if step.get("name") == "Deploy exact immutable images with stock Kamal")
     body = kamal["run"]
     eros = body.index('if [[ "$DEPLOY_EROS" == true ]]; then')
-    accessory = body.index("kamal accessory boot ollama --config-file config/deploy.ollama.yml")
-    model_pull = body.index("kamal accessory exec ollama ollama pull qwen3-embedding:0.6b", accessory)
     engine = body.index("kamal redeploy --skip-push --version \"$IMAGE_VERSION\" --roles engine", eros)
-    assert accessory < model_pull < engine
+    assert engine > eros
     assert "config/deploy.eros-relay.yml" not in body
     assert "restore_legacy_ollama" not in body
-    assert "verify-layer7-ollama.py" in body
-    assert "--prepare" in body
-    assert "--verify-and-detach" in body
+    assert "qwen3-embedding" not in body
+    assert "verify-layer7-ollama.py" not in body
+
+
+def test_production_embedding_config_uses_native_voyage_4_lite():
+    model = tomllib.loads((ROOT / "services/eros-engine/eros-production-model-config.toml").read_text())
+    assert model["tasks"]["embedding"]["model"] == "voyage-4-lite"
+    assert "gpoint_embeddings" not in model.get("providers", {})
+
+
+def test_memory_reset_occurs_after_restore_while_eros_is_stopped_and_before_apply():
+    deploy = steps_for("deploy")
+    names = [step.get("name", "") for step in deploy]
+    freeze = names.index("Freeze Eros memory access for Voyage cutover")
+    lifecycle = next(i for i, step in enumerate(deploy) if step.get("id") == "eros_database")
+    kamal = names.index("Deploy exact immutable images with stock Kamal")
+    verify = next(i for i, step in enumerate(deploy) if step.get("id") == "verify")
+    body = deploy[lifecycle]["run"]
+    assert freeze < lifecycle < kamal < verify
+    assert body.index("--mode prepare") < body.index("--mode validate-test-memory-reset")
+    assert body.index("--mode validate-test-memory-reset") < body.index("--mode reset-test-memory")
+    assert body.index("--mode reset-test-memory") < body.index("--mode apply")
+    assert "EROS_TEST_MEMORY_RESET=PASS" in (ROOT / "scripts/eros-native-database.py").read_text()
+    assert "GITHUB_RUN_ID" in body and "GITHUB_RUN_ATTEMPT" in body
+
+
+def test_native_config_and_runtime_env_change_only_after_backup_restore_and_cleanup():
+    deploy = steps_for("deploy")
+    gate = next(step for step in deploy if step.get("id") == "eros_database")
+    body = gate["run"]
+    assert body.index("--verify-voyage-api") < body.index("--mode prepare")
+    assert body.index("--mode prepare") < body.index("--mode validate-test-memory-reset")
+    assert body.index("--mode validate-test-memory-reset") < body.index("--mode reset-test-memory")
+    assert body.index("--mode reset-test-memory") < body.index("EROS_MODEL_CONFIG=READY")
+    assert body.index("EROS_MODEL_CONFIG=READY") < body.index("--write-native-engine-env")
+    assert body.index("--write-native-engine-env") < body.index("--mode apply")
+
+
+def test_repeat_preflight_accepts_only_receipt_consistent_cleared_backup():
+    baseline = {
+        "schemaSha256": "c" * 64,
+        "tableCounts": {"engine.companion_memories": 476, "engine.relationship_journal": 11,
+                        "engine.persona_instances": 3},
+        "targets": {
+            "engine.companion_memories": {"rows": 476, "vectors": 476, "dimension512": 476,
+                                           "inboundFks": 0, "deleteTriggers": 0},
+            "engine.relationship_journal": {"rows": 11, "vectors": 11, "dimension512": 11,
+                                             "inboundFks": 0, "deleteTriggers": 0},
+        },
+    }
+    cleared = {
+        "schemaSha256": "c" * 64,
+        "tableCounts": {"engine.companion_memories": 0, "engine.relationship_journal": 0,
+                        "engine.persona_instances": 3},
+        "targets": {
+            "engine.companion_memories": {"rows": 0, "vectors": 0, "dimension512": 0,
+                                           "inboundFks": 0, "deleteTriggers": 0},
+            "engine.relationship_journal": {"rows": 0, "vectors": 0, "dimension512": 0,
+                                             "inboundFks": 0, "deleteTriggers": 0},
+        },
+    }
+    assert DB._memory_reset_is_cleared(cleared, baseline, {"state": "COMPLETE"}) is True
+    assert DB._memory_reset_is_cleared(cleared, baseline, {"state": "PENDING"}) is True
+    assert DB._memory_reset_is_cleared(baseline, baseline, {"state": "PENDING"}) is False
+
+
+def test_eros_memory_reset_is_idempotent_for_same_authorized_release():
+    helper = (ROOT / "scripts/eros-native-database.py").read_text()
+    assert "testMemoryResetReceipt" in helper
+    assert "EROS_TEST_MEMORY_RESET=SKIP_ALREADY_CLEARED" in helper
+    workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
+    assert "--mode reset-test-memory" in workflow
+    assert "GITHUB_RUN_ID" in workflow
+    assert "GITHUB_RUN_ATTEMPT" in workflow
+
+
+def test_memory_reset_repeat_with_complete_receipt_never_deletes_again(capsys):
+    from unittest.mock import patch
+
+    candidate = "a" * 40
+    image = "ghcr.io/akhripunov/gpoint-eros@sha256:" + "b" * 64
+    run_id = "123456-2"
+    inventory = {
+        "schemaSha256": "c" * 64,
+        "tableCounts": {"engine.companion_memories": 0, "engine.relationship_journal": 0,
+                        "engine.persona_instances": 3},
+        "targets": {
+            "engine.companion_memories": {"rows": 0, "vectors": 0, "dimension512": 0,
+                                           "inboundFks": 0, "deleteTriggers": 0},
+            "engine.relationship_journal": {"rows": 0, "vectors": 0, "dimension512": 0,
+                                              "inboundFks": 0, "deleteTriggers": 0},
+        },
+    }
+    receipt = {"schema": "gpoint-eros-test-memory-reset/v1", "candidateSha": candidate,
+               "image": image, "state": "COMPLETE", "backupPath": "/opt/gpoint/backups/eros/old.age",
+               "backupSha256": "d" * 64, "baselineInventory": inventory}
+    plan = {"testMemoryResetReceipt": receipt, "testMemoryResetValidatedAt": "verified"}
+    with patch.object(DB, "_read_env", return_value={"EROS_DATABASE_IDENTITY": "opaque"}), \
+            patch.object(DB, "_load_plan", return_value=plan), \
+            patch.object(DB, "_validate_reset_plan", return_value=inventory), \
+            patch.object(DB, "_load_memory_reset_receipt", return_value=receipt), \
+            patch.object(DB, "_memory_inventory", return_value=inventory), \
+            patch.object(DB, "_validate_test_memory_inventory", return_value=True), \
+            patch.object(DB, "_clear_test_memory_rows") as delete:
+        DB.lifecycle("reset-test-memory", candidate, image, run_id, test_memory_reset=True)
+    delete.assert_not_called()
+    assert "EROS_TEST_MEMORY_RESET=SKIP_ALREADY_CLEARED" in capsys.readouterr().out
+
+
+def test_ollama_is_stopped_only_after_native_memory_write_and_recall_verification():
+    deploy = steps_for("deploy")
+    names = [step.get("name", "") for step in deploy]
+    memory_verify = names.index("Verify native Voyage memory write and recall")
+    stop = names.index("Stop unused Ollama after Voyage verification")
+    runtime_verify = next(i for i, step in enumerate(deploy) if step.get("id") == "verify")
+    assert memory_verify < stop < runtime_verify
+    assert "docker stop" in deploy[stop]["run"]
+    assert "docker rm" not in deploy[stop]["run"]
+    assert "ollama-layer7-models" in deploy[stop]["run"]
+
+
+def test_voyage_secret_is_routed_only_to_eros_and_verified_from_vps():
+    writer = (ROOT / "scripts/eros-production-secrets.py").read_text()
+    config = yaml.safe_load((ROOT / "config/deploy.eros.yml").read_text())
+    api_config = yaml.safe_load((ROOT / "config/deploy.eros-api.yml").read_text())
+    assert "/opt/gpoint/env/voyage.env" in writer
+    assert "VOYAGE_API_KEY" in writer
+    assert "VOYAGE_API_KEY" not in str(api_config)
+    assert "/opt/gpoint/env/eros-engine.env" in str(config)
+    deploy = steps_for("deploy")
+    probe = next(step for step in deploy if step.get("id") == "eros_database")
+    assert "--verify-voyage-api" in probe["run"]
+    assert "VOYAGE_{kind.upper()}=PASS" in writer and "--verify-voyage-api" in writer
+
+
+def test_memory_reset_validator_rejects_non_target_drift_and_unknown_relationships():
+    baseline = {
+        "schemaSha256": "a" * 64,
+        "tableCounts": {"engine.companion_memories": 476, "engine.relationship_journal": 11,
+                        "engine.persona_instances": 3, "engine.chat_sessions": 7},
+        "targets": {
+            "engine.companion_memories": {"rows": 476, "vectors": 476, "dimension512": 476,
+                                           "inboundFks": 0, "deleteTriggers": 0},
+            "engine.relationship_journal": {"rows": 11, "vectors": 11, "dimension512": 11,
+                                              "inboundFks": 0, "deleteTriggers": 0},
+        },
+    }
+    assert DB._validate_test_memory_inventory(baseline, baseline) is True
+    changed = __import__("copy").deepcopy(baseline)
+    changed["tableCounts"]["engine.persona_instances"] += 1
+    try:
+        DB._validate_test_memory_inventory(changed, baseline)
+    except RuntimeError as error:
+        assert "non-target Eros rows changed" in str(error)
+    else:
+        raise AssertionError("non-target rows must block memory cleanup")
+    changed = __import__("copy").deepcopy(baseline)
+    changed["targets"]["engine.relationship_journal"]["inboundFks"] = 1
+    try:
+        DB._validate_test_memory_inventory(changed, baseline)
+    except RuntimeError as error:
+        assert "references or triggers" in str(error)
+    else:
+        raise AssertionError("unknown inbound references must block memory cleanup")
+    changed = __import__("copy").deepcopy(baseline)
+    changed["targets"]["engine.companion_memories"]["dimension512"] = 475
+    try:
+        DB._validate_test_memory_inventory(changed, baseline)
+    except RuntimeError as error:
+        assert "approved vector inventory" in str(error)
+    else:
+        raise AssertionError("non-512 or non-vector rows must block cleanup")
 
 
 def test_component_deploys_use_stock_kamal_redeploy_without_automatic_prune():
@@ -149,21 +323,24 @@ def test_component_deploys_use_stock_kamal_redeploy_without_automatic_prune():
 
 
 def test_runtime_verify_sends_512_dimension_embedding_from_inside_eros_container():
-    verify = next(step for step in steps_for("deploy") if step.get("id") == "verify")
-    body = verify["run"]
-    assert "verify-layer7-ollama.py" in body
-    assert "gpoint_ollama_internal" not in body  # network membership is checked by the helper
-    assert "http://gpoint-core-api:3000/eros-worker/v1/embeddings" in body
+    memory = next(step for step in steps_for("deploy") if step.get("id") == "voyage_memory_verify")
+    body = memory["run"]
+    assert "createErosEngineClient" in body
+    assert "client.createGenome" in body
+    assert "client.sendMessage" in body
+    assert "client.history" in body
+    assert "Zephyr Bay" in body and "cobalt pear" in body
 
 
 def test_production_embedding_route_is_layer7_internal_and_not_mac_hosted():
     model_config = (ROOT / "services/eros-engine/eros-production-model-config.toml").read_text()
     readme = (ROOT / "services/eros-engine/README.md").read_text()
     secret_writer = (ROOT / "scripts/eros-production-secrets.py").read_text()
-    assert "http://gpoint-core-api:3000/eros-worker/v1/embeddings" in model_config
+    assert 'model = "voyage-4-lite"' in model_config
+    assert "http://gpoint-core-api:3000/eros-worker/v1/embeddings" not in model_config
     assert "Mac-hosted Ollama" not in readme
-    assert "Eros embeddings use the pinned Qwen model on Layer7" in readme
-    assert "'EROS_OLLAMA_EMBEDDING_URL': 'http://ollama:11434/api/embed'" in secret_writer
+    assert "`voyage-4-lite` embedding route at 512 dimensions" in readme
+    assert "EROS_OLLAMA_EMBEDDING_URL" not in secret_writer
 
 
 def test_native_deploy_materializes_and_hash_verifies_the_required_model_config():
@@ -241,17 +418,18 @@ def test_kamal_roles_share_the_private_eros_network_with_stable_service_aliases(
     engine = (ROOT / "config/deploy.eros.yml").read_text()
     model = (ROOT / "services/eros-engine/eros-production-model-config.toml").read_text()
     assert "- shared_internal" in api and "- gpoint_eros_data" in api
+    assert "gpoint_ollama_internal" not in api
     assert "network-alias: gpoint-core-api" in api
     assert "network: gpoint_eros_data" in engine and "network-alias: gpoint-eros" in engine
     # Kamal adds --network kamal itself; an explicit duplicate fails docker run.
     assert yaml.safe_load(engine)["servers"]["engine"]["options"]["network"] == "gpoint_eros_data"
     assert "network-alias: gpoint-eros" in engine
     assert "'EROS_SERVICE_URL': 'http://gpoint-eros:8080'" in (ROOT / "scripts/eros-production-secrets.py").read_text()
-    assert model.count("http://gpoint-core-api:3000/eros-worker/v1/") == 1
+    assert "http://gpoint-core-api:3000/eros-worker/v1/" not in model
     assert "https://api.deepseek.com/chat/completions" in model
     assert "gpoint-codex@gpoint" not in model
     tasks = tomllib.loads(model)["tasks"]
-    assert tasks["embedding"]["model"] == "qwen3-embedding:0.6b@gpoint_embeddings"
+    assert tasks["embedding"]["model"] == "voyage-4-lite"
     assert all(task["model"] == "deepseek-flash@deepseek"
                for name, task in tasks.items() if name != "embedding")
 
@@ -268,50 +446,14 @@ def test_hosted_stock_eros_e2e_uses_exact_build_digest_and_approved_local_alias(
     assert 'run-local-e2e.sh "$image" "$core"' in e2e["run"]
 
 
-def test_ollama_preflight_does_not_send_docker_templates_over_ssh():
+def test_normal_kamal_apply_does_not_boot_or_reconnect_ollama():
     apply = next(step["run"] for step in steps_for("deploy") if step.get("id") == "kamal_apply")
-    start = apply.index('if [[ "$DEPLOY_CORE" == true && ( "$EROS_INSTALLED" == true || "$DEPLOY_EROS" == true ) ]]; then')
-    end = apply.index('if [[ "$DEPLOY_EROS" == true ]]; then', start)
-    ollama_preflight = apply[start:end]
-    assert "verify-layer7-ollama.py" in ollama_preflight
-    assert "--prepare" in ollama_preflight
-    assert "docker inspect --format" not in ollama_preflight
-    assert "docker network inspect gpoint_ollama_internal --format" not in ollama_preflight
+    assert "accessory boot ollama" not in apply
+    assert "docker start gpoint-ollama-ollama" not in apply
+    assert "verify-layer7-ollama.py" not in apply
+    verify = next(step["run"] for step in steps_for("deploy") if step.get("id") == "verify")
+    assert "verify-layer7-ollama.py" not in verify
 
-
-def test_release_forwards_ollama_helper_over_ssh_without_go_templates(tmp_path):
-    import re
-
-    deploy = steps_for("deploy")
-    kamal = next(step for step in deploy if step.get("name") == "Deploy exact immutable images with stock Kamal")
-    line = next(line.strip() for line in kamal["run"].splitlines()
-                if 'accessory_result="$(ssh -T' in line and "--prepare" in line)
-    assert "--format" not in line and "{{" not in line
-    assert re.search(r"< scripts/verify-layer7-ollama\.py\)\"$", line)
-
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    ssh = fake_bin / "ssh"
-    ssh.write_text("#!/bin/sh\n[ \"$1\" = -T ] && shift\nshift\nexec \"$@\"\n")
-    ssh.chmod(0o755)
-    docker = fake_bin / "docker"
-    docker.write_text(
-        "#!/usr/bin/env python3\n"
-        "import json,sys\n"
-        "a=sys.argv[1:]\n"
-        "if a[:3] == ['network','inspect','gpoint_ollama_internal']:\n"
-        " print(json.dumps([{'Internal':True,'Containers':{}}]))\n"
-        "elif a and a[0] == 'inspect':\n"
-        " print('Error: No such object: '+a[1], file=sys.stderr); raise SystemExit(1)\n"
-        "else: raise SystemExit('unexpected docker call')\n"
-    )
-    docker.chmod(0o755)
-    environment = dict(os.environ, PATH=str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
-                       GPOINT_PRODUCTION_HOST="example.invalid", EROS_OLLAMA_MODEL_DIGEST="a" * 64)
-    result = subprocess.run(["bash", "-c", line + "; printf '%s\\n' \"$accessory_result\""], cwd=ROOT, env=environment,
-                            capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == "OLLAMA_PREPARE=PASS state=absent\n"
 
 def test_deepseek_runtime_verification_and_rollback_provider_guard():
     deploy = steps_for("deploy")

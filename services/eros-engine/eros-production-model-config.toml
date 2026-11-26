@@ -1,7 +1,4 @@
-# GPoint adapts the pinned Eros 2.8.1 examples to direct DeepSeek.
-# Upstream model/fallback comments describe the original provider, not our route.
-# Stock Eros uses DeepSeek directly for generation. The Core API preserves
-# the embedding contract and calls Ollama over its private Docker network.
+# GPoint uses stock Eros 2.8.1 native Voyage embeddings and direct DeepSeek chat.
 [defaults]
 fallback_model = "deepseek-flash@deepseek"
 fallback_temperature = 0.5
@@ -25,11 +22,8 @@ chat = "https://api.deepseek.com/chat/completions"
 tasks = ["chat_companion", "dreaming_scan", "arc_rewrite", "character_insight_extraction", "character_insight_structuring", "insight_extraction", "profile_rebuild", "user_insight_extraction", "user_insight_structuring", "affinity_evaluation", "activity_judge", "affinity_summary", "group_director", "world_director", "world_stories_director", "world_comment", "world_reply", "pde_decision"]
 params = { thinking = { type = "disabled" } }
 
-[providers.gpoint_embeddings]
-embeddings = "http://gpoint-core-api:3000/eros-worker/v1/embeddings"
-
 [tasks.embedding]
-model = "qwen3-embedding:0.6b@gpoint_embeddings"
+model = "voyage-4-lite"
 
 # Dreaming scan. One call per relationship segment returns three
 # things: profile memories (written to companion_memories as profile-layer rows),

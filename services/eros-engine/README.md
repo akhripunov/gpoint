@@ -61,11 +61,13 @@ alter its installed configuration.
   access-isolation, backup and recovery requirements remain active; this decision
   does not claim that stock Eros provides a full-erasure endpoint. The initial
   pilot remains synthetic-only in a dedicated Eros database, with no real user
-  data. Eros embeddings use the pinned Qwen model on Layer7 through the Core
-  API's private Docker-network connection to Ollama; no Relay or Mac tunnel is
-  required for embeddings. The existing Mac
-  Product Worker remains the chat-inference route and is still required for
-  real Eros dialogue until that existing Worker is available to the request.
+  data. The Voyage transition candidate uses stock Eros v2.8.1's native
+  `voyage-4-lite` embedding route at 512 dimensions. The former Qwen/Ollama
+  route is retained only as a recovery artifact; its Core API network route is
+  removed, and the pinned Ollama container is stopped only after a production
+  synthetic memory write/recall check passes. The existing Mac Product Worker
+  remains the chat-inference route and is still required for real Eros dialogue
+  until that existing Worker is available to the request.
 - Stock `classify_session` performs model/extraction and embedding before an
   unconditional memory upsert; archive deletes relationship memory. A delayed
   write crossing archive is a plausible data-resurrection risk, not a proven

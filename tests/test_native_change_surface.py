@@ -73,15 +73,14 @@ def test_ollama_is_an_independent_pinned_internal_accessory():
     assert accessory["options"]["memory"] == "3g"
 
 
-def test_core_api_joins_the_ollama_network_only_in_eros_aware_config():
+def test_core_api_uses_only_current_eros_networks():
     api = yaml.safe_load((ROOT / "config/deploy.eros-api.yml").read_text())
     networks = api["servers"]["api"]["options"]["network"]
-    assert "gpoint_ollama_internal" in networks
+    assert set(networks) == {"shared_internal", "gpoint_eros_data"}
+    assert "gpoint_ollama_internal" not in networks
     assert "gpoint_ollama_internal" not in yaml.safe_load((ROOT / "config/deploy.yml").read_text())[
         "servers"]["api"]["options"].get("network", [])
-    assert "http://gpoint-core-api:3000/eros-worker/v1/embeddings" in (
-        ROOT / "services/eros-engine/eros-production-model-config.toml"
-    ).read_text()
+    assert 'model = "voyage-4-lite"' in (ROOT / "services/eros-engine/eros-production-model-config.toml").read_text()
 
 
 def test_retired_relay_paths_are_non_runtime_and_ollama_can_auto_release():
@@ -105,13 +104,14 @@ def test_retired_relay_paths_are_non_runtime_and_ollama_can_auto_release():
 
 
 def test_production_api_does_not_publish_ollama_to_public_networks():
-    deploy = next(step for step in workflow()["jobs"]["deploy"]["steps"]
-                  if step.get("name") == "Deploy exact immutable images with stock Kamal")
+    steps = workflow()["jobs"]["deploy"]["steps"]
+    deploy = next(step for step in steps if step.get("name") == "Deploy exact immutable images with stock Kamal")
     body = deploy["run"]
     verifier = (ROOT / "scripts/verify-layer7-ollama.py").read_text()
-    assert "scripts/verify-layer7-ollama.py" in body
+    stop = next(step for step in steps if step.get("name") == "Stop unused Ollama after Voyage verification")
+    assert "scripts/verify-layer7-ollama.py" in stop["run"]
     assert '"docker", "network", "create", "--internal", NETWORK' in verifier
     assert "gpoint_ollama_internal" in verifier
-    assert "config/deploy.ollama.yml" in body
+    assert "config/deploy.ollama.yml" not in body
     assert "config/deploy.eros-relay.yml" not in body
     assert "deploy --skip-push --version \"$IMAGE_VERSION\" --roles relay" not in body

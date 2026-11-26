@@ -14,7 +14,6 @@ servers:
       network:
         - shared_internal
         - gpoint_eros_data
-        - gpoint_ollama_internal
       network-alias: gpoint-core-api
       env-file:
         - /opt/gpoint/env/production.env

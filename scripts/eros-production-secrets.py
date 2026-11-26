@@ -6,6 +6,7 @@ stdout/stderr. The separate file is mode 0600 and atomically replaced.
 """
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -13,6 +14,9 @@ import secrets
 import stat
 import subprocess
 import tempfile
+import time
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from urllib.parse import quote, unquote, urlsplit
 import uuid
 
@@ -23,6 +27,7 @@ NATIVE_API_ENV_PATH = Path('/opt/gpoint/env/eros-api.env')
 WORLD_WRITER_ENV_PATH = Path('/opt/gpoint/env/eros-world-writer.env')
 SOURCE_ENV_PATH = Path('/opt/gpoint/env/production.env')
 DEEPSEEK_ENV_PATH = Path('/opt/gpoint/env/deepseek.env')
+VOYAGE_ENV_PATH = Path('/opt/gpoint/env/voyage.env')
 SECRET_KEYS = (
     'EROS_JWT_SECRET',
     'EROS_EMBEDDING_API_KEY',
@@ -379,9 +384,94 @@ def read_deepseek_key(path=DEEPSEEK_ENV_PATH):
     return value
 
 
-def write_native_engine_env(path=ENV_PATH, output=NATIVE_ENV_PATH, *, deepseek_env=DEEPSEEK_ENV_PATH):
+def read_voyage_key(path=VOYAGE_ENV_PATH):
+    """Read the owner-managed Voyage key without exposing it to logs."""
+    path = Path(path)
+    try:
+        parent = path.parent.stat()
+        info = path.lstat()
+        if (path.parent.is_symlink() or path.is_symlink() or parent.st_mode & 0o077
+                or not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_nlink != 1
+                or (path == VOYAGE_ENV_PATH and (parent.st_uid != 0 or info.st_uid != 0))):
+            raise RuntimeError('Voyage credential permissions are unsafe')
+        entries = [line for line in path.read_text().splitlines() if line and not line.startswith('#')]
+    except FileNotFoundError:
+        raise RuntimeError('Voyage credential is unavailable') from None
+    except (OSError, UnicodeError):
+        raise RuntimeError('Voyage credential is unavailable') from None
+    if len(entries) != 1 or not entries[0].startswith('VOYAGE_API_KEY='):
+        raise RuntimeError('Voyage credential file is malformed')
+    value = entries[0].split('=', 1)[1]
+    if not re.fullmatch(r'[A-Za-z0-9_-]{16,256}', value):
+        raise RuntimeError('Voyage credential is missing or malformed')
+    return value
+
+
+def verify_voyage_api(*, credential_path=VOYAGE_ENV_PATH, requester=None, sleeper=time.sleep):
+    """Exercise the official native Voyage endpoint with synthetic query/document input."""
+    key = read_voyage_key(credential_path)
+    send = requester or urlopen
+    samples = {
+        'document': [
+            'Synthetic document: Zephyr Bay has a quiet reading cafe beside the north harbor.',
+            'Synthetic document: In this test, a blue notebook is kept on the second shelf.',
+            'Синтетический документ: вымышленный маяк находится у тихой бухты.',
+        ],
+        'query': [
+            'Which fictional harbor has a calm cafe for reading?',
+            'Where is the blue notebook stored in the synthetic example?',
+            'Где в вымышленном примере расположен маяк?',
+        ],
+    }
+    result = {}
+    for input_type, texts in samples.items():
+        payload = json.dumps({
+            'model': 'voyage-4-lite', 'input': texts, 'input_type': input_type,
+            'output_dimension': 512,
+        }).encode()
+        request = Request('https://api.voyageai.com/v1/embeddings', data=payload,
+                          headers={'Authorization': 'Bearer ' + key,
+                                   'Content-Type': 'application/json'}, method='POST')
+        response = None
+        for attempt in range(3):
+            try:
+                with send(request, timeout=30) as response:
+                    status = response.status
+                    raw = response.read()
+            except HTTPError as error:
+                status = error.code
+                raw = b''
+            except (URLError, TimeoutError, OSError):
+                status, raw = 0, b''
+            if status == 200:
+                break
+            if attempt == 2 or (status != 0 and status != 429 and not 500 <= status <= 599):
+                raise RuntimeError(f'Voyage {input_type} request failed (status={status or "network"})') from None
+            sleeper(2 ** attempt)
+        try:
+            body = json.loads(raw)
+            rows = body['data']
+            if body.get('model') != 'voyage-4-lite' or len(rows) != len(texts):
+                raise ValueError
+            for index, row in enumerate(rows):
+                vector = row.get('embedding')
+                if (row.get('index') != index or not isinstance(vector, list) or len(vector) != 512
+                        or not all(isinstance(value, (int, float)) and math.isfinite(value) for value in vector)):
+                    raise ValueError
+            usage = body.get('usage', {}).get('total_tokens')
+            if not isinstance(usage, int) or usage < 0:
+                raise ValueError
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+            raise RuntimeError(f'Voyage {input_type} response failed shape validation') from None
+        result[input_type] = {'count': len(rows), 'dimensions': 512, 'tokens': usage}
+    return result
+
+
+def write_native_engine_env(path=ENV_PATH, output=NATIVE_ENV_PATH, *,
+                            deepseek_env=DEEPSEEK_ENV_PATH, voyage_env=VOYAGE_ENV_PATH):
     """Materialize the minimal stock-image environment used by Kamal and SQLx."""
     provider_key = read_deepseek_key(deepseek_env)
+    voyage_key = read_voyage_key(voyage_env)
     values = read_env(Path(path))
     required = set(SECRET_KEYS) | {'EROS_RUNTIME_DATABASE_URL', 'EROS_MIGRATOR_DATABASE_URL'}
     if not required.issubset(values):
@@ -402,6 +492,7 @@ def write_native_engine_env(path=ENV_PATH, output=NATIVE_ENV_PATH, *, deepseek_e
         'GENOME_WRITE_SECRET': values['GENOME_WRITE_SECRET'],
         'OPENROUTER_API_KEY': '',
         'DEEPSEEK_API_KEY': provider_key,
+        'VOYAGE_API_KEY': voyage_key,
         'SUPABASE_JWT_SECRET': values['EROS_JWT_SECRET'],
         'MODEL_CONFIG_PATH': '/etc/eros-engine/model_config.toml',
         'RUST_LOG': 'info',
@@ -486,7 +577,6 @@ def write_native_api_env(path=ENV_PATH, source_env=SOURCE_ENV_PATH, output=NATIV
         'EROS_WORKER_TENANT_ID': values['EROS_TENANT_ID'],
         'EROS_REQUEST_TIMEOUT_MS': '240000',
         'EROS_BRIDGE_TIMEOUT_SECONDS': '240',
-        'EROS_OLLAMA_EMBEDDING_URL': 'http://ollama:11434/api/embed',
         'GPOINT_CHAT_POLICY_TENANT_ID': policy_tenant,
         'EROS_PRODUCTION_TEST_USER_IDS': '',
         'EROS_PRODUCTION_TEST_CREATOR_IDS': '',
@@ -563,8 +653,8 @@ def ensure_postgres_network():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--path', default=str(ENV_PATH))
-    parser.add_argument('--source-sha', required=True)
-    parser.add_argument('--image', required=True)
+    parser.add_argument('--source-sha')
+    parser.add_argument('--image')
     parser.add_argument('--tenant-id')
     parser.add_argument('--source-env', default=str(SOURCE_ENV_PATH))
     parser.add_argument('--deepseek-env', default=str(DEEPSEEK_ENV_PATH))
@@ -573,13 +663,26 @@ def main():
     parser.add_argument('--provision-database', action='store_true')
     parser.add_argument('--write-native-engine-env', action='store_true')
     parser.add_argument('--write-native-api-env', action='store_true')
+    parser.add_argument('--verify-voyage-api', action='store_true')
     args = parser.parse_args()
     try:
+        if args.verify_voyage_api:
+            if (args.check_only or args.ensure_postgres_network or args.provision_database
+                    or args.write_native_engine_env or args.write_native_api_env):
+                raise ValueError('Voyage verification cannot be combined with provisioning flags')
+            evidence = verify_voyage_api()
+            for kind in ('document', 'query'):
+                row = evidence[kind]
+                print(f'VOYAGE_{kind.upper()}=PASS count={row["count"]} dimensions={row["dimensions"]} tokens={row["tokens"]}')
+            return
+        if not args.source_sha or not args.image:
+            raise ValueError('exact Eros source SHA and image digest are required')
         if args.check_only:
             if (args.provision_database or args.ensure_postgres_network
                     or args.write_native_engine_env or args.write_native_api_env):
                 raise ValueError('check-only cannot be combined with a provisioning flag')
             read_deepseek_key(args.deepseek_env)
+            read_voyage_key()
             state = check_prerequisites(
                 args.path, source_sha=args.source_sha, image=args.image,
                 tenant_id=args.tenant_id, source_env=args.source_env)
@@ -587,6 +690,7 @@ def main():
             return
         if args.write_native_engine_env:
             read_deepseek_key(args.deepseek_env)
+            read_voyage_key()
         if args.provision_database:
             assert_shared_database_acl_isolatable()
         print(provision(args.path, source_sha=args.source_sha, image=args.image,

@@ -184,7 +184,7 @@ def test_miniapp_nginx_proxies_media_without_rewriting_uri_or_losing_auth():
     assert "COPY infra/production/nginx-miniapp.conf /etc/nginx/conf.d/default.conf" in dockerfile
 
 
-def test_kamal_network_hook_joins_only_allowed_core_roles_and_internal_ollama():
+def test_kamal_network_hook_joins_only_current_core_roles_and_eros():
     hook = (ROOT / ".kamal/hooks/post-app-boot").read_text()
     assert hook.startswith("#!/bin/sh\n")
     assert 'case "$version" in "$candidate"-*)' in hook
@@ -198,7 +198,8 @@ def test_kamal_network_hook_joins_only_allowed_core_roles_and_internal_ollama():
     assert "gpoint-core:api) networks='gpoint_app:api,shared_internal:'" not in hook
     assert "gpoint-agata" not in hook
     assert "gpoint-eros-relay" not in hook
-    assert "gpoint-core:api) networks='kamal:gpoint-core-api,gpoint_app:api,shared_internal:,gpoint_ollama_internal:'" in hook
+    assert "gpoint-core:api) networks='kamal:gpoint-core-api,gpoint_app:api,shared_internal:'" in hook
+    assert "gpoint_ollama_internal" not in hook
     assert "docker network connect --alias \"$alias\" \"$network\" \"$id\"" in hook
     assert "StrictHostKeyChecking=yes" in hook
     assert "gsales" not in hook.lower()
@@ -1098,9 +1099,9 @@ def test_kamal_hooks_use_only_the_explicit_pinned_ssh_configuration(name):
     assert '-o UserKnownHostsFile="$known_hosts"' in hook
 
 
-def test_core_api_has_internal_ollama_network_before_process_start():
+def test_core_api_has_no_ollama_network():
     api = yaml.safe_load((ROOT / 'config/deploy.eros-api.yml').read_text())
-    assert 'gpoint_ollama_internal' in api['servers']['api']['options']['network']
+    assert 'gpoint_ollama_internal' not in api['servers']['api']['options']['network']
     assert api['servers']['api']['options']['network-alias'] == 'gpoint-core-api'
 
 
@@ -1209,5 +1210,5 @@ def test_ordinary_core_api_preserves_worker_proxy_alias_on_default_kamal_network
     tunnel = (ROOT / "apps/api/src/gpoint-worker-tunnel-proxy.mjs").read_text()
     assert "upstreamHost = 'gpoint-core-api'" in tunnel
     hook = (ROOT / ".kamal/hooks/post-app-boot").read_text()
-    assert "kamal:gpoint-core-api,gpoint_app:api,shared_internal:,gpoint_ollama_internal:" in hook
+    assert "kamal:gpoint-core-api,gpoint_app:api,shared_internal:" in hook
 

@@ -18,6 +18,12 @@ class ErosProductionSecretTests(unittest.TestCase):
         path.chmod(0o600)
         return path
 
+    def _voyage_fixture(self, root):
+        path = root / 'voyage.env'
+        path.write_text('VOYAGE_API_KEY=synthetic-voyage-key-abcdefghijklmnopqrstuvwxyz\n')
+        path.chmod(0o600)
+        return path
+
     def test_deepseek_credential_required_and_preserved_on_regeneration(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -31,16 +37,17 @@ class ErosProductionSecretTests(unittest.TestCase):
                 MODULE.write_native_engine_env(source, output, deepseek_env=key_path)
             self.assertFalse(output.exists())
             key_path = self._deepseek_fixture(root)
-            first = MODULE.write_native_engine_env(source, output, deepseek_env=key_path)
+            voyage_path = self._voyage_fixture(root)
+            first = MODULE.write_native_engine_env(source, output, deepseek_env=key_path, voyage_env=voyage_path)
             original = output.read_bytes()
-            second = MODULE.write_native_engine_env(source, output, deepseek_env=key_path)
+            second = MODULE.write_native_engine_env(source, output, deepseek_env=key_path, voyage_env=voyage_path)
             self.assertEqual(original, output.read_bytes())
             self.assertEqual(first, second)
             self.assertIn(b'DEEPSEEK_API_KEY=synthetic-provider-key-123456789', original)
             self.assertNotIn('synthetic-provider-key', first)
             key_path.chmod(0o644)
             with self.assertRaisesRegex(RuntimeError, 'permissions are unsafe'):
-                MODULE.write_native_engine_env(source, output, deepseek_env=key_path)
+                MODULE.write_native_engine_env(source, output, deepseek_env=key_path, voyage_env=voyage_path)
             self.assertEqual(original, output.read_bytes())
 
     def test_generates_persistent_credentials_without_emitting_values(self):
@@ -80,7 +87,8 @@ class ErosProductionSecretTests(unittest.TestCase):
             MODULE.provision(source, source_sha='a' * 40,
                              image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
                              tenant_id='12345678-1234-4234-8234-123456789abc')
-            self.assertEqual(MODULE.write_native_engine_env(source, output, deepseek_env=self._deepseek_fixture(root)), 'EROS_NATIVE_ENV=READY')
+            self.assertEqual(MODULE.write_native_engine_env(source, output, deepseek_env=self._deepseek_fixture(root),
+                                                            voyage_env=self._voyage_fixture(root)), 'EROS_NATIVE_ENV=READY')
             values = dict(line.split('=', 1) for line in output.read_text().splitlines())
             secrets = MODULE.read_env(source)
             self.assertEqual(output.stat().st_mode & 0o777, 0o600)
@@ -91,6 +99,30 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertEqual(values['MODEL_CONFIG_PATH'], '/etc/eros-engine/model_config.toml')
             self.assertEqual(values['OPENROUTER_API_KEY'], '')
             self.assertNotIn('EROS_MIGRATOR_DATABASE_URL', values)
+
+    def test_native_engine_environment_reads_voyage_key_from_protected_file_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'eros.env'
+            output = root / 'eros-engine.env'
+            deepseek = self._deepseek_fixture(root)
+            voyage = root / 'voyage.env'
+            voyage.write_text('VOYAGE_API_KEY=synthetic-voyage-key-abcdefghijklmnopqrstuvwxyz\n')
+            voyage.chmod(0o600)
+            MODULE.provision(source, source_sha='a' * 40,
+                             image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
+                             tenant_id='12345678-1234-4234-8234-123456789abc')
+            result = MODULE.write_native_engine_env(source, output, deepseek_env=deepseek,
+                                                    voyage_env=voyage)
+            values = dict(line.split('=', 1) for line in output.read_text().splitlines())
+            self.assertEqual(values['VOYAGE_API_KEY'], 'synthetic-voyage-key-abcdefghijklmnopqrstuvwxyz')
+            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+            self.assertNotIn('synthetic-voyage-key', result)
+            voyage.chmod(0o644)
+            original = output.read_bytes()
+            with self.assertRaisesRegex(RuntimeError, 'Voyage credential permissions are unsafe'):
+                MODULE.write_native_engine_env(source, output, deepseek_env=deepseek, voyage_env=voyage)
+            self.assertEqual(output.read_bytes(), original)
 
     def test_native_api_environment_is_created_with_required_keys_and_never_logs_values(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -116,6 +148,7 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertNotIn('GPOINT_CHAT_POLICY_MARKET', values)
             self.assertEqual(values['GPOINT_EROS_WORKER_TOKEN'], MODULE.read_env(source)['EROS_WORKER_GATEWAY_TOKEN'])
             self.assertNotIn('GPOINT_AGATA_WORKER_TOKEN', values)
+            self.assertNotIn('EROS_OLLAMA_EMBEDDING_URL', values)
             self.assertEqual(values['EROS_PRODUCTION_TEST_USER_IDS'], '')
             self.assertNotIn('worker-secret', result)
             for key in ('EROS_JWT_SECRET', 'EROS_BRIDGE_API_KEY', 'EROS_EMBEDDING_API_KEY', 'EROS_WORKER_SIGNING_SECRET'):
@@ -172,7 +205,8 @@ class ErosProductionSecretTests(unittest.TestCase):
                 if key in {'EROS_SOURCE_SHA', 'EROS_IMAGE', 'EROS_TEST_USER_IDS', 'EROS_TEST_CREATOR_IDS'}:
                     continue
                 self.assertEqual(upgraded[key], value, key)
-            MODULE.write_native_engine_env(source, engine_output, deepseek_env=self._deepseek_fixture(root))
+            MODULE.write_native_engine_env(source, engine_output, deepseek_env=self._deepseek_fixture(root),
+                                           voyage_env=self._voyage_fixture(root))
             MODULE.write_native_api_env(source, production, api_output)
             engine = dict(line.split('=', 1) for line in engine_output.read_text().splitlines())
             api = dict(line.split('=', 1) for line in api_output.read_text().splitlines())

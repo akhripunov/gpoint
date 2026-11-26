@@ -9,6 +9,7 @@ database back.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -30,6 +31,11 @@ SHA40 = re.compile(r"^[0-9a-f]{40}$")
 IMAGE = re.compile(r"^ghcr\.io/akhripunov/gpoint-eros@sha256:[0-9a-f]{64}$")
 RUN_ID = re.compile(r"^[0-9]{1,20}-[0-9]{1,8}$")
 DB_NAME = re.compile(r"^eros_[a-z0-9_]{1,48}$")
+TEST_MEMORY_COUNTS = {
+    "engine.companion_memories": 476,
+    "engine.relationship_journal": 11,
+}
+TEST_MEMORY_TABLE_NAMES = tuple(name.split(".", 1)[1] for name in TEST_MEMORY_COUNTS)
 
 # Signed upstream release tags were verified against these commits. Pin the
 # published multi-arch manifests so the legacy SQLx history is validated by
@@ -290,6 +296,166 @@ def _database_facts(expected_identity: str, database: str = "eros") -> dict:
     if expected_other:
         verify_world_writer()
     return facts
+
+
+def _schema_fingerprint(database: str) -> str:
+    if database != "eros" and not DB_NAME.fullmatch(database):
+        raise ValueError("database name is outside the Eros lifecycle scope")
+    result = _run(["docker", "exec", "-i", CONTAINER, "sh", "-ec",
+                   'exec pg_dump --schema-only --no-owner --no-privileges -U "$POSTGRES_USER" -d "$1"',
+                   "eros-native-schema", database], timeout=180)
+    return hashlib.sha256(result.stdout.encode("utf-8")).hexdigest()
+
+
+def _memory_inventory(database: str = "eros") -> dict:
+    """Return aggregate schema, table and embedding facts without reading memory content."""
+    if database != "eros" and not DB_NAME.fullmatch(database):
+        raise ValueError("database name is outside the Eros lifecycle scope")
+    names = _docker_psql(database, """SELECT n.nspname || '.' || c.relname
+      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname IN ('engine','public') AND c.relkind IN ('r','p')
+      ORDER BY n.nspname,c.relname""").splitlines()
+    table_counts = {}
+    for qualified in names:
+        schema, separator, table = qualified.partition(".")
+        if (not separator or schema not in {"engine", "public"}
+                or not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", table)):
+            raise RuntimeError("Eros table inventory contains an unsafe identifier")
+        count = _docker_psql(database, f'SELECT count(*) FROM "{schema}"."{table}"')
+        if not re.fullmatch(r"[0-9]+", count):
+            raise RuntimeError("Eros table count inventory is invalid")
+        table_counts[qualified] = int(count)
+    targets = {}
+    for table in TEST_MEMORY_TABLE_NAMES:
+        if f"engine.{table}" not in table_counts:
+            raise RuntimeError("approved Eros memory table is missing")
+        sql = f"""SELECT json_build_object(
+          'rows',count(*),
+          'vectors',count(embedding),
+          'dimension512',count(*) FILTER (WHERE embedding IS NOT NULL AND vector_dims(embedding)=512),
+          'inboundFks',(SELECT count(*) FROM pg_constraint WHERE contype='f'
+            AND confrelid='engine.{table}'::regclass),
+          'deleteTriggers',(SELECT count(*) FROM pg_trigger WHERE tgrelid='engine.{table}'::regclass
+            AND NOT tgisinternal))::text FROM engine.{table}"""
+        try:
+            targets[f"engine.{table}"] = json.loads(_docker_psql(database, sql))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise RuntimeError("Eros memory table inventory is malformed") from None
+    return {"schemaSha256": _schema_fingerprint(database), "tableCounts": table_counts,
+            "targets": targets}
+
+
+def _validate_test_memory_inventory(actual: dict, baseline: dict, *, cleared: bool = False) -> bool:
+    """Fail closed unless only the OWNER-confirmed synthetic vectors differ."""
+    if not isinstance(actual, dict) or not isinstance(baseline, dict):
+        raise RuntimeError("approved vector inventory is malformed")
+    if (actual.get("schemaSha256") != baseline.get("schemaSha256")
+            or not re.fullmatch(r"[0-9a-f]{64}", str(actual.get("schemaSha256", "")))):
+        raise RuntimeError("Eros schema fingerprint changed")
+    expected_tables = baseline.get("tableCounts")
+    current_tables = actual.get("tableCounts")
+    if (not isinstance(expected_tables, dict) or not isinstance(current_tables, dict)
+            or set(expected_tables) != set(current_tables)):
+        raise RuntimeError("non-target Eros rows changed")
+    for name, expected in expected_tables.items():
+        wanted = 0 if cleared and name in TEST_MEMORY_COUNTS else expected
+        if current_tables.get(name) != wanted:
+            raise RuntimeError("non-target Eros rows changed" if name not in TEST_MEMORY_COUNTS
+                               else "approved vector inventory changed")
+    expected_targets = baseline.get("targets")
+    current_targets = actual.get("targets")
+    if not isinstance(expected_targets, dict) or not isinstance(current_targets, dict):
+        raise RuntimeError("approved vector inventory is malformed")
+    for name, expected_rows in TEST_MEMORY_COUNTS.items():
+        before = expected_targets.get(name)
+        after = current_targets.get(name)
+        if (not isinstance(before, dict) or not isinstance(after, dict)
+                or before.get("rows") != expected_rows or before.get("vectors") != expected_rows
+                or before.get("dimension512") != expected_rows
+                or before.get("inboundFks") != 0 or before.get("deleteTriggers") != 0
+                or after.get("inboundFks") != 0 or after.get("deleteTriggers") != 0):
+            raise RuntimeError("approved vector inventory has unverified references or triggers")
+        expected_after = {"rows": 0, "vectors": 0, "dimension512": 0} if cleared else {
+            "rows": expected_rows, "vectors": expected_rows, "dimension512": expected_rows}
+        if any(after.get(key) != value for key, value in expected_after.items()):
+            raise RuntimeError("approved vector inventory changed")
+    return True
+
+
+def _memory_reset_is_cleared(actual: dict, baseline: dict, receipt: dict | None) -> bool:
+    """Reconcile a durable reset receipt without assuming the DELETE must run again."""
+    if receipt is None:
+        _validate_test_memory_inventory(actual, baseline)
+        return False
+    state = receipt.get("state")
+    if state == "COMPLETE":
+        _validate_test_memory_inventory(actual, baseline, cleared=True)
+        return True
+    if state != "PENDING":
+        raise RuntimeError("existing Voyage memory reset receipt is invalid")
+    try:
+        _validate_test_memory_inventory(actual, baseline)
+        return False
+    except RuntimeError:
+        _validate_test_memory_inventory(actual, baseline, cleared=True)
+        return True
+
+
+def _clear_test_memory_rows() -> None:
+    """Delete only the two fixed vector tables atomically and assert every other table is unchanged."""
+    companion = TEST_MEMORY_COUNTS["engine.companion_memories"]
+    journal = TEST_MEMORY_COUNTS["engine.relationship_journal"]
+    sql = f"""BEGIN;
+SET LOCAL lock_timeout='5s';
+SET LOCAL statement_timeout='30s';
+LOCK TABLE engine.relationship_journal,engine.companion_memories IN ACCESS EXCLUSIVE MODE;
+DO $memory_reset$
+DECLARE
+  row record;
+  amount bigint;
+  deleted bigint;
+  before_counts jsonb := '{{}}'::jsonb;
+  after_counts jsonb := '{{}}'::jsonb;
+BEGIN
+  IF current_database() <> 'eros' THEN RAISE EXCEPTION 'wrong database'; END IF;
+  IF EXISTS (SELECT FROM pg_constraint WHERE contype='f'
+      AND confrelid IN ('engine.companion_memories'::regclass,'engine.relationship_journal'::regclass))
+    OR EXISTS (SELECT FROM pg_trigger WHERE NOT tgisinternal
+      AND tgrelid IN ('engine.companion_memories'::regclass,'engine.relationship_journal'::regclass)) THEN
+    RAISE EXCEPTION 'memory table references or triggers are present';
+  END IF;
+  IF (SELECT count(*) FROM engine.companion_memories) <> {companion}
+    OR (SELECT count(embedding) FROM engine.companion_memories) <> {companion}
+    OR (SELECT count(*) FROM engine.companion_memories WHERE vector_dims(embedding)=512) <> {companion}
+    OR (SELECT count(*) FROM engine.relationship_journal) <> {journal}
+    OR (SELECT count(embedding) FROM engine.relationship_journal) <> {journal}
+    OR (SELECT count(*) FROM engine.relationship_journal WHERE vector_dims(embedding)=512) <> {journal} THEN
+    RAISE EXCEPTION 'approved vector inventory changed';
+  END IF;
+  FOR row IN SELECT n.nspname,c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname IN ('engine','public') AND c.relkind IN ('r','p')
+        AND NOT (n.nspname='engine' AND c.relname IN ('companion_memories','relationship_journal'))
+      ORDER BY n.nspname,c.relname LOOP
+    EXECUTE format('SELECT count(*) FROM %I.%I',row.nspname,row.relname) INTO amount;
+    before_counts := before_counts || jsonb_build_object(row.nspname||'.'||row.relname,amount);
+  END LOOP;
+  DELETE FROM engine.relationship_journal;
+  GET DIAGNOSTICS deleted = ROW_COUNT;
+  IF deleted <> {journal} THEN RAISE EXCEPTION 'journal delete count changed'; END IF;
+  DELETE FROM engine.companion_memories;
+  GET DIAGNOSTICS deleted = ROW_COUNT;
+  IF deleted <> {companion} THEN RAISE EXCEPTION 'companion memory delete count changed'; END IF;
+  FOR row IN SELECT n.nspname,c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname IN ('engine','public') AND c.relkind IN ('r','p')
+        AND NOT (n.nspname='engine' AND c.relname IN ('companion_memories','relationship_journal'))
+      ORDER BY n.nspname,c.relname LOOP
+    EXECUTE format('SELECT count(*) FROM %I.%I',row.nspname,row.relname) INTO amount;
+    after_counts := after_counts || jsonb_build_object(row.nspname||'.'||row.relname,amount);
+  END LOOP;
+  IF before_counts <> after_counts THEN RAISE EXCEPTION 'non-target Eros rows changed'; END IF;
+END $memory_reset$;
+COMMIT;"""
+    _docker_psql("eros", sql)
 
 
 def _postgres_identity() -> dict:
@@ -711,6 +877,28 @@ def _safe_write_plan(path: Path, plan: dict) -> None:
             pass
 
 
+def _memory_reset_receipt_path(candidate: str) -> Path:
+    return BACKUP_DIR / f"voyage-memory-reset-{candidate}.json"
+
+
+def _load_memory_reset_receipt(candidate: str, image: str) -> dict | None:
+    path = _memory_reset_receipt_path(candidate)
+    if not path.exists():
+        return None
+    receipt = _load_plan(path)
+    if (receipt.get("schema") != "gpoint-eros-test-memory-reset/v1"
+            or receipt.get("candidateSha") != candidate or receipt.get("image") != image
+            or receipt.get("state") not in {"PENDING", "COMPLETE"}):
+        raise RuntimeError("existing Voyage memory reset receipt is for a different release")
+    backup = Path(receipt.get("backupPath", ""))
+    if (backup.parent != BACKUP_DIR or backup.is_symlink()
+            or _file_digest(backup) != receipt.get("backupSha256")):
+        raise RuntimeError("original protected recovery backup for memory reset is unavailable")
+    if not isinstance(receipt.get("baselineInventory"), dict):
+        raise RuntimeError("original approved memory inventory is unavailable")
+    return receipt
+
+
 def _load_plan(path: Path) -> dict:
     try:
         info = path.lstat()
@@ -725,18 +913,58 @@ def _load_plan(path: Path) -> dict:
     return value
 
 
-def lifecycle(mode: str, candidate: str, image: str, run_id: str, *, rollback: bool = False) -> dict:
+def _validate_reset_plan(plan: dict, candidate: str, image: str, run_id: str,
+                         env: dict[str, str]) -> dict:
+    if (plan.get("schema") != "gpoint-eros-native-db-plan/v1" or plan.get("candidateSha") != candidate
+            or plan.get("image") != image or plan.get("runId") != run_id
+            or plan.get("rollbackCheck") is True):
+        raise RuntimeError("exact Eros memory reset plan differs from this release")
+    backup = Path(plan.get("backupPath", ""))
+    if (backup.parent != BACKUP_DIR or backup.is_symlink()
+            or _file_digest(backup) != plan.get("backupSha256")):
+        raise RuntimeError("exact Eros recovery backup is missing or changed")
+    if plan.get("pendingMigrations") != [] or plan.get("targetLedger") != plan.get("baselineLedger"):
+        raise RuntimeError("Eros schema changes are not allowed during test memory cleanup")
+    baseline_inventory = plan.get("testMemoryResetBaseline")
+    if not isinstance(baseline_inventory, dict):
+        raise RuntimeError("OWNER-approved test memory baseline is unavailable")
+    if _postgres_identity() != plan.get("postgresIdentity"):
+        raise RuntimeError("PostgreSQL runtime identity changed after memory cleanup rehearsal")
+    facts = _database_facts(env["EROS_DATABASE_IDENTITY"])
+    current_ledger = _ledger("eros")
+    if (facts.get("marker") != plan.get("databaseIdentity")
+            or facts.get("clusterSystemIdentifier") != plan.get("clusterSystemIdentifier")
+            or current_ledger != plan.get("baselineLedger")):
+        raise RuntimeError("Eros database identity or SQLx head changed after memory cleanup rehearsal")
+    return baseline_inventory
+
+
+def lifecycle(mode: str, candidate: str, image: str, run_id: str, *, rollback: bool = False,
+              test_memory_reset: bool = False) -> dict:
     if not SHA40.fullmatch(candidate or "") or not IMAGE.fullmatch(image or "") or not RUN_ID.fullmatch(run_id or ""):
         raise ValueError("exact Eros candidate, digest and run identity are required")
-    if mode not in {"prepare", "apply", "rollback-check", "verify-unchanged", "verify-prepared", "verify-applied"}:
+    if mode not in {"prepare", "apply", "rollback-check", "verify-unchanged", "verify-prepared",
+                    "verify-applied", "validate-test-memory-reset", "reset-test-memory",
+                    "verify-test-memory-reset"}:
         raise ValueError("unsupported Eros database lifecycle mode")
+    if mode in {"validate-test-memory-reset", "reset-test-memory", "verify-test-memory-reset"} \
+            and not test_memory_reset:
+        raise ValueError("OWNER-approved test memory reset scope is required")
     env = _read_env()
     plan_path = BACKUP_DIR / f"native-plan-{run_id}.json"
     if mode in {"prepare", "rollback-check"}:
         rollback = mode == "rollback-check"
+        if rollback and test_memory_reset:
+            raise ValueError("rollback cannot request test memory cleanup")
         postgres_identity = _postgres_identity()
         facts = _database_facts(env["EROS_DATABASE_IDENTITY"])
         before = _ledger("eros")
+        prior_reset = _load_memory_reset_receipt(candidate, image) if test_memory_reset else None
+        live_inventory = _memory_inventory("eros") if test_memory_reset else None
+        memory_baseline = (prior_reset["baselineInventory"] if prior_reset else live_inventory)
+        memory_already_cleared = False
+        if memory_baseline is not None:
+            memory_already_cleared = _memory_reset_is_cleared(live_inventory, memory_baseline, prior_reset)
         backup, backup_sha = _prepare_backup_and_restore(run_id)
         restore_db = "eros_check_" + run_id.replace("-", "_")
         try:
@@ -748,6 +976,12 @@ def lifecycle(mode: str, candidate: str, image: str, run_id: str, *, rollback: b
                 raise RuntimeError("isolated Eros restore SQLx ledger differs from the live database")
             after, pending, migration_stages = _run_migration_chain(
                 image, restore_db, env, before, rollback=rollback)
+            if memory_baseline is not None:
+                if pending:
+                    raise RuntimeError("SQLx migrations are not allowed during test memory cleanup")
+                restored_memory = _memory_inventory(restore_db)
+                _validate_test_memory_inventory(restored_memory, memory_baseline,
+                                                cleared=memory_already_cleared)
             _database_facts(env["EROS_DATABASE_IDENTITY"], restore_db)
             if _postgres_identity() != postgres_identity:
                 raise RuntimeError("PostgreSQL runtime identity changed during Eros migration rehearsal")
@@ -762,6 +996,10 @@ def lifecycle(mode: str, candidate: str, image: str, run_id: str, *, rollback: b
                     "targetLedger": after, "targetLedgerSha256": _ledger_digest(after),
                     "pendingMigrations": pending, "migrationStages": migration_stages,
                     "schemaApply": bool(pending), "rollbackCheck": rollback}
+            if memory_baseline is not None:
+                plan["testMemoryResetBaseline"] = memory_baseline
+            if prior_reset is not None:
+                plan["testMemoryResetReceipt"] = prior_reset
             _safe_write_plan(plan_path, plan)
             print("EROS_DATABASE_PREFLIGHT=PASS")
             print("EROS_SQLX_MIGRATION_COUNT=" + str(len(before)))
@@ -773,6 +1011,82 @@ def lifecycle(mode: str, candidate: str, image: str, run_id: str, *, rollback: b
         finally:
             _drop_database(restore_db)
     plan = _load_plan(plan_path)
+    if mode == "validate-test-memory-reset":
+        baseline_inventory = _validate_reset_plan(plan, candidate, image, run_id, env)
+        current_inventory = _memory_inventory("eros")
+        existing_receipt = plan.get("testMemoryResetReceipt")
+        if existing_receipt and existing_receipt.get("state") == "COMPLETE":
+            _validate_test_memory_inventory(current_inventory, baseline_inventory, cleared=True)
+        elif existing_receipt and existing_receipt.get("state") == "PENDING":
+            try:
+                _validate_test_memory_inventory(current_inventory, baseline_inventory)
+            except RuntimeError:
+                _validate_test_memory_inventory(current_inventory, baseline_inventory, cleared=True)
+        else:
+            _validate_test_memory_inventory(current_inventory, baseline_inventory)
+        plan["testMemoryResetValidatedAt"] = datetime.now(timezone.utc).isoformat()
+        _safe_write_plan(plan_path, plan)
+        print("EROS_TEST_MEMORY_RESET_PREFLIGHT=PASS companion=476 journal=11 schema_change=false")
+        return plan
+    if mode == "reset-test-memory":
+        baseline_inventory = _validate_reset_plan(plan, candidate, image, run_id, env)
+        if not plan.get("testMemoryResetValidatedAt"):
+            raise RuntimeError("test memory reset lacks same-run preflight")
+        current_inventory = _memory_inventory("eros")
+        receipt_path = _memory_reset_receipt_path(candidate)
+        receipt = plan.get("testMemoryResetReceipt")
+        if receipt is None:
+            _validate_test_memory_inventory(current_inventory, baseline_inventory)
+            receipt = {"schema": "gpoint-eros-test-memory-reset/v1", "candidateSha": candidate,
+                       "image": image, "state": "PENDING", "runId": run_id,
+                       "backupPath": plan["backupPath"], "backupSha256": plan["backupSha256"],
+                       "databaseIdentity": plan["databaseIdentity"],
+                       "clusterSystemIdentifier": plan["clusterSystemIdentifier"],
+                       "baselineLedgerSha256": plan["baselineLedgerSha256"],
+                       "baselineInventory": baseline_inventory}
+            _safe_write_plan(receipt_path, receipt)
+            plan["testMemoryResetReceipt"] = receipt
+        else:
+            disk_receipt = _load_memory_reset_receipt(candidate, image)
+            if disk_receipt != receipt:
+                raise RuntimeError("persistent test memory reset receipt differs from this run")
+        if receipt["state"] == "COMPLETE":
+            _validate_test_memory_inventory(current_inventory, baseline_inventory, cleared=True)
+            print("EROS_TEST_MEMORY_RESET=SKIP_ALREADY_CLEARED")
+            return plan
+        try:
+            _validate_test_memory_inventory(current_inventory, baseline_inventory)
+        except RuntimeError:
+            # A previous attempt may have committed the atomic DELETE but died
+            # before marking the receipt complete. Verify live state; never
+            # issue DELETE against an already-cleared database again.
+            current_inventory = _memory_inventory("eros")
+            _validate_test_memory_inventory(current_inventory, baseline_inventory, cleared=True)
+        else:
+            _clear_test_memory_rows()
+        cleared_inventory = _memory_inventory("eros")
+        _validate_test_memory_inventory(cleared_inventory, baseline_inventory, cleared=True)
+        receipt["state"] = "COMPLETE"
+        receipt["clearedTableCounts"] = cleared_inventory["tableCounts"]
+        receipt["clearedAt"] = datetime.now(timezone.utc).isoformat()
+        _safe_write_plan(receipt_path, receipt)
+        plan["testMemoryResetReceipt"] = receipt
+        _safe_write_plan(plan_path, plan)
+        print("EROS_TEST_MEMORY_RESET=PASS companion=476 journal=11 non_target_rows=unchanged")
+        return plan
+    if mode == "verify-test-memory-reset":
+        baseline_inventory = _validate_reset_plan(plan, candidate, image, run_id, env)
+        receipt = plan.get("testMemoryResetReceipt")
+        if (not isinstance(receipt, dict) or receipt.get("candidateSha") != candidate
+                or receipt.get("image") != image or receipt.get("runId") != run_id
+                or receipt.get("backupSha256") != plan.get("backupSha256")):
+            raise RuntimeError("exact test memory cleanup receipt is unavailable")
+        cleared_inventory = _memory_inventory("eros")
+        _validate_test_memory_inventory(cleared_inventory, baseline_inventory, cleared=True)
+        if receipt.get("clearedTableCounts") != cleared_inventory.get("tableCounts"):
+            raise RuntimeError("Eros non-target rows changed after test memory cleanup")
+        print("EROS_TEST_MEMORY_RESET_VERIFY=PASS")
+        return plan
     if mode == "verify-unchanged":
         if (plan.get("schema") != "gpoint-eros-native-db-plan/v1" or plan.get("candidateSha") != candidate
                 or plan.get("image") != image or plan.get("runId") != run_id
@@ -840,10 +1154,14 @@ def lifecycle(mode: str, candidate: str, image: str, run_id: str, *, rollback: b
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("prepare", "apply", "rollback-check", "verify-unchanged", "verify-prepared", "verify-applied", "verify-world-writer"), required=True)
+    parser.add_argument("--mode", choices=("prepare", "apply", "rollback-check", "verify-unchanged",
+                                            "verify-prepared", "verify-applied", "verify-world-writer",
+                                            "validate-test-memory-reset", "reset-test-memory",
+                                            "verify-test-memory-reset"), required=True)
     parser.add_argument("--candidate", required=True)
     parser.add_argument("--image", required=True)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--test-memory-reset", action="store_true")
     args = parser.parse_args()
     try:
         if args.mode == "verify-world-writer":
@@ -855,7 +1173,8 @@ def main() -> int:
             print("EROS_WORLD_WRITER_ACL=PASS")
         else:
             lifecycle(args.mode, args.candidate, args.image, args.run_id,
-                      rollback=args.mode == "rollback-check")
+                      rollback=args.mode == "rollback-check",
+                      test_memory_reset=args.test_memory_reset)
     except Exception as error:
         print("EROS_DATABASE_LIFECYCLE=BLOCKED reason=" + str(error), file=sys.stderr)
         return 1
