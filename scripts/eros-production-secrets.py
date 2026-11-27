@@ -30,7 +30,6 @@ OPENROUTER_ENV_PATH = Path('/opt/gpoint/env/openrouter.env')
 VOYAGE_ENV_PATH = Path('/opt/gpoint/env/voyage.env')
 SECRET_KEYS = (
     'EROS_JWT_SECRET',
-    'EROS_EMBEDDING_API_KEY',
     'EROS_BRIDGE_API_KEY',
     'EROS_WORKER_SIGNING_SECRET',
     'EROS_WORKER_GATEWAY_TOKEN',
@@ -40,6 +39,9 @@ SECRET_KEYS = (
     'GENOME_WRITE_SECRET',
 )
 ADDITIVE_SECRET_KEYS = frozenset({'GENOME_WRITE_SECRET'})
+# Native Voyage no longer uses the retired Ollama relay credential.
+# Accept an existing legacy entry without generating, rotating or requiring it.
+LEGACY_EMBEDDING_KEY = 'EROS_EMBEDDING_API_KEY'
 MANAGED_KEYS = frozenset((*SECRET_KEYS, 'EROS_RUNTIME_DATABASE_URL',
                           'EROS_MIGRATOR_DATABASE_URL', 'EROS_SOURCE_SHA', 'EROS_IMAGE', 'EROS_TENANT_ID',
                           'EROS_TEST_USER_IDS', 'EROS_TEST_CREATOR_IDS'))
@@ -55,7 +57,7 @@ def read_env(path):
         if '=' not in line:
             raise RuntimeError('Eros protected environment has a malformed entry')
         key, value = line.split('=', 1)
-        if key not in MANAGED_KEYS:
+        if key not in MANAGED_KEYS | {LEGACY_EMBEDDING_KEY}:
             raise RuntimeError('Eros protected environment contains an unexpected entry')
         if key in values:
             raise RuntimeError('Eros protected environment contains duplicate entries')
@@ -513,7 +515,6 @@ def write_native_engine_env(path=ENV_PATH, output=NATIVE_ENV_PATH, *,
     env = {
         'DATABASE_URL': values['EROS_RUNTIME_DATABASE_URL'],
         'GPOINT_API_KEY': values['EROS_BRIDGE_API_KEY'],
-        'GPOINT_EMBEDDINGS_API_KEY': values['EROS_EMBEDDING_API_KEY'],
         'GPOINT_WORKER_BRIDGE_SIGNING_SECRET': values['EROS_WORKER_SIGNING_SECRET'],
         'GPOINT_WORKER_TENANT_ID': values['EROS_TENANT_ID'],
         'EROS_BRIDGE_API_KEY': values['EROS_BRIDGE_API_KEY'],
@@ -524,6 +525,8 @@ def write_native_engine_env(path=ENV_PATH, output=NATIVE_ENV_PATH, *,
         'MODEL_CONFIG_PATH': '/etc/eros-engine/model_config.toml',
         'RUST_LOG': 'info',
     }
+    if values.get(LEGACY_EMBEDDING_KEY):
+        env['GPOINT_EMBEDDINGS_API_KEY'] = values[LEGACY_EMBEDDING_KEY]
     if target.exists() and (target.is_symlink() or not stat.S_ISREG(target.stat().st_mode)
                             or target.stat().st_mode & 0o077 or target.stat().st_nlink != 1):
         raise RuntimeError('Native Eros environment file permissions are unsafe')
@@ -573,7 +576,7 @@ def read_world_writer_env(path=WORLD_WRITER_ENV_PATH):
 def write_native_api_env(path=ENV_PATH, source_env=SOURCE_ENV_PATH, output=NATIVE_API_ENV_PATH, *, world_writer_env=None):
     """Create the Core API's Eros bridge environment without exposing values."""
     values = read_env(Path(path))
-    required_secrets = {'EROS_JWT_SECRET', 'EROS_BRIDGE_API_KEY', 'EROS_EMBEDDING_API_KEY',
+    required_secrets = {'EROS_JWT_SECRET', 'EROS_BRIDGE_API_KEY',
                         'EROS_WORKER_SIGNING_SECRET', 'EROS_WORKER_GATEWAY_TOKEN',
                         'GENOME_WRITE_SECRET', 'EROS_TENANT_ID'}
     if not required_secrets.issubset(values) or any(not values.get(key) for key in required_secrets):
@@ -602,7 +605,6 @@ def write_native_api_env(path=ENV_PATH, source_env=SOURCE_ENV_PATH, output=NATIV
         'EROS_JWT_SECRET': values['EROS_JWT_SECRET'],
         'EROS_GENOME_WRITE_SECRET': values['GENOME_WRITE_SECRET'],
         'EROS_BRIDGE_API_KEY': values['EROS_BRIDGE_API_KEY'],
-        'EROS_EMBEDDING_API_KEY': values['EROS_EMBEDDING_API_KEY'],
         'EROS_WORKER_SIGNING_SECRET': values['EROS_WORKER_SIGNING_SECRET'],
         'GPOINT_EROS_WORKER_TOKEN': values['EROS_WORKER_GATEWAY_TOKEN'],
         'EROS_WORKER_TENANT_ID': values['EROS_TENANT_ID'],
@@ -613,6 +615,8 @@ def write_native_api_env(path=ENV_PATH, source_env=SOURCE_ENV_PATH, output=NATIV
         'EROS_PRODUCTION_TEST_CREATOR_IDS': '',
     }
     target = Path(output)
+    if values.get(LEGACY_EMBEDDING_KEY):
+        env[LEGACY_EMBEDDING_KEY] = values[LEGACY_EMBEDDING_KEY]
     if world_writer_env is not None or target == NATIVE_API_ENV_PATH:
         env.update(read_world_writer_env(world_writer_env or WORLD_WRITER_ENV_PATH))
     if target.parent.is_symlink():

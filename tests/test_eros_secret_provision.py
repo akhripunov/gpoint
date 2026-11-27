@@ -88,7 +88,7 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertEqual(first['EROS_TEST_USER_IDS'], '')
             self.assertEqual(first['EROS_TEST_CREATOR_IDS'], '')
             self.assertTrue(first['EROS_JWT_SECRET'])
-            self.assertTrue(first['EROS_EMBEDDING_API_KEY'])
+            self.assertNotIn('EROS_EMBEDDING_API_KEY', first)
             self.assertTrue(first['EROS_WORKER_SIGNING_SECRET'])
             self.assertTrue(first['EROS_WORKER_GATEWAY_TOKEN'])
             self.assertEqual(first['EROS_RUNTIME_DATABASE_URL'].split('@')[1], 'gpoint-eros-db:5432/eros')
@@ -98,7 +98,7 @@ class ErosProductionSecretTests(unittest.TestCase):
                                              image='ghcr.io/akhripunov/eros@sha256:' + 'd' * 64,
                                              tenant_id='12345678-1234-4234-8234-123456789abc'), output)
             second = MODULE.read_env(path)
-            for key in ('EROS_JWT_SECRET', 'EROS_EMBEDDING_API_KEY', 'EROS_WORKER_SIGNING_SECRET',
+            for key in ('EROS_JWT_SECRET', 'EROS_WORKER_SIGNING_SECRET',
                         'EROS_WORKER_GATEWAY_TOKEN', 'EROS_RUNTIME_PASSWORD', 'EROS_MIGRATOR_PASSWORD'):
                 self.assertEqual(second[key], first[key])
             self.assertEqual(second['EROS_SOURCE_SHA'], 'c' * 40)
@@ -123,6 +123,51 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertEqual(values['MODEL_CONFIG_PATH'], '/etc/eros-engine/model_config.toml')
             self.assertEqual(values['OPENROUTER_API_KEY'], 'synthetic-provider-key-123456789')
             self.assertNotIn('EROS_MIGRATOR_DATABASE_URL', values)
+
+    def test_retired_embedding_key_is_optional_without_weakening_required_secrets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / 'eros.env'
+            production = root / 'production.env'
+            engine = root / 'engine.env'
+            api = root / 'api.env'
+            tenant = '12345678-1234-4234-8234-123456789abc'
+            args = dict(source_sha='a' * 40,
+                        image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
+                        tenant_id=tenant)
+            production.write_text('')
+            MODULE.provision(path, **args)
+            before = MODULE.read_env(path)
+            self.assertNotIn('EROS_EMBEDDING_API_KEY', before)
+            self.assertEqual(MODULE.check_prerequisites(path, **args), 'EXISTING')
+            MODULE.provision(path, **args)
+            self.assertEqual(MODULE.read_env(path), before)
+            openrouter = self._openrouter_fixture(root)
+            voyage = self._voyage_fixture(root)
+            MODULE.write_native_engine_env(path, engine, openrouter_env=openrouter, voyage_env=voyage)
+            MODULE.write_native_api_env(path, production, api)
+            self.assertNotIn('GPOINT_EMBEDDINGS_API_KEY=', engine.read_text())
+            self.assertNotIn('EROS_EMBEDDING_API_KEY=', api.read_text())
+            self.assertIn('VOYAGE_API_KEY=', engine.read_text())
+            self.assertIn('EROS_OLLAMA_EMBEDDING_URL=\n', api.read_text())
+            # Legacy stores are still accepted, without rotation or deletion.
+            with path.open('a') as stream:
+                stream.write('EROS_EMBEDDING_API_KEY=synthetic-retired-key\n')
+            self.assertEqual(MODULE.check_prerequisites(path, **args), 'EXISTING')
+            MODULE.provision(path, **args)
+            self.assertEqual(MODULE.read_env(path)['EROS_EMBEDDING_API_KEY'], 'synthetic-retired-key')
+            MODULE.write_native_engine_env(path, engine, openrouter_env=openrouter, voyage_env=voyage)
+            MODULE.write_native_api_env(path, production, api)
+            self.assertIn('GPOINT_EMBEDDINGS_API_KEY=synthetic-retired-key', engine.read_text())
+            self.assertIn('EROS_EMBEDDING_API_KEY=synthetic-retired-key', api.read_text())
+            # Missing real credentials must still stop before Apply.
+            path.write_text('\n'.join(line for line in path.read_text().splitlines()
+                                      if not line.startswith('EROS_BRIDGE_API_KEY=')) + '\n')
+            original = path.read_bytes()
+            for check in (MODULE.check_prerequisites, MODULE.provision):
+                with self.assertRaisesRegex(RuntimeError, 'incomplete'):
+                    check(path, **args)
+            self.assertEqual(path.read_bytes(), original)
 
     def test_native_engine_environment_reads_voyage_key_from_protected_file_only(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -176,7 +221,7 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertEqual(values['EROS_OLLAMA_EMBEDDING_URL'], '')
             self.assertEqual(values['EROS_PRODUCTION_TEST_USER_IDS'], '')
             self.assertNotIn('worker-secret', result)
-            for key in ('EROS_JWT_SECRET', 'EROS_BRIDGE_API_KEY', 'EROS_EMBEDDING_API_KEY', 'EROS_WORKER_SIGNING_SECRET'):
+            for key in ('EROS_JWT_SECRET', 'EROS_BRIDGE_API_KEY', 'EROS_WORKER_SIGNING_SECRET'):
                 self.assertEqual(values[key], MODULE.read_env(source)[key])
 
     def test_native_api_environment_uses_dedicated_eros_worker_auth_without_agata_config(self):
@@ -338,7 +383,7 @@ class ErosProductionSecretTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             values = MODULE._new_values('a' * 40, 'ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
                                         '12345678-1234-4234-8234-123456789abc')
-            tokens = [values[key] for key in ('EROS_JWT_SECRET', 'EROS_EMBEDDING_API_KEY',
+            tokens = [values[key] for key in ('EROS_JWT_SECRET',
                                                'EROS_WORKER_SIGNING_SECRET', 'EROS_RUNTIME_PASSWORD',
                                                'EROS_MIGRATOR_PASSWORD', 'EROS_DATABASE_IDENTITY')]
             self.assertEqual(len(set(tokens)), len(tokens))
