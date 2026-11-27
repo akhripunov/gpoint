@@ -142,6 +142,10 @@ RETIRED_EROS_RELAY_PATHS = frozenset({
     "services/eros-engine/eros-pilot-embedding-relay.test.mjs",
     "services/eros-engine/open-mac-ollama-tunnel.sh",
 })
+RETIRED_OLLAMA_COMPOSE_PATHS = frozenset({
+    "infra/production/docker-compose.eros-pilot.yml",
+    "infra/production/docker-compose.eros.yml",
+})
 LEGACY_RELEASE_MARKERS = frozenset({
     "GPOINT-ARTIFACT-PREPARE",
     "GPOINT-LAYER7-API",
@@ -457,6 +461,8 @@ def _known_non_runtime_path(path: str) -> bool:
     if path in RETIRED_LAYER7_STAGING_PATHS:
         return False
     if path in RETIRED_EROS_RELAY_PATHS:
+        return True
+    if path in RETIRED_OLLAMA_COMPOSE_PATHS:
         return True
     if path.startswith(("services/agata/", "packages/agata-client/", "config/deploy.agata.yml")):
         return True

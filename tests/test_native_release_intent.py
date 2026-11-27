@@ -109,6 +109,8 @@ def test_runtime_paths_map_only_to_their_active_component(path, component):
     "services/eros-engine/eros-pilot-embedding-relay.mjs",
     "services/eros-engine/eros-pilot-embedding-relay.test.mjs",
     "services/eros-engine/open-mac-ollama-tunnel.sh",
+    "infra/production/docker-compose.eros-pilot.yml",
+    "infra/production/docker-compose.eros.yml",
 ])
 def test_retired_agata_and_relay_paths_do_not_select_an_image(path):
     assert MODULE._component_paths(path) == set()
