@@ -102,7 +102,7 @@ def test_check_only_never_writes_a_missing_env(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(secrets_mod, "read_openrouter_key", lambda path: "synthetic")
     monkeypatch.setattr(secrets_mod, "read_voyage_key", lambda: "synthetic")
     monkeypatch.setattr(secrets_mod, "verify_openrouter_models", lambda **kwargs: (
-        "deepseek/deepseek-v4.1-flash-1017", "anthropic/claude-haiku-4.5"))
+        "deepseek/deepseek-v4.1-flash-1017", "anthropic/claude-haiku-5.5"))
     monkeypatch.setattr(sys, "argv", ["eros-production-secrets.py", "--check-only", "--path", str(target),
                       "--source-sha", SOURCE_SHA, "--image", IMAGE, "--source-env", str(source)])
     secrets_mod.main()

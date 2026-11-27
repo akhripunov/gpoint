@@ -67,13 +67,16 @@ alter its installed configuration.
   removed, and the pinned Ollama container is stopped only after a production
   synthetic memory write/recall check passes. The production model configuration routes chat through native OpenRouter
   (`deepseek/deepseek-v4.1-flash-1017`) and analysis through
-  `anthropic/claude-haiku-4.5`, retaining upstream fallback roles and
+  `anthropic/claude-haiku-5.5` on 16 active analysis tasks, retaining upstream fallback roles and
   native Voyage embeddings. The direct DeepSeek credential is retained
   separately for recovery; there is no new runtime service.
-  Keep the upstream default JSON-schema response format on the four Claude
-  director tasks (group, world, world stories, world comment). The former direct
-  DeepSeek `structured_output = false` exception does not apply to OpenRouter
-  Haiku: a synthetic stock `world_stories_round` schema probe succeeded.
+  For Haiku 5.5, task-scoped OpenRouter body rules use JSON object for group,
+  world and world stories directors. World stories uses an explicit complete
+  output contract and 8192 output tokens. Synthetic provider checks passed
+  for this candidate; stock Eros does not enforce complete-field preservation
+  before persistence. OWNER accepted that residual risk for test-only data;
+  no database reset is part of this release. Other prompts, fallbacks and
+  stock engine version remain unchanged.
   A successful story round must persist `last_run_at`; repeated parse failures
   leave it due again on the next sweeper tick and incur further provider cost.
 - Stock `classify_session` performs model/extraction and embedding before an

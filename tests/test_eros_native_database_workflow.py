@@ -468,8 +468,9 @@ def test_kamal_roles_share_the_private_eros_network_with_stable_service_aliases(
     tasks = tomllib.loads(model)["tasks"]
     assert tasks["embedding"]["model"] == "voyage-4-lite"
     assert tasks["chat_companion"]["model"] == "deepseek/deepseek-v4.1-flash-1017"
-    assert all(task["model"] == "anthropic/claude-haiku-4.5"
-               for name, task in tasks.items() if name not in {"embedding", "chat_companion"})
+    assert all(task["model"] == "anthropic/claude-haiku-5.5"
+               for name, task in tasks.items() if name not in {"embedding", "chat_companion", "pde_decision"})
+    assert tasks["pde_decision"]["model"] == "anthropic/claude-haiku-4.5"
 
 
 def test_hosted_stock_eros_e2e_uses_exact_build_digest_and_approved_local_alias():
@@ -496,7 +497,7 @@ def test_normal_kamal_apply_does_not_boot_or_reconnect_ollama():
 def test_openrouter_runtime_verification_and_rollback_provider_guard():
     deploy = steps_for("deploy")
     verify = next(step for step in deploy if step.get("id") == "verify")["run"]
-    assert 'EROS_PROVIDER_CONFIG=PASS provider=openrouter chat=deepseek/deepseek-v4.1-flash-1017 analysis=anthropic/claude-haiku-4.5' in verify
+    assert 'EROS_PROVIDER_CONFIG=PASS provider=openrouter chat=deepseek/deepseek-v4.1-flash-1017 analysis=anthropic/claude-haiku-5.5' in verify
     assert 'test -n "$OPENROUTER_API_KEY"' in verify
     assert 'sha256sum /opt/gpoint/env/eros-production-model-config.toml' in verify
     retained = next(step for step in deploy if step.get("name") == "Verify retained Eros rollback containers")["run"]
@@ -510,7 +511,10 @@ def test_openrouter_uses_upstream_chat_and_group_reasoning_rules():
     assert set(config["providers"]) == {"openrouter"}
     assert config["providers"]["openrouter"]["body"] == [
         {"tasks": ["chat_companion"], "params": {"reasoning": {"enabled": False}}},
-        {"tasks": ["group_director"], "params": {"reasoning": {"effort": "medium"}}},
+        {"tasks": ["group_director", "world_director"], "params": {"reasoning": {"enabled": False}, "response_format": {"type": "json_object"}}},
+        {"tasks": ["world_stories_director"], "params": {"reasoning": {"enabled": False}, "response_format": {"type": "json_object"}}},
+        {"tasks": ["insight_extraction", "character_insight_extraction", "character_insight_structuring", "user_insight_extraction", "user_insight_structuring", "affinity_summary", "world_comment", "world_reply"], "params": {"reasoning": {"enabled": False}}},
+        {"tasks": ["affinity_evaluation", "activity_judge", "profile_rebuild", "dreaming_scan", "arc_rewrite"], "params": {"reasoning": {"effort": "low"}}},
     ]
     assert config["tasks"]["chat_companion"] == {
         "model": "deepseek/deepseek-v4.1-flash-1017",
@@ -525,14 +529,14 @@ def test_native_character_insights_use_upstream_haiku():
     extraction = dict(config["tasks"]["character_insight_extraction"])
     prompt = extraction.pop("filter_prompt")
     assert extraction == {
-        "model": "anthropic/claude-haiku-4.5",
+        "model": "anthropic/claude-haiku-5.5",
         "fallback": ["deepseek/deepseek-v4.1-flash-1017", "google/gemini-3.1-flash-lite"],
         "temperature": 0.2, "max_tokens": 800,
     }
     assert '"facts"' in prompt and '"details"' in prompt
     assert "current_situation" in prompt and "location" in prompt
     assert config["tasks"]["character_insight_structuring"] == {
-        "model": "anthropic/claude-haiku-4.5",
+        "model": "anthropic/claude-haiku-5.5",
         "fallback": ["deepseek/deepseek-v4.1-flash-1017", "google/gemini-3.1-flash-lite"],
         "temperature": 0.2, "max_tokens": 600,
     }
@@ -555,7 +559,7 @@ def test_stock_eros_text_task_parity():
         "affinity_summary": (0.6, 200),
         "group_director": (0.5, 4000),
         "world_director": (0.8, 4096),
-        "world_stories_director": (0.8, 4096),
+        "world_stories_director": (0.8, 8192),
         "world_comment": (0.9, 2048),
         "world_reply": (0.9, 1024),
         "pde_decision": (0.3, 400),
@@ -566,7 +570,7 @@ def test_stock_eros_text_task_parity():
     for name, (temperature, max_tokens) in expected.items():
         task = tasks[name]
         assert (task["temperature"], task["max_tokens"]) == (temperature, max_tokens), name
-        assert task["model"] == ("deepseek/deepseek-v4.1-flash-1017" if name == "chat_companion" else "anthropic/claude-haiku-4.5"), name
+        assert task["model"] == ("deepseek/deepseek-v4.1-flash-1017" if name == "chat_companion" else "anthropic/claude-haiku-4.5" if name == "pde_decision" else "anthropic/claude-haiku-5.5"), name
         assert "retry_depth" not in task, name
         if name in {"pde_decision", "world_director", "world_stories_director", "world_comment", "world_reply"}:
             assert task["fallback"] == [], name
@@ -583,15 +587,14 @@ def test_stock_eros_text_task_parity():
         "user_insight_extraction": "881016104709f3b2b8920c8dbbfde0b442497feee04125bf3e51f81abbf7a45b",
         "group_director": "6eeee1664c42106d2fc6045a2ec583298b931971dea1e3e6258e95423a3966a3",
         "world_director": "532a4cd219c80d559ede860c4f9fa63d6bf9bdd6a3478cd66f56dcf3d1c83a08",
-        "world_stories_director": "5c2a06b775cb72fe7731e34487311752fb89ef2bfc2078184370291231b2fbf4",
+        "world_stories_director": "086491d63fe8f21b162b0a87e61bae56e3ad875d4ef26e63f3d7b45d61291145",
         "world_comment": "98940c36c87eccf0d9887aa91d9c09bd53411c18e0befc6ce522287a01be34cb",
         "world_reply": "058ef651120346e085a3b931e45f094847f2108677b6280a2bf975b3822a4a4c",
     }
     assert {name for name, task in tasks.items() if "filter_prompt" in task} == set(prompts)
     for name, digest in prompts.items():
         assert hashlib.sha256(tasks[name]["filter_prompt"].encode()).hexdigest() == digest, name
-    # Native OpenRouter Claude routes use the upstream default JSON-schema mode.
-    # Do not retain the direct DeepSeek provider exception on these tasks.
+    # Keep native schema generation enabled; provider body rules override the three tested directors only.
     for name in ("group_director", "world_director", "world_stories_director", "world_comment"):
         assert tasks[name].get("structured_output", True) is True, name
     assert not any(task.get("structured_output") is False for task in tasks.values())

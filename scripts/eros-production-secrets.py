@@ -388,12 +388,11 @@ def verify_openrouter_models(*, credential_path=OPENROUTER_ENV_PATH, requester=N
     """Bounded synthetic provider preflight; never return response bodies or credentials."""
     key = read_openrouter_key(credential_path)
     send = requester or urlopen
-    models = ('deepseek/deepseek-v4.1-flash-1017', 'anthropic/claude-haiku-4.5')
+    models = ('deepseek/deepseek-v4.1-flash-1017', 'anthropic/claude-haiku-5.5')
     for model in models:
         payload = {'model': model, 'messages': [{'role': 'user', 'content': 'Reply with the single word READY.'}],
                    'max_tokens': 32, 'stream': False}
-        if model.startswith('deepseek/'):
-            payload['reasoning'] = {'enabled': False}
+        payload['reasoning'] = {'enabled': False}
         request = Request('https://openrouter.ai/api/v1/chat/completions',
                           data=json.dumps(payload).encode(), method='POST',
                           headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})

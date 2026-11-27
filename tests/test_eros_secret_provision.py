@@ -65,10 +65,10 @@ class ErosProductionSecretTests(unittest.TestCase):
                 response.__enter__.return_value = response
                 return response
             models = MODULE.verify_openrouter_models(credential_path=key_path, requester=fake)
-            self.assertEqual(models, ('deepseek/deepseek-v4.1-flash-1017', 'anthropic/claude-haiku-4.5'))
+            self.assertEqual(models, ('deepseek/deepseek-v4.1-flash-1017', 'anthropic/claude-haiku-5.5'))
             self.assertEqual([x['model'] for x in calls], list(models))
             self.assertTrue(all(x['max_tokens'] == 32 for x in calls))
-            self.assertEqual(calls[0]['reasoning'], {'enabled': False})
+            self.assertTrue(all(x['reasoning'] == {'enabled': False} for x in calls))
             def rejected(request, timeout):
                 raise MODULE.HTTPError(request.full_url, 402, 'synthetic failure', None, None)
             with self.assertRaisesRegex(RuntimeError, 'HTTP 402'):

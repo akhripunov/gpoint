@@ -1875,13 +1875,13 @@ jobs:
             docker exec "gpoint-eros-pilot-engine-$eros_version" grep -Fx 'model = "voyage-4-lite"' /etc/eros-engine/model_config.toml >/dev/null
             ! docker exec "gpoint-eros-pilot-engine-$eros_version" grep -F 'gpoint-core-api:3000/eros-worker/v1/embeddings' /etc/eros-engine/model_config.toml >/dev/null
             docker exec "gpoint-eros-pilot-engine-$eros_version" grep -Fx 'model = "deepseek/deepseek-v4.1-flash-1017"' /etc/eros-engine/model_config.toml >/dev/null
-            docker exec "gpoint-eros-pilot-engine-$eros_version" grep -Fx 'model = "anthropic/claude-haiku-4.5"' /etc/eros-engine/model_config.toml >/dev/null
+            docker exec "gpoint-eros-pilot-engine-$eros_version" grep -Fx 'model = "anthropic/claude-haiku-5.5"' /etc/eros-engine/model_config.toml >/dev/null
             docker exec "gpoint-eros-pilot-engine-$eros_version" sh -c 'test -n "$OPENROUTER_API_KEY" && ! grep -Fq "gpoint-codex@gpoint" /etc/eros-engine/model_config.toml'
             ! docker exec "gpoint-eros-pilot-engine-$eros_version" grep -Fq 'https://api.deepseek.com/chat/completions' /etc/eros-engine/model_config.toml
             docker exec "gpoint-eros-pilot-engine-$eros_version" sh -c 'test -n "$VOYAGE_API_KEY"'
             test "$(docker exec "gpoint-eros-pilot-engine-$eros_version" sha256sum /etc/eros-engine/model_config.toml | awk '{print $1}')" = "$(sha256sum /opt/gpoint/env/eros-production-model-config.toml | awk '{print $1}')"
             docker inspect --format '{{json .NetworkSettings.Networks}}' "gpoint-eros-pilot-engine-$eros_version" | python3 -c 'import json,sys; assert set(json.load(sys.stdin)) == {"gpoint_eros_data","kamal"}'
-            echo EROS_PROVIDER_CONFIG=PASS provider=openrouter chat=deepseek/deepseek-v4.1-flash-1017 analysis=anthropic/claude-haiku-4.5
+            echo EROS_PROVIDER_CONFIG=PASS provider=openrouter chat=deepseek/deepseek-v4.1-flash-1017 analysis=anthropic/claude-haiku-5.5
             echo EROS_EMBEDDING_PROVIDER=PASS provider=voyage model=voyage-4-lite dimensions=512
             python3 "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py" "gpoint-eros-pilot-engine-$eros_version" "$expected_eros_upstream" none
             rm -f -- "/run/gpoint-eros-runtime-labels-${run_id}-${attempt}.py"
@@ -2325,7 +2325,7 @@ jobs:
             docker image inspect "$(docker inspect --format '{{.Image}}' "$ids")" --format '{{json .RepoDigests}}' | grep -F "$image" >/dev/null
           done
           grep -Fx 'model = "deepseek/deepseek-v4.1-flash-1017"' /opt/gpoint/env/eros-production-model-config.toml >/dev/null
-          grep -Fx 'model = "anthropic/claude-haiku-4.5"' /opt/gpoint/env/eros-production-model-config.toml >/dev/null
+          grep -Ex 'model = "anthropic/claude-haiku-(4\.5|5\.5)"' /opt/gpoint/env/eros-production-model-config.toml >/dev/null
           if grep -Fq 'gpoint-codex@gpoint' /opt/gpoint/env/eros-production-model-config.toml; then
             echo 'Eros rollback would use retired generation route' >&2; exit 1
           fi
