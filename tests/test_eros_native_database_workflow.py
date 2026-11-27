@@ -535,8 +535,10 @@ def test_stock_eros_text_task_parity():
             assert task["fallback"] == ["deepseek/deepseek-v4.1-flash-1017"], name
         elif name != "chat_companion":
             assert task["fallback"] == ["deepseek/deepseek-v4.1-flash-1017", "google/gemini-3.1-flash-lite"], name
-    # Source: Eros v2.8.1 c7d63d77, examples/model_config.d.
-    # Hash the parsed prompt, not the TOML formatting.
+    # Stock source: Eros v2.8.1 c7d63d77, examples/model_config.d.
+    # Hash parsed prompts, not TOML formatting. Only the two explicitly
+    # enumerated Dialogue Lab V8 extraction candidates differ from stock.
+    # The original stock digests are retained here for the rollback contract.
     prompts = {
         "dreaming_scan": "289513d33da87001b9ffe4a237ed313a358d4be69b1f2094cb5f708ee61451f9",
         "character_insight_extraction": "db2f06cd32f92b27cfefa0ecf81027ec3fa7c3570680362471bb83313f12c2ba",
@@ -548,6 +550,13 @@ def test_stock_eros_text_task_parity():
         "world_comment": "98940c36c87eccf0d9887aa91d9c09bd53411c18e0befc6ce522287a01be34cb",
         "world_reply": "058ef651120346e085a3b931e45f094847f2108677b6280a2bf975b3822a4a4c",
     }
+    # Intentional prompt-only overrides; every other task retains stock parity.
+    v8_extraction_overrides = {
+        "character_insight_extraction": "0f0735d19aaaca0a19e6cd1d56b7ec15935a23a31ce6ee1a3fc8a6f95270e899",
+        "insight_extraction": "2580d9e1563a8d02dfeb131250f70bece7b059a9e02e0653f5b41f30c537cc30",
+    }
+    assert set(v8_extraction_overrides) == {"character_insight_extraction", "insight_extraction"}
+    prompts.update(v8_extraction_overrides)
     assert {name for name, task in tasks.items() if "filter_prompt" in task} == set(prompts)
     for name, digest in prompts.items():
         assert hashlib.sha256(tasks[name]["filter_prompt"].encode()).hexdigest() == digest, name
