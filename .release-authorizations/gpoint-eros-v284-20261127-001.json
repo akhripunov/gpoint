@@ -1,0 +1,153 @@
+{
+  "schema_version": 3,
+  "project": "gpoint",
+  "environment": "production",
+  "authorization_id": "gpoint-eros-v284-20261127-001",
+  "authorization_mode": "TASK_SCOPED_AUTO",
+  "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+  "source_instruction_identifier": "OWNER_2026-11-27_GPOINT_EROS284_SQLX_APPROVAL",
+  "owner_task_reference": "OWNER requested latest Eros; after explicit explanation of SQLx 0088–0090, backup/restore and rollback risk, OWNER answered «Разрешаю.» to the exact migration and protected production release request.",
+  "task": "Reapply reviewed local candidate only after recording authorization. Upgrade stock Eros to official v2.8.4 and exact SQLx 0088–0090, preserving model routing and data.",
+  "production_baseline_sha": "15483dc3c379e781e1a4e6176bb1d2d85aca94e7",
+  "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+  "allowed_paths": [
+    ".release-authorizations/gpoint-eros-v284-20261127-001.json",
+    "scripts/eros-native-database.py",
+    "services/eros-engine/MIGRATION_AUDIT.md",
+    "services/eros-engine/README.md",
+    "services/eros-engine/upstream.sha",
+    "tests/test_eros_native_database.py"
+  ],
+  "allowed_operations": [
+    "integrate",
+    "prepare",
+    "preflight",
+    "deploy",
+    "verify",
+    "publish_evidence"
+  ],
+  "acceptance_criteria": [
+    "Current main and live Eros identity exactly match the recorded baseline; no unrelated changes.",
+    "All hosted tests, immutable image Build, isolated SQLx/synthetic E2E and production prerequisite checks pass.",
+    "Encrypted backup and isolated restore; validate exact baseline SQLx history and exact official 0088–0090 target checksum ledger before Apply.",
+    "Canonical Kamal replacement immediately after migration; verify exact stock upstream revision, live ledger, service health, unchanged model config and retained data."
+  ],
+  "exclusions": [
+    "No Prisma migration, data reset, direct SQL Apply, downstream engine patch, new worker, secret rotation or unrelated service change; no bypass of protected gates."
+  ],
+  "risk_contracts": {
+    "release_infrastructure": {
+      "allowed_paths": [
+        ".release-authorizations/gpoint-eros-v284-20261127-001.json",
+        "scripts/eros-native-database.py",
+        "services/eros-engine/MIGRATION_AUDIT.md",
+        "services/eros-engine/README.md",
+        "services/eros-engine/upstream.sha",
+        "tests/test_eros_native_database.py"
+      ],
+      "allowed_operations": [
+        "integrate",
+        "prepare",
+        "preflight",
+        "deploy",
+        "verify",
+        "publish_evidence"
+      ],
+      "baseline_sha": "15483dc3c379e781e1a4e6176bb1d2d85aca94e7",
+      "risk_description": "Exact stock Eros 2.8.1 to 2.8.4, official migrations 88–90. Migration 88 changes cached statement result types until old image is replaced, 90 rewrites existing facts with grouping IDs and nullable vectors. Existing sessions receive default relationship status none. Preserve data and existing model routing.",
+      "required_gates": [
+        "Current main and live Eros identity exactly match the recorded baseline; no unrelated changes.",
+        "All hosted tests, immutable image Build, isolated SQLx/synthetic E2E and production prerequisite checks pass.",
+        "Encrypted backup and isolated restore; validate exact baseline SQLx history and exact official 0088–0090 target checksum ledger before Apply.",
+        "Canonical Kamal replacement immediately after migration; verify exact stock upstream revision, live ledger, service health, unchanged model config and retained data."
+      ],
+      "backup_plan": "Existing run-scoped protected encrypted Eros backup, digest verification and isolated restore with exact candidate migrator before production Apply.",
+      "rollback_plan": "No blind image rollback, downgrade, or restore. Stop on failure and reconcile live database and image read-only; old image compatibility must be proven or separately authorized recovery from the verified backup is required.",
+      "stop_conditions": [
+        "baseline drift",
+        "unknown or failed migration/checksum",
+        "failed mandatory gate",
+        "ambiguous apply",
+        "unrelated schema or component change",
+        "missing backup",
+        "failed runtime verification"
+      ]
+    },
+    "database_migration": {
+      "allowed_paths": [
+        ".release-authorizations/gpoint-eros-v284-20261127-001.json",
+        "scripts/eros-native-database.py",
+        "services/eros-engine/MIGRATION_AUDIT.md",
+        "services/eros-engine/README.md",
+        "services/eros-engine/upstream.sha",
+        "tests/test_eros_native_database.py"
+      ],
+      "allowed_operations": [
+        "integrate",
+        "prepare",
+        "preflight",
+        "deploy",
+        "verify",
+        "publish_evidence"
+      ],
+      "baseline_sha": "15483dc3c379e781e1a4e6176bb1d2d85aca94e7",
+      "risk_description": "Exact stock Eros 2.8.1 to 2.8.4, official migrations 88–90. Migration 88 changes cached statement result types until old image is replaced, 90 rewrites existing facts with grouping IDs and nullable vectors. Existing sessions receive default relationship status none. Preserve data and existing model routing.",
+      "required_gates": [
+        "Current main and live Eros identity exactly match the recorded baseline; no unrelated changes.",
+        "All hosted tests, immutable image Build, isolated SQLx/synthetic E2E and production prerequisite checks pass.",
+        "Encrypted backup and isolated restore; validate exact baseline SQLx history and exact official 0088–0090 target checksum ledger before Apply.",
+        "Canonical Kamal replacement immediately after migration; verify exact stock upstream revision, live ledger, service health, unchanged model config and retained data."
+      ],
+      "backup_plan": "Existing run-scoped protected encrypted Eros backup, digest verification and isolated restore with exact candidate migrator before production Apply.",
+      "rollback_plan": "No blind image rollback, downgrade, or restore. Stop on failure and reconcile live database and image read-only; old image compatibility must be proven or separately authorized recovery from the verified backup is required.",
+      "stop_conditions": [
+        "baseline drift",
+        "unknown or failed migration/checksum",
+        "failed mandatory gate",
+        "ambiguous apply",
+        "unrelated schema or component change",
+        "missing backup",
+        "failed runtime verification"
+      ],
+      "production_database_baselines": [
+        {
+          "database": "eros",
+          "upstream_sha": "c7d63d77e9b52d7ae4952b8374512f571da065d5",
+          "sqlx_versions": [
+            0,
+            78,
+            79,
+            80,
+            81,
+            82,
+            83,
+            84,
+            85,
+            86,
+            87
+          ],
+          "head": 87,
+          "successful": 11,
+          "failed": 0
+        }
+      ],
+      "target_heads_and_digests": [
+        {
+          "system": "Eros SQLx",
+          "upstream_version": "2.8.4",
+          "upstream_sha": "b547130739716888524e9b8b82ab444b0b453c1b",
+          "head": 90,
+          "migration_0088_sha384": "39054de94b448afa6bb0a303e4652b59134f583b0f772396ad4eafd44f2bd8d9fdfecaf1d1eb954d53af95a3f7f8c4fa",
+          "migration_0089_sha384": "5d8da84308e96037151adc01894fb7f3e7e78327a15d3cd1802fea201ee13588667aaab70323c56c5881bb4966a3d3c2",
+          "migration_0090_sha384": "0d17c7adfc4c2c869a6dc9cfc870650c3734a77051e08c8df7dbab1d73f0f93e22a30aca38ddff022903ae9a533a710b"
+        }
+      ]
+    }
+  },
+  "preauthorized_commits": [],
+  "preauthorized_paths": [],
+  "state": "ACTIVE",
+  "revoked": false,
+  "consumed": false,
+  "owner_task_commitment_sha256": "2257637eea77f968d06b5efa66fa1d9e130c2d6156f89ab88c51a65339c9e313"
+}
