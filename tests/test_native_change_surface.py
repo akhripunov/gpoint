@@ -58,21 +58,6 @@ def test_eros_engine_filter_excludes_independent_components_and_test_harness():
         assert not intent.paths_match_filter({path}, "eros_engine")
 
 
-def test_ollama_is_an_independent_pinned_internal_accessory():
-    config = yaml.safe_load((ROOT / "config/deploy.ollama.yml").read_text())
-    accessory = config["accessories"]["ollama"]
-    assert accessory["image"] == (
-        "ollama/ollama@sha256:a717bfc1c56acfc2e85d3109bd40a7646258ec9062c40cea83b9ed0927eb4223"
-    )
-    assert accessory["network"] == "gpoint_ollama_internal"
-    assert accessory["port"] == "127.0.0.1:11435:11434"
-    assert "ollama-layer7-models:/root/.ollama" in accessory["volumes"]
-    assert accessory["options"]["network-alias"] == "ollama"
-    assert accessory["options"]["restart"] == "unless-stopped"
-    assert accessory["options"]["cpus"] == 1.5
-    assert accessory["options"]["memory"] == "3g"
-
-
 def test_core_api_uses_only_current_eros_networks():
     api = yaml.safe_load((ROOT / "config/deploy.eros-api.yml").read_text())
     networks = api["servers"]["api"]["options"]["network"]
@@ -103,18 +88,24 @@ def test_retired_relay_paths_are_non_runtime_and_ollama_can_auto_release():
     assert intent.push_deploy_authorized(mode="DEPLOY", changed_paths={"apps/api/src/messages.ts"})
 
 
-def test_production_api_does_not_publish_ollama_to_public_networks():
+def test_production_has_no_ollama_service_and_embeddings_are_native_or_test_only():
     steps = workflow()["jobs"]["deploy"]["steps"]
     deploy = next(step for step in steps if step.get("name") == "Deploy exact immutable images with stock Kamal")
     body = deploy["run"]
-    verifier = (ROOT / "scripts/verify-layer7-ollama.py").read_text()
-    stop = next(step for step in steps if step.get("name") == "Disable Qwen route and stop Ollama after Voyage verification")
-    assert "gpoint-eros-relay-relay" in stop["run"]
-    assert "docker network disconnect gpoint_ollama_internal \"$api\"" in stop["run"]
-    assert "docker stop --time 30 \"$relay\"" in stop["run"]
-    assert "docker stop --time 30 \"$ollama\"" in stop["run"]
-    assert '"docker", "network", "create", "--internal", NETWORK' in verifier
-    assert "gpoint_ollama_internal" in verifier
-    assert "config/deploy.ollama.yml" not in body
+    assert not (ROOT / "config/deploy.ollama.yml").exists()
+    assert not (ROOT / "scripts/verify-layer7-ollama.py").exists()
+    assert "ollama" not in body.lower()
+    assert "qwen" not in body.lower()
     assert "config/deploy.eros-relay.yml" not in body
     assert "deploy --skip-push --version \"$IMAGE_VERSION\" --roles relay" not in body
+
+
+def test_synthetic_embedding_route_is_disposable_local_only():
+    policy = (ROOT / "apps/api/src/eros-network-policy.js").read_text()
+    gateway = (ROOT / "apps/api/src/eros-worker-gateway.ts").read_text()
+    secret_writer = (ROOT / "scripts/eros-production-secrets.py").read_text()
+    assert "if (!localTest) return false" in policy
+    assert "return url.hostname === '127.0.0.1'" in policy
+    assert "if (!isDisposableSyntheticLocalTest())" in gateway
+    assert "EROS_TEST_EMBEDDING_URL" in gateway
+    assert "EROS_OLLAMA_EMBEDDING_URL" not in secret_writer

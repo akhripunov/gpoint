@@ -149,7 +149,7 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertNotIn('GPOINT_EMBEDDINGS_API_KEY=', engine.read_text())
             self.assertNotIn('EROS_EMBEDDING_API_KEY=', api.read_text())
             self.assertIn('VOYAGE_API_KEY=', engine.read_text())
-            self.assertIn('EROS_OLLAMA_EMBEDDING_URL=\n', api.read_text())
+            self.assertNotIn('EROS_OLLAMA_EMBEDDING_URL=', api.read_text())
             # Legacy stores are still accepted, without rotation or deletion.
             with path.open('a') as stream:
                 stream.write('EROS_EMBEDDING_API_KEY=synthetic-retired-key\n')
@@ -158,8 +158,9 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertEqual(MODULE.read_env(path)['EROS_EMBEDDING_API_KEY'], 'synthetic-retired-key')
             MODULE.write_native_engine_env(path, engine, openrouter_env=openrouter, voyage_env=voyage)
             MODULE.write_native_api_env(path, production, api)
-            self.assertIn('GPOINT_EMBEDDINGS_API_KEY=synthetic-retired-key', engine.read_text())
-            self.assertIn('EROS_EMBEDDING_API_KEY=synthetic-retired-key', api.read_text())
+            self.assertNotIn('GPOINT_EMBEDDINGS_API_KEY=', engine.read_text())
+            self.assertNotIn('EROS_EMBEDDING_API_KEY=', api.read_text())
+            self.assertEqual(MODULE.read_env(path)['EROS_EMBEDDING_API_KEY'], 'synthetic-retired-key')
             # Missing real credentials must still stop before Apply.
             path.write_text('\n'.join(line for line in path.read_text().splitlines()
                                       if not line.startswith('EROS_BRIDGE_API_KEY=')) + '\n')
@@ -204,7 +205,7 @@ class ErosProductionSecretTests(unittest.TestCase):
                              image='ghcr.io/akhripunov/eros@sha256:' + 'b' * 64,
                              tenant_id=tenant)
             production.write_text('GPOINT_AGATA_WORKER_TOKEN=worker-secret\n'
-                                  'EROS_OLLAMA_EMBEDDING_URL=http://ollama:11434/api/embed\n')
+                                  'EROS_OLLAMA_EMBEDDING_URL=http://retired.invalid/api/embed\n')
             result = MODULE.write_native_api_env(source, production, output)
             values = dict(line.split('=', 1) for line in output.read_text().splitlines())
             self.assertEqual(result, 'EROS_API_ENV=READY')
@@ -218,7 +219,7 @@ class ErosProductionSecretTests(unittest.TestCase):
             self.assertNotIn('GPOINT_CHAT_POLICY_MARKET', values)
             self.assertEqual(values['GPOINT_EROS_WORKER_TOKEN'], MODULE.read_env(source)['EROS_WORKER_GATEWAY_TOKEN'])
             self.assertNotIn('GPOINT_AGATA_WORKER_TOKEN', values)
-            self.assertEqual(values['EROS_OLLAMA_EMBEDDING_URL'], '')
+            self.assertNotIn('EROS_OLLAMA_EMBEDDING_URL', values)
             self.assertEqual(values['EROS_PRODUCTION_TEST_USER_IDS'], '')
             self.assertNotIn('worker-secret', result)
             for key in ('EROS_JWT_SECRET', 'EROS_BRIDGE_API_KEY', 'EROS_WORKER_SIGNING_SECRET'):

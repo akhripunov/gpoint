@@ -323,7 +323,6 @@ jobs:
           tests/test_eros_pilot_no_agata_transfer.py
           tests/test_kamal_native_automatic_release.py
           tests/test_eros_native_database_workflow.py
-          tests/test_layer7_ollama_verifier.py
           tests/test_verify_kamal_production_baseline.py
           tests/test_native_rollback_evidence.py
           tests/test_native_environment_deployment.py
@@ -685,7 +684,7 @@ jobs:
           import os, re, json, pathlib, subprocess
           from collections import defaultdict
           roots=("/opt/gpoint/env","/opt/gpoint","/root","/home","/srv","/etc/gpoint")
-          avoid={".git","node_modules",".cache","cache","logs","media","pgdata","postgres","redis","ollama","backups","tmp",".venv","venv"}
+          avoid={".git","node_modules",".cache","cache","logs","media","pgdata","postgres","redis","backups","tmp",".venv","venv"}
           def env_path(p):
               n=p.name.lower()
               return n==".env" or n.startswith(".env.") or n.endswith(".env") or n.startswith("production.env") or n.endswith(".env.bak") or n.endswith(".env.old")
@@ -929,34 +928,21 @@ jobs:
         id: component_plan
         env:
           BASELINE_ROLE_INVENTORY: ${{ steps.topology.outputs.GPOINT_BASELINE_ROLE_INVENTORY }}
-          BASELINE_EROS_SOURCE_SHA: ${{ steps.topology.outputs.EROS_SOURCE_SHA }}
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           MINIAPP_DIGEST: ${{ needs.build.outputs.miniapp_digest }}
           EROS_DIGEST: ${{ needs.build.outputs.eros_digest }}
         run: |
           set -euo pipefail
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import base64, json, os, re, subprocess, sys
+          import base64, json, os, re, sys
           from pathlib import Path
           sys.path.insert(0, str(Path.cwd() / "scripts"))
           from native_release_intent import (ALL_COMPONENT_ROLES, ROLE_REPOSITORIES,
                                              classify_component_scope, expected_runtime_inventory_b64)
 
           candidate = os.environ["CANDIDATE_SHA"]
-          baseline_eros_sha = os.environ["BASELINE_EROS_SOURCE_SHA"]
           baseline = json.loads(os.environ["BASELINE_ROLE_INVENTORY"])
           scope = classify_component_scope(Path.cwd(), candidate, baseline)
-          reset_auth = ".release-authorizations/gpoint-voyage-4-lite-20261126-001.json"
-          if not re.fullmatch(r"[0-9a-f]{40}", baseline_eros_sha):
-              raise SystemExit("Eros reset authorization baseline is unavailable")
-          reset_diff = subprocess.run(
-              ["git", "diff", "--quiet", baseline_eros_sha, candidate, "--", reset_auth],
-              check=False,
-          )
-          if reset_diff.returncode not in {0, 1}:
-              raise SystemExit("Eros reset authorization baseline comparison failed")
-          reset_changed = reset_diff.returncode == 1
-          print("voyage_memory_reset=" + str(bool(scope["deploy_eros"] and reset_changed)).lower())
           scope_components = set(scope["scope"].split("+")) - {"NONE"}
           effective = {}
           image_inputs = {"CORE": "APP_DIGEST", "MINIAPP": "MINIAPP_DIGEST", "EROS": "EROS_DIGEST"}
@@ -1293,21 +1279,6 @@ jobs:
             echo "prisma_checksums=$(sed -n 's/^prisma_checksums=//p' <<< "$facts")"
           } >> "$GITHUB_OUTPUT"
           echo "GPOINT_PRISMA_APPLY=PASS PENDING=$PENDING_MIGRATIONS" >> "$GITHUB_STEP_SUMMARY"
-      - name: Freeze Eros memory access for Voyage cutover
-        if: steps.component_plan.outputs.voyage_memory_reset == 'true' && inputs.mode != 'rollback'
-        env:
-          EROS_INSTALLED: ${{ steps.topology.outputs.EROS_INSTALLED }}
-          EROS_VERSION: ${{ steps.topology.outputs.EROS_VERSION }}
-          EROS_SOURCE_SHA: ${{ steps.topology.outputs.EROS_SOURCE_SHA }}
-        run: |
-          set -euo pipefail
-          test "$EROS_INSTALLED" = true || { echo 'Voyage test-memory cleanup requires an existing Eros deployment' >&2; exit 1; }
-          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- gpoint-eros-pilot-engine "$EROS_VERSION" "$EROS_SOURCE_SHA" \
-            < scripts/verify-kamal-role.sh
-          bash "$GITHUB_WORKSPACE/scripts/run-pinned-kamal.sh" apply . app stop --roles engine --config-file config/deploy.eros.yml
-          frozen="$(ssh -T "root@${GPOINT_PRODUCTION_HOST}" docker inspect --format '{{.State.Status}}' "gpoint-eros-pilot-engine-$EROS_VERSION")"
-          test "$frozen" = exited || { echo 'Eros did not stop before memory backup and cleanup' >&2; exit 1; }
-          echo 'EROS_MEMORY_ACCESS=FROZEN' >> "$GITHUB_STEP_SUMMARY"
       - name: Rehearse exact Eros SQLx transition against protected backup restore
         id: eros_database
         if: needs.tests.outputs.mode == 'DEPLOY' && ((steps.component_plan.outputs.deploy_eros == 'true') && inputs.mode != 'rollback')
@@ -1316,7 +1287,6 @@ jobs:
           EROS_DIGEST: ${{ steps.component_plan.outputs.eros_digest }}
           EROS_BOOTSTRAP: ${{ steps.component_plan.outputs.eros_bootstrap }}
           DEPLOY_CORE: ${{ steps.component_plan.outputs.deploy_core }}
-          DEPLOY_EROS_MEMORY_RESET: ${{ steps.component_plan.outputs.voyage_memory_reset }}
           EROS_SOURCE_SHA: ${{ steps.topology.outputs.EROS_SOURCE_SHA }}
           APP_DIGEST: ${{ needs.build.outputs.app_digest }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1325,7 +1295,6 @@ jobs:
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$EROS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$EROS_BOOTSTRAP" == true || "$EROS_BOOTSTRAP" == false ]]
-          [[ "$DEPLOY_EROS_MEMORY_RESET" == true || "$DEPLOY_EROS_MEMORY_RESET" == false ]]
           [[ "$EROS_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           eros_image="ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST"
           run_identity="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
@@ -1355,20 +1324,8 @@ jobs:
           ssh -T "root@${GPOINT_PRODUCTION_HOST}" env DOCKER_CONFIG="$remote_docker_config" python3 - "${base_secret_args[@]}" \
             < scripts/eros-production-secrets.py
           prepare_args=(--mode prepare --candidate "$CANDIDATE_SHA" --image "$eros_image" --run-id "$run_identity")
-          if [[ "$DEPLOY_EROS_MEMORY_RESET" == true ]]; then
-            [[ "$EROS_BOOTSTRAP" == false ]]
-            prepare_args+=(--test-memory-reset)
-          fi
           ssh -T "root@${GPOINT_PRODUCTION_HOST}" env DOCKER_CONFIG="$remote_docker_config" python3 - "${prepare_args[@]}" \
             < scripts/eros-native-database.py
-          if [[ "$DEPLOY_EROS_MEMORY_RESET" == true ]]; then
-            ssh -T "root@${GPOINT_PRODUCTION_HOST}" env DOCKER_CONFIG="$remote_docker_config" python3 - \
-              --mode validate-test-memory-reset --test-memory-reset --candidate "$CANDIDATE_SHA" \
-              --image "$eros_image" --run-id "$run_identity" < scripts/eros-native-database.py
-            ssh -T "root@${GPOINT_PRODUCTION_HOST}" env DOCKER_CONFIG="$remote_docker_config" python3 - \
-              --mode reset-test-memory --test-memory-reset --candidate "$CANDIDATE_SHA" \
-              --image "$eros_image" --run-id "$run_identity" < scripts/eros-native-database.py
-          fi
           # Preserve the old on-disk model configuration until backup/restore and
           # any approved one-time cleanup have passed while Eros is stopped.
           model_config_sha256="$(sha256sum services/eros-engine/eros-production-model-config.toml | awk '{print $1}')"
@@ -1557,142 +1514,6 @@ jobs:
           ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - \
             --mode verify-applied --candidate "$CANDIDATE_SHA" --image "$image" \
             --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" < scripts/eros-native-database.py
-      - name: Verify native Voyage memory write and recall
-        if: steps.component_plan.outputs.voyage_memory_reset == 'true' && inputs.mode != 'rollback'
-        id: voyage_memory_verify
-        env:
-          CORE_API_VERSION: ${{ steps.component_plan.outputs.core_api_version }}
-        run: |
-          set -euo pipefail
-          [[ "$CORE_API_VERSION" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
-          api_container="gpoint-core-api-$CORE_API_VERSION"
-          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$api_container" <<'REMOTE_VOYAGE_MEMORY'
-          set -euo pipefail
-          name="$1"
-          test "$(docker inspect --format '{{.State.Status}}' "$name")" = running
-          test "$(docker inspect --format '{{index .Config.Labels "service"}}' "$name")" = gpoint-core
-          docker exec -i "$name" node --input-type=module - <<'NODE'
-          import { createErosEngineClient, erosGenomeCardFor, erosGenomeIdentityFor, erosIdentityFor, uuidV5 } from '/app/apps/api/dist/apps/api/src/eros-adapter.js';
-
-          const client = createErosEngineClient();
-          if (!client) throw new Error('synthetic Eros client unavailable');
-          const creatorId = 'voyage_native_memory_verification';
-          const userId = 'voyage_native_memory_verification_user';
-          const identity = erosIdentityFor({ userId, creatorId });
-          const genomeId = erosGenomeIdentityFor(creatorId);
-          await client.createGenome(genomeId, erosGenomeCardFor('Synthetic Voyage memory verification'));
-          let session = await client.startSession(identity.userId, genomeId);
-          const namespace = '11111111-1111-5111-8111-111111111111';
-          const send = async (sequence, text) => client.sendMessage(
-            identity.userId,
-            session.sessionId,
-            uuidV5(namespace, `voyage-memory-verification-${sequence}`),
-            text,
-            { creatorId: identity.creatorId, instanceId: session.instanceId },
-          );
-          await send(1, 'My favorite fruit is cobalt pear, and I live near Zephyr Bay. Please remember those details.');
-          const distractors = [
-            'Describe a calm morning walk through a botanical garden.',
-            'What makes a well organized desk comfortable to work at?',
-            'Write a short thought about listening to rain indoors.',
-            'How can someone plan a relaxed weekend without a schedule?',
-            'Describe the colors in a fictional landscape painting.',
-            'What are a few ways to keep a reading nook comfortable?',
-            'Write a neutral sentence about learning a new recipe.',
-            'Describe a quiet train ride through the countryside.',
-            'What is enjoyable about visiting a small museum?',
-            'Share a simple idea for arranging house plants.',
-            'Describe the sound of wind moving through pine trees.',
-            'What helps make a public library welcoming?',
-            'Write about choosing a notebook for everyday notes.',
-            'Describe a peaceful evening at a lakeside cabin.',
-          ];
-          for (let index = 0; index < distractors.length; index += 1) {
-            await send(index + 2, distractors[index]);
-          }
-          const reopened = await client.startSession(identity.userId, genomeId);
-          if (reopened.sessionId !== session.sessionId || reopened.instanceId !== session.instanceId) {
-            throw new Error('synthetic session recovery mismatch');
-          }
-          session = reopened;
-          const recall = await send(16, 'After all those other topics, what is my favorite fruit and which bay did I say I live near?');
-          const answer = recall.text.toLowerCase();
-          if (!answer.includes('zephyr bay') || !answer.includes('cobalt pear')) {
-            throw new Error('synthetic durable memory recall failed');
-          }
-          // The final SSE frame can precede the history read becoming visible.
-          // Poll read-only history; never resend a turn or weaken the recall check.
-          let persisted = false;
-          const recallClientId = uuidV5(namespace, 'voyage-memory-verification-16');
-          for (let attempt = 0; attempt < 10 && !persisted; attempt += 1) {
-            const history = await client.history(identity.userId, session.sessionId, 50);
-            const question = history.messages.findIndex((message) => message.role === 'user' && message.client_msg_id === recallClientId);
-            const response = question >= 0 ? history.messages[question + 1] : undefined;
-            persisted = history.messages.some((message) => message.role === 'user' && message.content.includes('Zephyr Bay')) &&
-              response?.role === 'assistant' && response.content.toLowerCase().includes('zephyr bay') &&
-              response.content.toLowerCase().includes('cobalt pear');
-            if (!persisted && attempt < 9) await new Promise((resolve) => setTimeout(resolve, 1000));
-          }
-          if (!persisted) throw new Error('synthetic Eros memory transcript persistence failed');
-          console.log('EROS_NATIVE_VOYAGE_MEMORY=PASS synthetic_turns=16 session_reopened=true recall=PASS history=PASS');
-          NODE
-          REMOTE_VOYAGE_MEMORY
-          echo 'EROS_NATIVE_VOYAGE_MEMORY=PASS' >> "$GITHUB_STEP_SUMMARY"
-      - name: Disable Qwen route and stop Ollama after Voyage verification
-        if: steps.voyage_memory_verify.outcome == 'success' && steps.component_plan.outputs.voyage_memory_reset == 'true'
-        env:
-          CORE_API_VERSION: ${{ steps.component_plan.outputs.core_api_version }}
-        run: |
-          set -euo pipefail
-          [[ "$CORE_API_VERSION" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
-          ssh -T "root@${GPOINT_PRODUCTION_HOST}" bash -s -- "$CORE_API_VERSION" <<'REMOTE_DISABLE_QWEN'
-          set -euo pipefail
-          version="$1"
-          api="gpoint-core-api-$version"
-          ollama=gpoint-ollama-ollama
-          relay=gpoint-eros-relay-relay
-          test "$(docker inspect --format '{{.State.Status}}' "$api")" = running
-          test "$(docker inspect --format '{{index .Config.Labels "service"}}' "$api")" = gpoint-core
-          relay_state="$(docker inspect --format '{{.State.Status}}' "$relay")"
-          [[ "$relay_state" == running || "$relay_state" == exited ]]
-          test "$(docker inspect --format '{{index .Config.Labels "service"}}' "$relay")" = gpoint-eros-relay-relay
-          test "$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$relay")" = unless-stopped
-          test "$(docker inspect --format '{{json .Config.Cmd}}' "$relay")" = '["node","/app/services/eros-engine/eros-pilot-embedding-relay.mjs"]'
-          relay_image="$(docker inspect --format '{{.Config.Image}}' "$relay")"
-          [[ "$relay_image" =~ ^ghcr\.io/akhripunov/gpoint-runtime@sha256:[0-9a-f]{64}$ ]]
-          docker network inspect gpoint_ollama_internal | python3 -c 'import json,sys; n=json.load(sys.stdin)[0]; assert n["Internal"] is True; names={x["Name"] for x in n["Containers"].values()}; assert names in ({"gpoint-ollama-ollama",sys.argv[1]},{"gpoint-ollama-ollama"},{sys.argv[1]},set())' "$api"
-          api_networks="$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$api")"
-          if python3 -c 'import json,sys; raise SystemExit(0 if "gpoint_ollama_internal" in json.loads(sys.argv[1]) else 1)' "$api_networks"; then
-            docker network disconnect gpoint_ollama_internal "$api"
-          fi
-          docker inspect --format '{{json .NetworkSettings.Networks}}' "$api" | python3 -c 'import json,sys; assert "gpoint_ollama_internal" not in json.load(sys.stdin)'
-          relay_state="$(docker inspect --format '{{.State.Status}}' "$relay")"
-          if [[ "$relay_state" == running ]]; then docker stop --time 30 "$relay" >/dev/null; fi
-          test "$(docker inspect --format '{{.State.Status}}' "$relay")" = exited
-          facts="$(docker inspect --format '{{.State.Status}}|{{.Config.Image}}|{{json .Mounts}}|{{json .NetworkSettings.Networks}}' "$ollama")"
-          IFS='|' read -r state image mounts networks <<< "$facts"
-          [[ "$state" == running || "$state" == exited ]]
-          [[ "$image" == ollama/ollama@sha256:a717bfc1c56acfc2e85d3109bd40a7646258ec9062c40cea83b9ed0927eb4223 ]]
-          test "$(docker inspect --format '{{index .Config.Labels "service"}}' "$ollama")" = gpoint-eros-relay-ollama
-          test "$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$ollama")" = unless-stopped
-          python3 - "$mounts" "$networks" <<'PY'
-          import json,sys
-          mounts,networks=(json.loads(value) for value in sys.argv[1:])
-          if not any(m.get('Name')=='ollama-layer7-models' and m.get('Destination')=='/root/.ollama' and m.get('RW') is True for m in mounts):
-              raise SystemExit('Ollama recovery model volume is not preserved')
-          if set(networks) not in ({'gpoint_ollama_internal','kamal'}, {'gpoint_ollama_internal'}, set()):
-              raise SystemExit('Ollama recovery network identity changed')
-          PY
-          test "$(docker volume inspect ollama-layer7-models --format '{{.Name}}')" = ollama-layer7-models
-          ollama_networks="$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$ollama")"
-          if [[ "$state" == running ]] && python3 -c 'import json,sys; raise SystemExit(0 if "kamal" in json.loads(sys.argv[1]) else 1)' "$ollama_networks"; then
-            docker network disconnect kamal "$ollama"
-          fi
-          if [[ "$state" == running ]]; then docker stop --time 30 "$ollama" >/dev/null; fi
-          test "$(docker inspect --format '{{.State.Status}}' "$ollama")" = exited
-          echo 'QWEN_STATE=DISABLED relay=stopped ollama=stopped recovery_image_and_volume=preserved api_network=detached'
-          REMOTE_DISABLE_QWEN
-          echo 'QWEN_DISABLE=PASS relay=stopped ollama=stopped api_network=detached recovery_image_and_volume=preserved' >> "$GITHUB_STEP_SUMMARY"
       - name: Verify public routes and exact running services
         if: (inputs.mode != 'rollback')
         id: verify
@@ -2518,8 +2339,6 @@ jobs:
             --prisma-current-checksums "$(sed -n 's/^PRISMA_CHECKSUMS=//p' <<< "$facts")" \
             --prisma-current-head "$(sed -n 's/^PRISMA_HEAD=//p' <<< "$facts")"
           if [[ "$ROLLBACK_EROS" == true ]]; then
-            model_digest="$(python3 -c 'import json; print(json.load(open("services/eros-engine/ollama-model.lock.json"))["digest"])')"
-            ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - "$model_digest" < scripts/verify-layer7-ollama.py
             ssh -T "root@${GPOINT_PRODUCTION_HOST}" python3 - --mode verify-unchanged \
               --candidate "$EROS_SOURCE_SHA" --image "ghcr.io/akhripunov/gpoint-eros@$EROS_DIGEST" \
               --run-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" < scripts/eros-native-database.py

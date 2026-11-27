@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
@@ -181,7 +179,7 @@ test('model config routes chat, embeddings and synthetic dreaming scan to the in
 });
 
 test('runtime Eros profiles preserve the dreaming scan output contract and parameters-only arc rewrite', () => {
-  for (const name of ['eros-production-model-config.toml', 'eros-pilot-model-config.toml']) {
+  for (const name of ['eros-production-model-config.toml']) {
     const config = readFileSync(new URL(name, directory), 'utf8');
     const dreaming = config.split(/^\[tasks\.dreaming_scan\][ \t]*$/m)[1]?.split(/^\[tasks\./m)[0] ?? '';
     const arc = config.split(/^\[tasks\.arc_rewrite\][ \t]*$/m)[1]?.split(/^\[tasks\./m)[0] ?? '';
@@ -221,64 +219,6 @@ test('GPoint adapter and injected dialogue prompts do not control Eros memory sc
   const dialoguePrompt = workerContract.split('const GPOINT_EROS_DIALOGUE_ADAPTER = `')[1]?.split('`;')[0] ?? '';
   assert.ok(dialoguePrompt, 'the GPoint dialogue adapter prompt is present');
   assert.doesNotMatch(dialoguePrompt, /memories|memory/i);
-});
-
-test('Mac Ollama tunnel preserves its reverse forward and reconnects after SSH exits', () => {
-  const tunnel = readFileSync(new URL('open-mac-ollama-tunnel.sh', directory), 'utf8');
-  assert.doesNotMatch(tunnel, /ClearAllForwardings=yes/);
-  assert.match(tunnel, /-R 127\.0\.0\.1:11435:127\.0\.0\.1:11434/);
-  assert.match(tunnel, /while[\s\S]*ssh[\s\S]*sleep/);
-  assert.match(tunnel, /ServerAliveInterval=30/);
-  assert.match(tunnel, /ServerAliveCountMax=3/);
-  assert.match(tunnel, /GPOINT_SSH_IDENTITY_FILE/);
-  assert.match(tunnel, /-o IdentitiesOnly=yes/);
-});
-
-test('Mac Ollama tunnel retries SSH after a disconnect and stops cleanly on TERM', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'eros-tunnel-test-'));
-  const bin = join(directory, 'bin');
-  mkdirSync(bin);
-  const calls = join(directory, 'ssh-calls');
-  const identity = join(directory, 'synthetic-ssh-identity');
-  writeFileSync(identity, 'synthetic identity marker\n', { mode: 0o600 });
-  const script = fileURLToPath(new URL('open-mac-ollama-tunnel.sh', import.meta.url));
-  const node = join(bin, 'node');
-  const ssh = join(bin, 'ssh');
-  writeFileSync(node, '#!/bin/sh\nexit 0\n');
-  writeFileSync(ssh, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$EROS_TEST_SSH_CALLS"\nif [ "$(wc -l < "$EROS_TEST_SSH_CALLS")" -eq 1 ]; then exit 255; fi\nexec /bin/sleep 30\n');
-  chmodSync(node, 0o700);
-  chmodSync(ssh, 0o700);
-  const tunnel = spawn('/bin/sh', [script], {
-    env: {
-      PATH: `${bin}:/usr/bin:/bin`,
-      EROS_PILOT_VPS_SSH_TARGET: 'synthetic@vps.invalid',
-      GPOINT_SSH_IDENTITY_FILE: identity,
-      EROS_TEST_SSH_CALLS: calls,
-    },
-    stdio: 'ignore',
-  });
-  const exit = new Promise((resolve) => tunnel.once('exit', resolve));
-  try {
-    const deadline = Date.now() + 10_000;
-    let lines = [];
-    while (Date.now() < deadline) {
-      if (existsSync(calls)) lines = readFileSync(calls, 'utf8').trim().split('\n');
-      if (lines.length >= 2) break;
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    assert.equal(lines.length, 2, 'tunnel should retry the SSH reverse forward after a disconnect');
-    assert.ok(lines.every((line) => line.includes('-R 127.0.0.1:11435:127.0.0.1:11434')));
-    assert.ok(lines.every((line) => line.includes(`-i ${identity}`) && line.includes('-o IdentitiesOnly=yes')));
-    assert.ok(lines.every((line) => !line.includes('ClearAllForwardings=yes')));
-    tunnel.kill('SIGTERM');
-    await exit;
-  } finally {
-    if (tunnel.exitCode === null) {
-      tunnel.kill('SIGTERM');
-      await exit;
-    }
-    rmSync(directory, { recursive: true, force: true });
-  }
 });
 
 test('local Worker fixture refuses non-isolated or non-local mode', () => {

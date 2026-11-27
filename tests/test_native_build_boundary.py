@@ -514,11 +514,12 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("DEPLOY_EROS", workflow_text)
         self.assertIn("gpoint-eros-pilot-engine", workflow_text)
         deploy_steps = jobs["deploy"]["steps"]
-        qwen_cleanup = next(step for step in deploy_steps
-                            if step.get("name") == "Disable Qwen route and stop Ollama after Voyage verification")
         kamal_apply = next(step for step in deploy_steps if step.get("id") == "kamal_apply")
-        self.assertIn("gpoint-eros-relay-relay", qwen_cleanup["run"])
+        self.assertNotIn("Disable Qwen route and stop Ollama", workflow_text)
+        self.assertNotIn("verify-layer7-ollama.py", workflow_text)
         self.assertNotIn("gpoint-eros-relay-relay", kamal_apply["run"])
+        self.assertNotIn("voyage_memory_reset", workflow_text)
+        self.assertNotIn("reset-test-memory", workflow_text)
         self.assertIn('image: akhripunov/gpoint-eros', (ROOT / "config/deploy.eros.yml").read_text())
         self.assertIn('--eros-digest "$eros_digest"', workflow_text)
         self.assertNotIn("docker compose", workflow_text)
@@ -559,7 +560,8 @@ class NativeReleaseBoundaryTests(unittest.TestCase):
 
         config_check = (ROOT / "scripts/check-kamal-configs.sh").read_text()
         for config in ("deploy.yml", "deploy.miniapp.yml", "deploy.eros.yml",
-                       "deploy.ollama.yml", "deploy.eros-api.yml"):
+                       "deploy.eros-api.yml"):
             self.assertIn(f"config/{config}", config_check)
+        self.assertNotIn("deploy.ollama.yml", config_check)
         self.assertIn("config-validation-placeholder", config_check)
         self.assertIn("Kamal config validation failed", config_check)

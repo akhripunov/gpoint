@@ -14,7 +14,7 @@ chat = "http://gpoint-api:3000/eros-worker/v1/chat/completions"
 embeddings = "http://gpoint-api:3000/eros-worker/v1/embeddings"
 
 [tasks.embedding]
-model = "qwen3-embedding:0.6b@gpoint"
+model = "gpoint-test-embedding@gpoint"
 
 [tasks.dreaming_scan]
 model = "gpoint-codex@gpoint"

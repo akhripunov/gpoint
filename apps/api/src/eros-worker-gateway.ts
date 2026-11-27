@@ -3,7 +3,7 @@ import { BadRequestException, Body, Controller, Get, Headers, Header, HttpExcept
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { PrismaClient, type Prisma } from '@prisma/client';
 import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, deriveBridgeInferenceIdentity, isExpectedErosWorkerJobIdentity, parseBridgeRequest, parseErosEmbeddingRequest, signBridgeIdentity, workerChatCompletionRequest, type ParsedErosBridgeRequest } from './eros-worker-contract.js';
-import { isAllowedOllamaEmbeddingEndpoint, isDisposableSyntheticLocalTest } from './eros-network-policy.js';
+import { isAllowedSyntheticEmbeddingEndpoint, isDisposableSyntheticLocalTest } from './eros-network-policy.js';
 import { erosIdentityFor, exactErosPilotPair, isGpointOwnedErosMode } from './eros-adapter.js';
 
 const prisma = new PrismaClient();
@@ -549,13 +549,15 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
     @Headers() headers: Record<string, string | string[] | undefined>,
     @Body() body: unknown,
   ) {
-    bearer(headers, 'EROS_EMBEDDING_API_KEY');
+    if (!isDisposableSyntheticLocalTest()) {
+      throw new HttpException({ code: 'EROS_EMBEDDINGS_UNAVAILABLE' }, 503);
+    }
+    bearer(headers, 'EROS_TEST_EMBEDDING_API_KEY');
     let parsed;
     try { parsed = parseErosEmbeddingRequest(body); }
     catch { throw new BadRequestException({ code: 'EROS_EMBEDDING_REQUEST_INVALID' }); }
-    const endpoint = process.env.EROS_OLLAMA_EMBEDDING_URL ?? '';
-    const localMode = isDisposableSyntheticLocalTest();
-    if (!isAllowedOllamaEmbeddingEndpoint(endpoint, { localTest: localMode })) {
+    const endpoint = process.env.EROS_TEST_EMBEDDING_URL ?? '';
+    if (!isAllowedSyntheticEmbeddingEndpoint(endpoint, { localTest: true })) {
       throw new HttpException({ code: 'EROS_EMBEDDINGS_UNAVAILABLE' }, 503);
     }
     const url = new URL(endpoint);
@@ -564,9 +566,9 @@ export class ErosWorkerGatewayController implements OnModuleInit, OnModuleDestro
       const response = await fetch(url, {
         method: 'POST', redirect: 'error', signal: AbortSignal.timeout(60_000),
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model: 'qwen3-embedding:0.6b', input: parsed.input, dimensions: 512, truncate: false }),
+        body: JSON.stringify({ input: parsed.input, dimensions: 512, truncate: false }),
       });
-      if (!response.ok) throw new Error('ollama_embedding_status');
+      if (!response.ok) throw new Error('synthetic_embedding_status');
       result = await response.json();
     } catch {
       throw new HttpException({ code: 'EROS_EMBEDDINGS_UNAVAILABLE' }, 502);

@@ -86,13 +86,13 @@ def test_kamal_core_config_uses_public_tls_proxy_and_only_core_roles():
     assert "eros" not in config["servers"]
 
 
-def test_kamal_app_components_use_three_images_and_ollama_is_infrastructure():
+def test_kamal_app_components_use_three_images_without_retired_ollama_config():
     miniapp = yaml.safe_load((ROOT / "config/deploy.miniapp.yml").read_text())
     eros = yaml.safe_load((ROOT / "config/deploy.eros.yml").read_text())
-    ollama = yaml.safe_load((ROOT / "config/deploy.ollama.yml").read_text())
+    assert not (ROOT / "config/deploy.ollama.yml").exists()
     assert not (ROOT / "config/deploy.agata.yml").exists()
     assert not (ROOT / "config/deploy.eros-relay.yml").exists()
-    for config in (miniapp, eros, ollama):
+    for config in (miniapp, eros):
         assert config["ssh"]["keys"] == ["<%= ENV.fetch(\"GPOINT_SSH_KEY\") %>"]
         assert config["ssh"]["config"] is True
         assert config["ssh"]["keys_only"] is True
@@ -107,11 +107,6 @@ def test_kamal_app_components_use_three_images_and_ollama_is_infrastructure():
     assert eros["service"] == "gpoint-eros-pilot"
     assert eros["image"] == "akhripunov/gpoint-eros"
     assert set(eros["servers"]) == {"engine"}
-    accessory = ollama["accessories"]["ollama"]
-    assert accessory["network"] == "gpoint_ollama_internal"
-    assert accessory["options"]["network-alias"] == "ollama"
-    assert accessory["image"].startswith("ollama/ollama@sha256:")
-    assert accessory["volumes"] == ["ollama-layer7-models:/root/.ollama"]
     workflow = (ROOT / ".github/workflows/gpoint-release.yml").read_text()
     assert "id: miniapp" in workflow and "target: miniapp-runtime" in workflow
     assert "ghcr.io/akhripunov/gpoint-miniapp:${{ github.sha }}" in workflow

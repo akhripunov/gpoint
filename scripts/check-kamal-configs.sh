@@ -86,8 +86,7 @@ for config_file in \
   config/deploy.yml \
   config/deploy.miniapp.yml \
   config/deploy.eros.yml \
-  config/deploy.eros-api.yml \
-  config/deploy.ollama.yml; do
+  config/deploy.eros-api.yml; do
   run_config "$config_file" config
   run_config "$config_file" secrets print
   grep -Fq "KAMAL_REGISTRY_PASSWORD=$synthetic_registry_password" "$output_file" || {

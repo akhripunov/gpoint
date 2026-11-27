@@ -61,11 +61,10 @@ alter its installed configuration.
   access-isolation, backup and recovery requirements remain active; this decision
   does not claim that stock Eros provides a full-erasure endpoint. The initial
   pilot remains synthetic-only in a dedicated Eros database, with no real user
-  data. The Voyage transition candidate uses stock Eros v2.8.1's native
-  `voyage-4-lite` embedding route at 512 dimensions. The former Qwen/Ollama
-  route is retained only as a recovery artifact; its Core API network route is
-  removed, and the pinned Ollama container is stopped only after a production
-  synthetic memory write/recall check passes. The production model configuration routes chat through native OpenRouter
+  data. Production uses stock Eros v2.8.1's native `voyage-4-lite` embedding
+  route at 512 dimensions. The retired Qwen/Ollama and Eros Relay services,
+  deployment configs, and production fallbacks have been removed. The
+  production model configuration routes chat through native OpenRouter
   (`deepseek/deepseek-v4.1-flash-1017`) and analysis through
   `anthropic/claude-haiku-5.5` on 16 active analysis tasks, retaining upstream fallback roles and
   native Voyage embeddings. The direct DeepSeek credential is retained

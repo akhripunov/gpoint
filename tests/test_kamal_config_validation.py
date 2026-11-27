@@ -11,7 +11,6 @@ CONFIGS = [
     "config/deploy.miniapp.yml",
     "config/deploy.eros.yml",
     "config/deploy.eros-api.yml",
-    "config/deploy.ollama.yml",
 ]
 REGISTRY_PASSWORD = "config-validation-placeholder"
 KAMAL_IMAGE = "ghcr.io/basecamp/kamal:v2.12.0@sha256:7a3893b47dd328955f86fbf9ba887d08d612b74f96867f077750a53312537625"

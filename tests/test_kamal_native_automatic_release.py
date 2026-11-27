@@ -319,7 +319,6 @@ def test_runtime_verify_rechecks_public_routes_and_five_target_roles_after_deplo
         "shared_redis_1",
         "PRISMA_HEAD",
         "GPOINT_MEDIA_READ_WRITE=PASS",
-        "verify-layer7-ollama.py",
     ):
         assert expected in verify
     assert "'<title>GPoint</title>'" in verify
@@ -328,9 +327,8 @@ def test_runtime_verify_rechecks_public_routes_and_five_target_roles_after_deplo
     assert "GPOINT_BOT_READY=PASS" in verify
     assert "if grep -q '^gpoint-core-bot|' <<< \"$runtime_rows\"; then" in verify
     assert "apps/bot/dist/main.js" not in verify
-    helper = (ROOT / "scripts/verify-layer7-ollama.py").read_text(encoding="utf-8")
-    assert 'BASE_URL = "http://ollama:11434"' in helper
-    assert 'const base = "http://ollama:11434"' in helper
+    assert "ollama" not in verify.lower()
+    assert "qwen" not in verify.lower()
 
 
 def test_runtime_verify_uses_actual_database_container_names_not_absent_compose_labels():

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { HttpException } from '@nestjs/common';
 import { ErosWorkerGatewayController } from '../src/eros-worker-gateway.js';
 import { buildChatCompletionSse, buildOpenAiEmbeddingResponse, deriveBridgeInferenceIdentity, parseBridgeRequest, parseErosEmbeddingRequest, signBridgeIdentity, verifyBridgeIdentity, workerChatCompletionRequest } from '../src/eros-worker-contract.js';
 
@@ -164,9 +165,9 @@ test('chat request rejects sampling temperatures the Mac Worker cannot honor', a
   }, secret, now), /eros_chat_request_invalid/);
 });
 
-test('embedding proxy contract requires exact Qwen model and native 512-dimensional vectors', () => {
+test('synthetic embedding contract requires its exact fixture model and 512-dimensional vectors', () => {
   const request = parseErosEmbeddingRequest({
-    model: 'qwen3-embedding:0.6b', input: ['Привет', 'память'], dimensions: 512,
+    model: 'gpoint-test-embedding', input: ['Привет', 'память'], dimensions: 512,
   });
   assert.equal(request.input.length, 2);
   assert.equal(request.dimensions, 512);
@@ -181,16 +182,24 @@ test('embedding proxy contract requires exact Qwen model and native 512-dimensio
   assert.throws(() => buildOpenAiEmbeddingResponse(request.model, [Array(512).fill(Number.NaN)]));
 });
 
-test('Core embeddings call the private Ollama alias with the pinned Qwen contract', async () => {
+test('Core embeddings call only the disposable loopback synthetic provider', async () => {
   const env = {
-    key: process.env.EROS_EMBEDDING_API_KEY,
-    url: process.env.EROS_OLLAMA_EMBEDDING_URL,
+    nodeEnv: process.env.NODE_ENV,
+    dataMode: process.env.EROS_DATA_MODE,
+    localTest: process.env.EROS_WORKER_LOCAL_TEST,
+    disposableDb: process.env.EROS_WORKER_DISPOSABLE_TEST_DB,
+    key: process.env.EROS_TEST_EMBEDDING_API_KEY,
+    url: process.env.EROS_TEST_EMBEDDING_URL,
   };
   const originalFetch = globalThis.fetch;
   let calledUrl = '';
   let calledInit: RequestInit | undefined;
-  process.env.EROS_EMBEDDING_API_KEY = 'local-embedding-test-key';
-  process.env.EROS_OLLAMA_EMBEDDING_URL = 'http://ollama:11434/api/embed';
+  process.env.NODE_ENV = 'development';
+  process.env.EROS_DATA_MODE = 'synthetic';
+  process.env.EROS_WORKER_LOCAL_TEST = 'true';
+  process.env.EROS_WORKER_DISPOSABLE_TEST_DB = '1';
+  process.env.EROS_TEST_EMBEDDING_API_KEY = 'local-embedding-test-key';
+  process.env.EROS_TEST_EMBEDDING_URL = 'http://127.0.0.1:11434/api/embed';
   globalThis.fetch = async (input, init) => {
     calledUrl = String(input);
     calledInit = init;
@@ -200,20 +209,74 @@ test('Core embeddings call the private Ollama alias with the pinned Qwen contrac
     const controller = Object.create(ErosWorkerGatewayController.prototype) as ErosWorkerGatewayController;
     const result = await controller.embeddings(
       { authorization: 'Bearer local-embedding-test-key' },
-      { model: 'qwen3-embedding:0.6b', input: 'private network embedding', dimensions: 512 },
+      { model: 'gpoint-test-embedding', input: 'private network embedding', dimensions: 512 },
     );
-    assert.equal(calledUrl, 'http://ollama:11434/api/embed');
+    assert.equal(calledUrl, 'http://127.0.0.1:11434/api/embed');
     assert.equal(calledInit?.method, 'POST');
     assert.equal(calledInit?.redirect, 'error');
     assert.deepEqual(JSON.parse(String(calledInit?.body)), {
-      model: 'qwen3-embedding:0.6b', input: ['private network embedding'], dimensions: 512, truncate: false,
+      input: ['private network embedding'], dimensions: 512, truncate: false,
     });
     assert.equal((result as { data: { embedding: number[] }[] }).data[0].embedding.length, 512);
   } finally {
     globalThis.fetch = originalFetch;
-    if (env.key === undefined) delete process.env.EROS_EMBEDDING_API_KEY;
-    else process.env.EROS_EMBEDDING_API_KEY = env.key;
-    if (env.url === undefined) delete process.env.EROS_OLLAMA_EMBEDDING_URL;
-    else process.env.EROS_OLLAMA_EMBEDDING_URL = env.url;
+    for (const [key, value] of Object.entries({
+      NODE_ENV: env.nodeEnv,
+      EROS_DATA_MODE: env.dataMode,
+      EROS_WORKER_LOCAL_TEST: env.localTest,
+      EROS_WORKER_DISPOSABLE_TEST_DB: env.disposableDb,
+      EROS_TEST_EMBEDDING_API_KEY: env.key,
+      EROS_TEST_EMBEDDING_URL: env.url,
+    })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('production mode rejects synthetic embeddings before making a network request', async () => {
+  const env = {
+    nodeEnv: process.env.NODE_ENV,
+    dataMode: process.env.EROS_DATA_MODE,
+    localTest: process.env.EROS_WORKER_LOCAL_TEST,
+    disposableDb: process.env.EROS_WORKER_DISPOSABLE_TEST_DB,
+    key: process.env.EROS_TEST_EMBEDDING_API_KEY,
+    url: process.env.EROS_TEST_EMBEDDING_URL,
+  };
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  process.env.NODE_ENV = 'production';
+  process.env.EROS_DATA_MODE = 'gpoint-owned';
+  process.env.EROS_WORKER_LOCAL_TEST = 'false';
+  process.env.EROS_WORKER_DISPOSABLE_TEST_DB = '0';
+  process.env.EROS_TEST_EMBEDDING_API_KEY = 'synthetic-only-key';
+  process.env.EROS_TEST_EMBEDDING_URL = 'http://127.0.0.1:11434/api/embed';
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response('{}', { status: 200 });
+  };
+  try {
+    const controller = Object.create(ErosWorkerGatewayController.prototype) as ErosWorkerGatewayController;
+    await assert.rejects(
+      controller.embeddings(
+        { authorization: 'Bearer synthetic-only-key' },
+        { model: 'gpoint-test-embedding', input: 'production must not use test vectors', dimensions: 512 },
+      ),
+      (error: unknown) => error instanceof HttpException && error.getStatus() === 503,
+    );
+    assert.equal(calls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [key, value] of Object.entries({
+      NODE_ENV: env.nodeEnv,
+      EROS_DATA_MODE: env.dataMode,
+      EROS_WORKER_LOCAL_TEST: env.localTest,
+      EROS_WORKER_DISPOSABLE_TEST_DB: env.disposableDb,
+      EROS_TEST_EMBEDDING_API_KEY: env.key,
+      EROS_TEST_EMBEDDING_URL: env.url,
+    })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
