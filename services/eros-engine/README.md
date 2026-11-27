@@ -3,7 +3,7 @@
 ## Owner decision
 
 Use the unmodified upstream `etherfunlab/eros-engine` source at
-`c7d63d77e9b52d7ae4952b8374512f571da065d5` (v2.8.1). Do not apply Rust
+`b547130739716888524e9b8b82ab444b0b453c1b` (v2.8.4). Do not apply Rust
 patches, maintain a fork, replace the installed GPOINT Mac Product Worker, or
 add an EROS Worker/lane. The files in `patches/` are retained as historical
 audit evidence only. `apply-patches.sh` now fails closed without changing its
@@ -14,7 +14,7 @@ Build a local stock image from a clean exact upstream checkout:
 ```sh
 services/eros-engine/build-stock-image.sh \
   /path/to/clean-eros-engine-checkout \
-  gpoint-eros:stock-c7d63d77e9b52d7ae4952b8374512f571da065d5
+  gpoint-eros:stock-b547130739716888524e9b8b82ab444b0b453c1b
 ```
 
 The script verifies the upstream commit and clean Git tree before invoking the
@@ -61,7 +61,7 @@ alter its installed configuration.
   access-isolation, backup and recovery requirements remain active; this decision
   does not claim that stock Eros provides a full-erasure endpoint. The initial
   pilot remains synthetic-only in a dedicated Eros database, with no real user
-  data. Production uses stock Eros v2.8.1's native `voyage-4-lite` embedding
+  data. The v2.8.4 candidate retains stock Eros v2.8.1's native `voyage-4-lite` embedding
   route at 512 dimensions. The retired Qwen/Ollama and Eros Relay services,
   deployment configs, and production fallbacks have been removed. The
   production model configuration routes chat through native OpenRouter
@@ -131,7 +131,7 @@ offline `print-openapi` command and full local Compose E2E passed. Evidence:
 `LOCAL_E2E_MEMORY_RECALL=PASS`, and `LOCAL_E2E_CLEANUP=PASS`.
 That historical run used the v2.2.1 `memory_extraction` config. It does not
 validate the new v2.7.0 `dreaming_scan` and `arc_rewrite` configuration; the
-v2.8.1 Docker/PostgreSQL E2E has not yet run in this worktree.
+v2.8.4 Docker/PostgreSQL E2E has not yet run in this worktree.
 `OPENROUTER_API_KEY` was empty, with no credential; the inference test network
 had no egress. Real inference was not run. The GPoint queue tenant RLS test
 passed with a non-bypass worker role; Eros has no per-user RLS, and the API

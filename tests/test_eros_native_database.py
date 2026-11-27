@@ -268,6 +268,28 @@ class ErosNativeDatabaseTests(unittest.TestCase):
         migrate.assert_called_once_with(image, "eros_check_1_1", {})
         self.assertEqual(receipts[0]["upstreamSha"], DB.EROS_V281_SHA)
 
+    def test_v284_exact_upgrade_and_unknown_or_corrupted_history_rejection(self):
+        before = [ledger(v, *reversed(DB.EROS_V281_HISTORY[v]))[0] for v in DB.EROS_V281_HISTORY]
+        target = [ledger(v, *reversed(DB.EROS_V284_HISTORY[v]))[0] for v in DB.EROS_V284_HISTORY]
+        image = "ghcr.io/akhripunov/gpoint-eros@sha256:" + "b" * 64
+        self.assertEqual([r["version"] for r in target], [0, *range(78, 91)])
+        with patch.object(DB, "_image_upstream_sha", return_value=DB.EROS_V284_SHA), \
+             patch.object(DB, "_run_migrator") as migrate, \
+             patch.object(DB, "_ledger", return_value=target):
+            actual, pending, receipts = DB._run_migration_chain(image, "eros_check_1_1", {}, before)
+            self.assertEqual(actual, target)
+            self.assertEqual([r["version"] for r in pending], [88, 89, 90])
+            self.assertEqual(receipts[0]["upstreamSha"], DB.EROS_V284_SHA)
+            migrate.assert_called_once()
+            migrate.reset_mock()
+            for damaged in (before[:-1], before[:-1] + [dict(before[-1], checksum="0"*96)]):
+                with self.assertRaisesRegex(RuntimeError, "history"):
+                    DB._run_migration_chain(image, "eros_check_1_1", {}, damaged)
+            migrate.assert_not_called()
+            self.assertEqual(DB._migration_stage_images(target, image), [(image, DB.EROS_V284_SHA)])
+        with self.assertRaisesRegex(RuntimeError, "exact upstream migration history"):
+            DB._validate_exact_history(target[:-1], DB.EROS_V284_HISTORY)
+
     def test_v221_to_v270_rehearsal_uses_only_pinned_official_migrators_in_order(self):
         before = [ledger(version, f"{version:096x}", f"migration_{version}")[0]
                   for version in range(72)]

@@ -105,3 +105,20 @@ current synthetic Prisma/Alembic schemas. An older Eros installation with
 `engine.*` tables but only a public SQLx ledger is rejected before migration;
 automatic adoption is intentionally not implemented because blindly treating
 or moving a shared public ledger could corrupt another application's history.
+
+
+## v2.8.4 candidate review (2026-11-27)
+
+Official upstream v2.8.4, `b547130739716888524e9b8b82ab444b0b453c1b`.
+From v2.8.1, the exact additional SQLx versions are 88 (relationship status),
+89 (persona events cycle index), and 90 (fact groups). All older SQL files
+are unchanged. Exact SHA-384 values are pinned in the lifecycle script.
+The existing production model config is intentionally unchanged.
+
+The previous image cannot be assumed to support the new SQLx history.
+A protected backup and isolated restore rehearsal must pass before any
+production apply, with migration/rollback authorization from OWNER.
+A plain image rollback to v2.8.1 must not be used without compatibility
+evidence; database recovery requires a separately authorized recovery plan.
+No memory deletion or migration rewrite is proposed. Local candidate only;
+production migration, cutover and live E2E are not yet authorized or verified.

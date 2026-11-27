@@ -51,6 +51,7 @@ EROS_V250_SHA = "d12172de0e674b9f6fbe8cf78ebbb3338b746a7b"
 EROS_V250_IMAGE = "ghcr.io/etherfunlab/eros-engine@sha256:bf9a887f7a1a12816957eaf83b4ad0fde7d581e2795ad937d3ee33b95f3065a5"
 EROS_V270_SHA = "83a54d1dba57874d55ecaa9756473f126b62844f"
 EROS_V281_SHA = "c7d63d77e9b52d7ae4952b8374512f571da065d5"
+EROS_V284_SHA = "b547130739716888524e9b8b82ab444b0b453c1b"
 EROS_V270_HISTORY = {
     0: ("baseline", "36dee22457e174da8003b5efe9730bd877745eef9334d275eb8ae40662863d9d02880c73185e5f672a5da8f589f141c2"),
     78: ("chat images events event", "e1d7b3a625212c58ec2c462a8f6e37685b52e38eb13bfb8b7655a9d516cefd4df30ef9876344b31908b5a8c37a50aba1"),
@@ -66,6 +67,13 @@ EROS_V281_HISTORY = {
     **EROS_V270_HISTORY,
     86: ("fk indexes", "3c957f7e862d7e9a72faa10bb22c69ac5227cb80a803853436e151eedad513c7e6c8b7531eac0f8872c958589a882f15"),
     87: ("function search path", "0bca779c4c9cb2e9b06636ca902723530ae5301fcdadad5538f0faf559b802391148c0525109e09dae35cce9ad0c3a7a"),
+}
+
+EROS_V284_HISTORY = {
+    **EROS_V281_HISTORY,
+    88: ("relationship status", "39054de94b448afa6bb0a303e4652b59134f583b0f772396ad4eafd44f2bd8d9fdfecaf1d1eb954d53af95a3f7f8c4fa"),
+    89: ("persona events cycle idx", "5d8da84308e96037151adc01894fb7f3e7e78327a15d3cd1802fea201ee13588667aaab70323c56c5881bb4966a3d3c2"),
+    90: ("fact groups", "0d17c7adfc4c2c869a6dc9cfc870650c3734a77051e08c8df7dbab1d73f0f93e22a30aca38ddff022903ae9a533a710b"),
 }
 
 
@@ -607,6 +615,14 @@ def _migration_stage_images(before: list[dict], image: str, *, rollback: bool = 
     if rollback:
         return [(image, "")]
     upstream_sha = _image_upstream_sha(image)
+    if upstream_sha == EROS_V284_SHA:
+        if versions == tuple(EROS_V281_HISTORY):
+            _validate_exact_history(before, EROS_V281_HISTORY)
+        elif versions == tuple(EROS_V284_HISTORY):
+            _validate_exact_history(before, EROS_V284_HISTORY)
+        elif versions != ():
+            raise RuntimeError("Eros v2.8.4 refuses an unknown or unsupported SQLx migration history")
+        return [(image, EROS_V284_SHA)]
     if upstream_sha == EROS_V281_SHA:
         versions = _versions(before)
         if versions not in ((), tuple(EROS_V270_HISTORY), tuple(EROS_V281_HISTORY)):
@@ -654,6 +670,12 @@ def _run_migration_chain(image: str, database: str, env: dict[str, str], before:
         elif upstream_sha == EROS_V270_SHA:
             delta = _migration_delta(prior, current)
             _validate_v270_history(current)
+            applied.extend(delta)
+        elif upstream_sha == EROS_V284_SHA:
+            delta = _migration_delta(prior, current)
+            _validate_exact_history(current, EROS_V284_HISTORY)
+            if _versions(prior) == tuple(EROS_V281_HISTORY) and [row["version"] for row in delta] != [88, 89, 90]:
+                raise RuntimeError("Eros v2.8.4 did not apply the exact 0088–0090 migration delta")
             applied.extend(delta)
         elif upstream_sha == EROS_V281_SHA:
             delta = _migration_delta(prior, current)
