@@ -1,0 +1,82 @@
+{
+  "schema_version": 3,
+  "project": "gpoint",
+  "environment": "production",
+  "authorization_id": "gpoint-haiku55-20261127-001",
+  "authorization_mode": "TASK_SCOPED_AUTO",
+  "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+  "source_instruction_identifier": "OWNER_2026-11-27_GPOINT_HAIKU55_RELEASE",
+  "owner_task_reference": "OWNER requested release and upgrade to 5.5 if ready; then explicitly accepted risk to existing synthetic test memory because there are no clients or important accumulated data. No request to delete data.",
+  "task": "Migrate 16 active Eros analytical tasks from Haiku 4.5 to 5.5 using tested per-task reasoning and JSON-object overrides. Update only matching model verification assertions; preserve stock engine and canonical release gates.",
+  "production_baseline_sha": "5de05e120e6b810f606831c032e6881f975c72c3",
+  "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+  "allowed_paths": [
+    ".release-authorizations/gpoint-haiku55-20261127-001.json",
+    ".github/workflows/gpoint-release.yml",
+    "scripts/eros-production-secrets.py",
+    "services/eros-engine/eros-production-model-config.toml",
+    "services/eros-engine/README.md",
+    "tests/test_eros_secret_provision.py",
+    "tests/test_eros_native_database_workflow.py",
+    "tests/test_eros_production_secrets_bootstrap.py"
+  ],
+  "allowed_operations": [
+    "integrate",
+    "preflight",
+    "deploy",
+    "verify",
+    "publish_evidence"
+  ],
+  "acceptance_criteria": [
+    "Exact main and live Eros baseline; stock Eros 2.8.1 unchanged.",
+    "Haiku 5.5 live synthetic probes, exact task-scoped model and reasoning settings, config tests and FULL pre-push PASS.",
+    "Hosted Tests, immutable Build, protected Eros E2E, backup/restore, SQLx, Kamal and Runtime Verify remain mandatory.",
+    "Verify live model config and aggregate world state without user content; report real inference separately."
+  ],
+  "exclusions": [
+    "No database reset or migration, no downstream patches, no new infrastructure, no secret changes/disclosure, no unrelated applications, no disabling release gates."
+  ],
+  "risk_contracts": {
+    "release_infrastructure": {
+      "allowed_paths": [
+        ".release-authorizations/gpoint-haiku55-20261127-001.json",
+        ".github/workflows/gpoint-release.yml",
+        "scripts/eros-production-secrets.py",
+        "services/eros-engine/eros-production-model-config.toml",
+        "services/eros-engine/README.md",
+        "tests/test_eros_secret_provision.py",
+        "tests/test_eros_native_database_workflow.py",
+        "tests/test_eros_production_secrets_bootstrap.py"
+      ],
+      "allowed_operations": [
+        "integrate",
+        "preflight",
+        "deploy",
+        "verify"
+      ],
+      "baseline_sha": "5de05e120e6b810f606831c032e6881f975c72c3",
+      "risk_description": "Only model configuration and matching model-ID verification updates, including explicit compatibility with old model for rollback. OWNER accepted remaining synthetic World Stories incomplete-profile risk, not actual deletion or bypass of protected checks.",
+      "required_gates": [
+        "Exact main and live Eros baseline; stock Eros 2.8.1 unchanged.",
+        "Haiku 5.5 live synthetic probes, exact task-scoped model and reasoning settings, config tests and FULL pre-push PASS.",
+        "Hosted Tests, immutable Build, protected Eros E2E, backup/restore, SQLx, Kamal and Runtime Verify remain mandatory.",
+        "Verify live model config and aggregate world state without user content; report real inference separately."
+      ],
+      "backup_plan": "Existing protected backup/restore, no reset.",
+      "rollback_plan": "Stop and reconcile failures. Canonical config revert to Haiku 4.5 with protected gates; retain previous image. No database restore/reset as part of this task.",
+      "stop_conditions": [
+        "unexpected migration",
+        "failed mandatory gate",
+        "baseline drift",
+        "ambiguous apply",
+        "secret exposure"
+      ]
+    }
+  },
+  "preauthorized_commits": [],
+  "preauthorized_paths": [],
+  "state": "ACTIVE",
+  "revoked": false,
+  "consumed": false,
+  "owner_task_commitment_sha256": "7b37d5e29db05b99841020c24bcdaec2493800c8cf51f33ee1dfab38681a1b2e"
+}
