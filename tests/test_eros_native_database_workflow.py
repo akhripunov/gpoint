@@ -495,7 +495,7 @@ def test_native_character_insights_use_upstream_haiku():
     assert config["tasks"]["character_insight_structuring"] == {
         "model": "anthropic/claude-haiku-5.5",
         "fallback": ["deepseek/deepseek-v4.1-flash-1017", "google/gemini-3.1-flash-lite"],
-        "temperature": 0.2, "max_tokens": 600,
+        "temperature": 0.2, "max_tokens": 2400,
     }
 
 
@@ -503,14 +503,14 @@ def test_stock_eros_text_task_parity():
     config = tomllib.loads((ROOT / "services/eros-engine/eros-production-model-config.toml").read_text())
     expected = {
         "chat_companion": (0.8, 1600),
-        "dreaming_scan": (0.2, 1024),
-        "arc_rewrite": (0.3, 1500),
+        "dreaming_scan": (0.2, 4096),
+        "arc_rewrite": (0.3, 2400),
         "character_insight_extraction": (0.2, 800),
-        "character_insight_structuring": (0.2, 600),
+        "character_insight_structuring": (0.2, 2400),
         "insight_extraction": (0.2, 1200),
-        "profile_rebuild": (0.2, 1200),
+        "profile_rebuild": (0.2, 2400),
         "user_insight_extraction": (0.2, 800),
-        "user_insight_structuring": (0.2, 600),
+        "user_insight_structuring": (0.2, 2400),
         "affinity_evaluation": (0.3, 400),
         "activity_judge": (0.3, 1200),
         "affinity_summary": (0.6, 200),

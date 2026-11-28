@@ -49,8 +49,8 @@ model = "voyage-4-lite"
 model = "anthropic/claude-haiku-5.5"
 fallback = ["deepseek/deepseek-v4.1-flash-1017", "google/gemini-3.1-flash-lite"]
 temperature = 0.2
-# 1024 is enough: 0 of 360 replayed scans exceeded 713 output tokens.
-max_tokens = 1024
+# V10.1 matched stress fixtures: 20/20 JSON/schema-valid at 4096; 1024/2048 were insufficient.
+max_tokens = 4096
 # Remove this entire [tasks.dreaming_scan] section to turn the relationship scan
 # off (neither the sweeper nor the inline scan then runs). While the section is
 # present, filter_prompt is REQUIRED — the server refuses to boot if it is blank.
@@ -131,7 +131,7 @@ journal 的铁律：
 model = "anthropic/claude-haiku-5.5"
 fallback = ["deepseek/deepseek-v4.1-flash-1017", "google/gemini-3.1-flash-lite"]
 temperature = 0.3
-max_tokens = 1500
+max_tokens = 2400
 
 # Native experimental Character Insights from Eros 2.8.1 (c7d63d77).
 # Use the upstream Claude Haiku 4.5 analysis route.
@@ -206,7 +206,7 @@ V8 更正与来源（优先于一般提取规则）：
 model = "anthropic/claude-haiku-5.5"
 fallback = ["deepseek/deepseek-v4.1-flash-1017", "google/gemini-3.1-flash-lite"]
 temperature = 0.2
-max_tokens = 600
+max_tokens = 2400
 
 [tasks.insight_extraction]
 model = "anthropic/claude-haiku-5.5"
@@ -310,7 +310,7 @@ V8 更正与来源（优先于一般提取规则）：
 model = "anthropic/claude-haiku-5.5"
 fallback = ["deepseek/deepseek-v4.1-flash-1017", "google/gemini-3.1-flash-lite"]
 temperature = 0.2
-max_tokens = 1200
+max_tokens = 2400
 
 # ─── User insights (EXPERIMENTAL, v1.6.0) ───────────────────────────────────
 # Builds a profile of the REAL USER *inside one relationship* — the mirror of
@@ -375,7 +375,7 @@ content 表达规则：第三人称、以「用户」开头；保留原始信息
 model = "anthropic/claude-haiku-5.5"
 fallback = ["deepseek/deepseek-v4.1-flash-1017", "google/gemini-3.1-flash-lite"]
 temperature = 0.2
-max_tokens = 600
+max_tokens = 2400
 
 # Per-turn affinity evaluation (post-process, semantic axes).
 # Grades how a single chat turn moved trust/intrigue/intimacy/tension — an
